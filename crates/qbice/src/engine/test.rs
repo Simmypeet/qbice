@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
@@ -50,8 +50,8 @@ impl Query for Division {
     type Value = i64;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct DivisionExecutor;
+#[derive(Debug, Default)]
+pub struct DivisionExecutor(pub AtomicUsize);
 
 impl<C: Config> Executor<Division, C> for DivisionExecutor {
     async fn execute(
@@ -59,6 +59,9 @@ impl<C: Config> Executor<Division, C> for DivisionExecutor {
         query: &Division,
         engine: &TrackedEngine<C>,
     ) -> Result<i64, CyclicQuery> {
+        // track usage
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let dividend = engine.query(&query.dividend).await?;
         let divisor = engine.query(&query.divisor).await?;
 
@@ -95,8 +98,8 @@ impl Query for SafeDivision {
     type Value = Option<i64>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct SafeDivisionExecutor;
+#[derive(Debug, Default)]
+pub struct SafeDivisionExecutor(pub AtomicUsize);
 
 impl<C: Config> Executor<SafeDivision, C> for SafeDivisionExecutor {
     async fn execute(
@@ -104,6 +107,9 @@ impl<C: Config> Executor<SafeDivision, C> for SafeDivisionExecutor {
         query: &SafeDivision,
         engine: &TrackedEngine<C>,
     ) -> Result<Option<i64>, CyclicQuery> {
+        // track usage
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let divisor = engine.query(&query.divisor).await?;
 
         if divisor == 0 {
@@ -128,8 +134,11 @@ impl SafeDivision {
 pub async fn safe_division_basic() {
     let mut engine = Engine::<DefaultConfig>::default();
 
-    engine.executor_registry.register(Arc::new(DivisionExecutor));
-    engine.executor_registry.register(Arc::new(SafeDivisionExecutor));
+    let division_ex = Arc::new(DivisionExecutor::default());
+    let safe_division_ex = Arc::new(SafeDivisionExecutor::default());
+
+    engine.executor_registry.register(division_ex.clone());
+    engine.executor_registry.register(safe_division_ex.clone());
 
     let mut input_session = engine.input_session();
 
@@ -146,5 +155,11 @@ pub async fn safe_division_basic() {
             .query(&SafeDivision::new(Variable(0), Variable(1)))
             .await,
         Ok(Some(21))
+    );
+
+    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+        1
     );
 }
