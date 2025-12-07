@@ -136,6 +136,8 @@ pub async fn safe_division_basic() {
     input_session.set_input(Variable(0), 42);
     input_session.set_input(Variable(1), 2);
 
+    drop(input_session);
+
     let engine = Arc::new(engine);
     let tracked_engine = engine.tracked();
 

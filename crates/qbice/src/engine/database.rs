@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 use dashmap::DashMap;
 
@@ -6,7 +9,7 @@ use crate::{
     config::Config,
     engine::{
         Engine, TrackedEngine,
-        database::meta::{QueryMeta, QueryWithID},
+        database::meta::{QueryMeta, QueryWithID, SetInputResult},
     },
     executor::CyclicQuery,
     query::{DynValue, Query, QueryID},
@@ -152,20 +155,45 @@ impl<C: Config> TrackedEngine<C> {
 pub struct InputSession<'x, C: Config> {
     engine: &'x mut Engine<C>,
     incremented: bool,
+    dirty_batch: VecDeque<QueryID>,
 }
 
 impl<C: Config> Engine<C> {
     /// Create a [`InputSession`] allowing to set input values for queries.
     #[must_use]
     pub const fn input_session(&mut self) -> InputSession<'_, C> {
-        InputSession { engine: self, incremented: false }
+        InputSession {
+            engine: self,
+            incremented: false,
+            dirty_batch: VecDeque::new(),
+        }
     }
 }
 
 impl<C: Config> InputSession<'_, C> {
     /// Set an input value for a query.
     pub fn set_input<Q: Query>(&mut self, query_key: Q, value: Q::Value) {
-        self.incremented |=
-            self.engine.database.set_input(query_key, value, self.incremented);
+        let query_id = self.engine.database.query_id(&query_key);
+
+        let SetInputResult { incremented, fingerprint_diff } = self
+            .engine
+            .database
+            .set_input(query_key, query_id, value, self.incremented);
+
+        self.incremented |= incremented;
+
+        if fingerprint_diff {
+            // insert into dirty batch
+            self.dirty_batch.push_back(query_id);
+        }
+    }
+}
+
+impl<C: Config> Drop for InputSession<'_, C> {
+    fn drop(&mut self) {
+        // mark all dirty queries as dirty
+        self.engine
+            .database
+            .dirty_queries(std::mem::take(&mut self.dirty_batch));
     }
 }

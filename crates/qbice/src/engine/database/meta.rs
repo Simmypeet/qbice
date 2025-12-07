@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock, atomic::AtomicBool};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, RwLock, atomic::AtomicBool},
+};
 
 use dashmap::{DashMap, DashSet};
 use enum_as_inner::EnumAsInner;
@@ -132,6 +135,10 @@ impl<C: Config> Database<C> {
     ) -> QueryWithID<'c, Q> {
         QueryWithID { id: query.query_identifier(self.initial_seed), query }
     }
+
+    pub(super) fn query_id<Q: Query>(&self, query: &Q) -> QueryID {
+        query.query_identifier(self.initial_seed)
+    }
 }
 
 pub enum FastPathResult<V> {
@@ -150,6 +157,12 @@ pub enum Continuation<C: Config> {
 pub enum SlowPathResult<C: Config> {
     TryAgain,
     Continuation(Arc<Notify>, Continuation<C>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SetInputResult {
+    pub incremented: bool,
+    pub fingerprint_diff: bool,
 }
 
 impl<C: Config> Database<C> {
@@ -423,12 +436,11 @@ impl<C: Config> Database<C> {
     pub(super) fn set_input<Q: Query>(
         &mut self,
         query_key: Q,
+        query_id: QueryID,
         value: Q::Value,
         incremented: bool,
-    ) -> bool {
-        let query_with_id = self.new_query_with_id(&query_key);
-
-        match self.query_metas.entry(query_with_id.id) {
+    ) -> SetInputResult {
+        match self.query_metas.entry(query_id) {
             dashmap::Entry::Occupied(mut occupied_entry) => {
                 let mut has_incremented = false;
                 let meta = occupied_entry.get_mut();
@@ -447,9 +459,11 @@ impl<C: Config> Database<C> {
                             ),
                         );
 
+                        let fingerprint_diff = hash != computed.fingerprint;
+
                         // if haven't incremented and the hash is different,
                         // update the timestamp
-                        if !incremented && hash != computed.fingerprint {
+                        if !incremented && fingerprint_diff {
                             self.current_timestamp.increment();
                             computed.verified_at = self.current_timestamp;
 
@@ -461,7 +475,10 @@ impl<C: Config> Database<C> {
                         computed.dirty = false;
                         computed.result = smallbox::smallbox!(value);
 
-                        has_incremented
+                        SetInputResult {
+                            incremented: has_incremented,
+                            fingerprint_diff,
+                        }
                     }
                 }
             }
@@ -486,7 +503,37 @@ impl<C: Config> Database<C> {
                     }),
                 });
 
-                false
+                SetInputResult { incremented, fingerprint_diff: false }
+            }
+        }
+    }
+
+    pub(super) fn dirty_queries(&mut self, mut queries: VecDeque<QueryID>) {
+        // TOOD: we could potentially have worker threads to process dirty
+        // queries
+        while let Some(query_id) = queries.pop_front() {
+            if let Some(mut meta) = self.query_metas.get_mut(&query_id) {
+                match &mut meta.state {
+                    State::Computing(_) => unreachable!(
+                        "shouldn't exist since we've obtained exclusive \
+                         mutable reference"
+                    ),
+
+                    State::Computed(computed) => {
+                        // short-circuit if already dirty
+                        if computed.dirty {
+                            continue;
+                        }
+
+                        computed.dirty = true;
+
+                        // propagate to callers
+                        for caller in computed.caller_info.caller_queries.iter()
+                        {
+                            queries.push_back(*caller.key());
+                        }
+                    }
+                }
             }
         }
     }
