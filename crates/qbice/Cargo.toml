@@ -17,9 +17,7 @@ static_assertions.workspace = true
 take_mut.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
-
-[dev.dependencies]
-flexstr.workspace = true
+tracing.workspace = true
 
 
 [lints]

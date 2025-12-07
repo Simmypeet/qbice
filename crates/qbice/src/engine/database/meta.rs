@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     ops::Not,
     pin::Pin,
     sync::{Arc, atomic::AtomicBool},
@@ -61,6 +61,7 @@ pub struct Computed<C: Config> {
     caller_info: CallerInfo,
     callee_info: CalleeInfo,
     verified_at: Timtestamp,
+    is_input: bool,
 
     fingerprint: Compact128,
 }
@@ -97,7 +98,7 @@ pub struct QueryMeta<C: Config> {
 }
 
 impl<C: Config> QueryMeta<C> {
-    pub async fn add_callee(&self, callee: QueryID) {
+    pub fn add_callee(&self, callee: QueryID) {
         let computing = self
             .state
             .as_computing()
@@ -109,7 +110,6 @@ impl<C: Config> QueryMeta<C> {
                 v.insert(None);
             }
         }
-        computing.callee_info.callee_order.write().await.push(callee);
     }
 
     pub fn is_running_in_scc(&self) -> bool {
@@ -204,7 +204,7 @@ impl<C: Config> Database<C> {
                 .is_some();
 
             // if haven't inserted, add to dependency order
-            if inserted {
+            if inserted.not() {
                 caller_computing
                     .callee_info
                     .callee_order
@@ -346,10 +346,18 @@ impl<C: Config> Database<C> {
                     return Ok(FastPathResult::ToSlowPath);
                 }
 
-                if let Some(caller) = caller {
+                if let Some(caller) = caller
+                    && required_value
+                {
                     // register dependency
                     let caller_source_meta =
                         self.query_metas.get(caller).unwrap();
+
+                    tracing::info!(
+                        "{:?} observes {:?}",
+                        caller_source_meta.original_key,
+                        callee_target_meta.original_key
+                    );
 
                     Self::observe_callee_fingerprint(
                         &caller_source_meta,
@@ -460,6 +468,7 @@ impl<C: Config> Database<C> {
                 callee_info: computing.callee_info,
                 verified_at: self.current_timestamp,
                 fingerprint: Compact128::from_u128(hash_128),
+                is_input: false,
             });
 
             meta
@@ -508,6 +517,7 @@ impl<C: Config> Database<C> {
                         // delete all callees
                         computed.callee_info = CalleeInfo::default();
                         computed.result = smallbox::smallbox!(value);
+                        computed.fingerprint = hash;
 
                         SetInputResult {
                             incremented: has_incremented,
@@ -526,6 +536,7 @@ impl<C: Config> Database<C> {
                         caller_info: CallerInfo::default(),
                         callee_info: CalleeInfo::default(),
                         verified_at: self.current_timestamp,
+                        is_input: true,
                         fingerprint: Compact128::from_u128(
                             DynValue::<C>::hash_128_value(
                                 &value,
@@ -544,8 +555,12 @@ impl<C: Config> Database<C> {
     pub(super) fn dirty_queries(&mut self, mut queries: VecDeque<QueryID>) {
         // OPTIMIZE: we could potentially have worker threads to process dirty
         // queries
+        let mut dirtied = HashSet::<QueryID>::default();
+
         while let Some(query_id) = queries.pop_front() {
             if let Some(mut meta) = self.query_metas.get_mut(&query_id) {
+                tracing::info!("Dirtying query {:?}", meta.original_key);
+
                 match &mut meta.state {
                     State::Computing(_) => unreachable!(
                         "shouldn't exist since we've obtained exclusive \
@@ -572,12 +587,11 @@ impl<C: Config> Database<C> {
                                 .expect("should be present");
 
                             let obs = obs.as_mut().expect("should be present");
-                            let has_already_dirty = obs.dirty;
 
                             obs.dirty = true;
 
                             // if hasn't already dirty, add to dirty batch
-                            if !has_already_dirty {
+                            if dirtied.insert(*caller.key()) {
                                 queries.push_back(*caller.key());
                             }
                         }
@@ -612,9 +626,40 @@ impl<C: Config> Database<C> {
                             .caller_info
                             .caller_queries
                             .remove(caller_source)
-                            .is_some(),
-                        "the backward dependency should exist"
+                            .is_some()
                     );
+
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn is_query_input(&self, query_id: &QueryID) -> bool {
+        self.try_get_computed(query_id, |computed| computed.is_input).await
+    }
+
+    async fn try_get_computed<T>(
+        &self,
+        query_id: &QueryID,
+        f: impl FnOnce(&Computed<C>) -> T,
+    ) -> T {
+        loop {
+            let meta =
+                self.query_metas.get(query_id).expect("should be present");
+
+            match &meta.state {
+                State::Computing(computing) => {
+                    // still computing, wait and try again
+                    let noti = computing.notification.clone();
+                    let notified = noti.notified();
+                    drop(meta);
+
+                    notified.await;
+                }
+
+                State::Computed(computed) => {
+                    return f(computed);
                 }
             }
         }
@@ -622,6 +667,10 @@ impl<C: Config> Database<C> {
 }
 
 impl<C: Config> Engine<C> {
+    #[tracing::instrument(
+        skip(self, query_id, computed_callee),
+        level = "info"
+    )]
     pub(super) async fn should_recompute_query<Q: Query>(
         self: &Arc<Self>,
         query_id: &QueryWithID<'_, Q>,
@@ -648,27 +697,44 @@ impl<C: Config> Engine<C> {
                 }
             }
 
-            // recursively repair the callee.
-            // NOTE: we clone the original key here since we cannot hold the
-            // read lock on the query metas while the repair is happening.
-            let original_callee_value = self
-                .database
-                .query_metas
-                .get(callee)
-                .expect("should be present")
-                .original_key
-                .dyn_clone();
+            // NOTE: if the callee is an input (explicitly set), it's impossible
+            // to try to repair it, so we'll skip repairing and directly
+            // compare the fingerprint.
+            if !self.database.is_query_input(callee).await {
+                // recursively repair the callee.
+                // NOTE: we clone the original key here since we cannot hold the
+                // read lock on the query metas while the repair is happening.
+                let original_callee_value = self
+                    .database
+                    .query_metas
+                    .get(callee)
+                    .expect("should be present")
+                    .original_key
+                    .dyn_clone();
 
-            // NOTE: we must repair the callee through executor registry since
-            // it's impossible to statically know the type of the query here.
-            let entry = self.executor_registry.get_executor_entry::<Q>();
-            let _ = entry
-                .recursively_repair_query(
-                    self,
-                    &*original_callee_value as &dyn Any,
-                    &query_id.id,
-                )
-                .await;
+                // NOTE: we must repair the callee through executor registry
+                // since it's impossible to statically know the
+                // type of the query here.
+                let entry = self
+                    .executor_registry
+                    .get_executor_entry_by_type_id(&callee.stable_type_id());
+
+                let callee_value: &dyn DynQuery<C> = &*original_callee_value;
+                let callee_value_any = callee_value as &dyn Any;
+
+                tracing::info!(
+                    "{:?} is repairing {:?}",
+                    query_id.query,
+                    callee_value
+                );
+                let _ = entry
+                    .recursively_repair_query(
+                        self,
+                        callee_value_any,
+                        &query_id.id,
+                    )
+                    .await;
+            }
 
             // SAFETY: after the repair, the callee's state should be at
             // computed at the current timestamp.
@@ -734,6 +800,9 @@ impl<C: Config> Engine<C> {
         //
         // however, the callers should still be kept since they are still valid.
         // if it has to be unwired, it should be done by the upper chain.
+        //
+        // we must clear all the current callees first before recomputing since
+        // the previous repairing add dependencies that are no longer valid.
 
         {
             let callees = computed_callee.callee_info.callee_order.read().await;
@@ -745,7 +814,21 @@ impl<C: Config> Engine<C> {
                     .unwire_backward_dependencies(&query_id.id, callee)
                     .await;
             }
+
+            // clear all callees, that might have been added during repairing
+            self.database
+                .query_metas
+                .get_mut(&query_id.id)
+                .expect("should be present")
+                .state
+                .as_computing_mut()
+                .expect("should've been runninng")
+                .callee_info = CalleeInfo::default();
         }
+
+        // now, execute the query again
+        self.execute_query(query_id, Some(computed_callee.caller_info), notify)
+            .await;
     }
 
     pub(crate) fn recursively_repair_query<'a, Q: Query>(

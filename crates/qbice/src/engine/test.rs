@@ -163,3 +163,135 @@ pub async fn safe_division_basic() {
         1
     );
 }
+
+#[tokio::test]
+async fn division_input_change() {
+    let mut engine = Engine::<DefaultConfig>::default();
+
+    let division_ex = Arc::new(DivisionExecutor::default());
+
+    engine.executor_registry.register(division_ex.clone());
+
+    let mut input_session = engine.input_session();
+
+    input_session.set_input(Variable(0), 40);
+    input_session.set_input(Variable(1), 4);
+
+    drop(input_session);
+
+    let mut engine = Arc::new(engine);
+    let tracked_engine = engine.clone().tracked();
+
+    assert_eq!(
+        tracked_engine.query(&Division::new(Variable(0), Variable(1))).await,
+        Ok(10)
+    );
+
+    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    // drop tracked engine to release references
+    drop(tracked_engine);
+
+    {
+        let mut input_session =
+            Arc::get_mut(&mut engine).unwrap().input_session();
+
+        input_session.set_input(Variable(1), 2);
+    }
+
+    let tracked_engine = engine.tracked();
+
+    assert_eq!(
+        tracked_engine.query(&Division::new(Variable(0), Variable(1))).await,
+        Ok(20)
+    );
+
+    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn safe_division_input_changes() {
+    let mut engine = Engine::<DefaultConfig>::default();
+
+    let division_ex = Arc::new(DivisionExecutor::default());
+    let safe_division_ex = Arc::new(SafeDivisionExecutor::default());
+
+    engine.executor_registry.register(division_ex.clone());
+    engine.executor_registry.register(safe_division_ex.clone());
+
+    let mut input_session = engine.input_session();
+
+    input_session.set_input(Variable(0), 42);
+    input_session.set_input(Variable(1), 2);
+
+    drop(input_session);
+
+    let mut engine = Arc::new(engine);
+    let tracked_engine = engine.clone().tracked();
+
+    assert_eq!(
+        tracked_engine
+            .query(&SafeDivision::new(Variable(0), Variable(1)))
+            .await,
+        Ok(Some(21))
+    );
+
+    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // drop tracked engine to release references
+    drop(tracked_engine);
+
+    // now make it divide by zero
+    {
+        let mut input_session =
+            Arc::get_mut(&mut engine).unwrap().input_session();
+
+        input_session.set_input(Variable(1), 0);
+    }
+
+    let tracked_engine = engine.clone().tracked();
+
+    assert_eq!(
+        tracked_engine
+            .query(&SafeDivision::new(Variable(0), Variable(1)))
+            .await,
+        Ok(None)
+    );
+
+    // division executor should not have been called again, but safe division
+    // should have
+    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+
+    // now restore to original value
+    drop(tracked_engine);
+    {
+        let mut input_session =
+            Arc::get_mut(&mut engine).unwrap().input_session();
+
+        input_session.set_input(Variable(1), 2);
+    }
+
+    let tracked_engine = engine.tracked();
+    assert_eq!(
+        tracked_engine
+            .query(&SafeDivision::new(Variable(0), Variable(1)))
+            .await,
+        Ok(Some(21))
+    );
+
+    // this time divisor executor reused the cached value but safe division
+    // had to run again
+    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+        3
+    );
+}

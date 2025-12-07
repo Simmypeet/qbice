@@ -30,6 +30,7 @@ enum-as-inner = "0.6.1"
 take_mut = "0.2.2"
 thiserror = "2.0.17"
 parking_lot = "0.12.5"
+tracing = "0.1.43"
 
 [workspace.lints.rust]
 missing_docs = "deny"

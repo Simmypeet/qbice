@@ -1,11 +1,8 @@
 //! Defines the [`Executor`] trait for executing queries.
 
-use std::{
-    any::{Any, TypeId},
-    collections::HashMap,
-    pin::Pin,
-    sync::Arc,
-};
+use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
+
+use qbice_stable_type_id::StableTypeID;
 
 use crate::{
     config::Config,
@@ -119,7 +116,7 @@ impl<C: Config> Entry<C> {
 /// registering and retrieving executors for different query key types.
 #[derive(Debug, Default)]
 pub struct Registry<C: Config> {
-    executors_by_key_type_id: HashMap<TypeId, Entry<C>>,
+    executors_by_key_type_id: HashMap<StableTypeID, Entry<C>>,
 }
 
 impl<C: Config> Registry<C> {
@@ -129,13 +126,24 @@ impl<C: Config> Registry<C> {
         executor: Arc<E>,
     ) {
         let entry = Entry::new::<Q, E>(executor);
-        self.executors_by_key_type_id.insert(TypeId::of::<Q>(), entry);
+        self.executors_by_key_type_id.insert(Q::STABLE_TYPE_ID, entry);
+    }
+
+    /// Retrieve the executor entry for the given query type id.
+    #[must_use]
+    pub(crate) fn get_executor_entry_by_type_id(
+        &self,
+        type_id: &StableTypeID,
+    ) -> &Entry<C> {
+        self.executors_by_key_type_id.get(type_id).unwrap_or_else(|| {
+            panic!("Failed to find executor for query type id: {type_id:?}")
+        })
     }
 
     /// Retrieve the executor entry for the given query type.
     #[must_use]
     pub(crate) fn get_executor_entry<Q: Query>(&self) -> &Entry<C> {
-        self.executors_by_key_type_id.get(&TypeId::of::<Q>()).unwrap_or_else(
+        self.executors_by_key_type_id.get(&Q::STABLE_TYPE_ID).unwrap_or_else(
             || {
                 panic!(
                     "Failed to find executor for query name: {}",

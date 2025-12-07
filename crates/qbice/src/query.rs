@@ -13,7 +13,16 @@ use crate::config::Config;
 /// which is associated with a specific output value type. This is merely an
 /// interface definition; query executors define the actual behavior of queries.
 pub trait Query:
-    StableHash + Identifiable + Any + Eq + Hash + Clone + Send + Sync + 'static
+    StableHash
+    + Identifiable
+    + Any
+    + Eq
+    + Hash
+    + Clone
+    + Debug
+    + Send
+    + Sync
+    + 'static
 {
     /// The output value type associated with this query.
     type Value: 'static + Send + Sync + Clone + Debug + StableHash;
@@ -87,6 +96,9 @@ pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
 
     /// Clones this query into a type erased box.
     fn dyn_clone(&self) -> DynQueryBox<C>;
+
+    /// Formats this query for debugging purposes.
+    fn dbg_dyn(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
 }
 
 impl<Q: Query, C: Config> DynQuery<C> for Q {
@@ -116,6 +128,10 @@ impl<Q: Query, C: Config> DynQuery<C> for Q {
     fn dyn_clone(&self) -> DynQueryBox<C> {
         let boxed: DynQueryBox<C> = smallbox::smallbox!(self.clone());
         boxed
+    }
+
+    fn dbg_dyn(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
     }
 }
 
@@ -149,6 +165,18 @@ impl<C: Config> Hash for dyn DynQuery<C> + '_ {
 pub struct QueryID {
     stable_type_id: StableTypeID,
     hash_128: (u64, u64),
+}
+
+impl QueryID {
+    /// Returns the stable type ID of the query.
+    #[must_use]
+    pub const fn stable_type_id(&self) -> StableTypeID { self.stable_type_id }
+
+    /// Returns the 128-bit hash of the query.
+    #[must_use]
+    pub const fn hash_128(&self) -> u128 {
+        ((self.hash_128.0 as u128) << 64) | (self.hash_128.1 as u128)
+    }
 }
 
 /// A type aliased for boxed-type-erased query value.
@@ -199,5 +227,11 @@ impl<C: Config> dyn DynValue<C> {
 impl<C: Config> Debug for dyn DynValue<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.dyn_dbg(f)
+    }
+}
+
+impl<C: Config> Debug for dyn DynQuery<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.dbg_dyn(f)
     }
 }
