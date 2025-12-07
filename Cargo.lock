@@ -149,6 +149,7 @@ version = "0.1.0-beta.2"
 dependencies = [
  "dashmap",
  "enum-as-inner",
+ "parking_lot",
  "qbice_stable_hash",
  "qbice_stable_type_id",
  "smallbox",

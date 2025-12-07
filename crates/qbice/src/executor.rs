@@ -9,8 +9,8 @@ use std::{
 
 use crate::{
     config::Config,
-    engine::TrackedEngine,
-    query::{DynValueBox, Query},
+    engine::{Engine, TrackedEngine},
+    query::{DynValueBox, Query, QueryID},
 };
 
 /// Error indicating that a cyclic query dependency was detected.
@@ -71,18 +71,30 @@ type InvokeExecutorFn<C> = for<'a> fn(
 ) -> Pin<
     Box<dyn Future<Output = Result<DynValueBox<C>, CyclicQuery>> + 'a>,
 >;
+type RecursivelyRepairQueryFn<C> = for<'a> fn(
+    engine: &'a Arc<Engine<C>>,
+    key: &'a dyn Any,
+    called_from: &'a QueryID,
+) -> Pin<
+    Box<dyn std::future::Future<Output = Result<(), CyclicQuery>> + 'a>,
+>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Entry<C: Config> {
     executor: Arc<dyn Any + Send + Sync>,
     invoke_executor: InvokeExecutorFn<C>,
+    recursively_repair_query: RecursivelyRepairQueryFn<C>,
 }
 
 impl<C: Config> Entry<C> {
     pub fn new<Q: Query, E: Executor<Q, C> + 'static>(
         executor: Arc<E>,
     ) -> Self {
-        Self { executor, invoke_executor: invoke_executor::<C, E, Q> }
+        Self {
+            executor,
+            invoke_executor: invoke_executor::<C, E, Q>,
+            recursively_repair_query: Engine::recursively_repair_query::<Q>,
+        }
     }
 
     pub async fn invoke_executor(
@@ -91,6 +103,15 @@ impl<C: Config> Entry<C> {
         engine: &mut TrackedEngine<C>,
     ) -> Result<DynValueBox<C>, CyclicQuery> {
         (self.invoke_executor)(query_key, self.executor.as_ref(), engine).await
+    }
+
+    pub async fn recursively_repair_query(
+        &self,
+        engine: &Arc<Engine<C>>,
+        query_key: &dyn Any,
+        called_from: &QueryID,
+    ) -> Result<(), CyclicQuery> {
+        (self.recursively_repair_query)(engine, query_key, called_from).await
     }
 }
 
@@ -113,7 +134,14 @@ impl<C: Config> Registry<C> {
 
     /// Retrieve the executor entry for the given query type.
     #[must_use]
-    pub(crate) fn get_executor_entry<Q: Query>(&self) -> Option<&Entry<C>> {
-        self.executors_by_key_type_id.get(&TypeId::of::<Q>())
+    pub(crate) fn get_executor_entry<Q: Query>(&self) -> &Entry<C> {
+        self.executors_by_key_type_id.get(&TypeId::of::<Q>()).unwrap_or_else(
+            || {
+                panic!(
+                    "Failed to find executor for query name: {}",
+                    std::any::type_name::<Q>()
+                )
+            },
+        )
     }
 }

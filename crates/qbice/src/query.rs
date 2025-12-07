@@ -42,10 +42,13 @@ pub enum QueryKind {
     Normal,
 
     /// A projection query whose sole purpose is to extract a part of another
-    /// query of kind [`Self::Firewall`]  or [`Self::Projection`].
+    /// query of kind [`QueryKind::Firewall`]  or [`QueryKind::Projection`].
     ///
     /// This kind of query should be very-fast to compute, as it is expected
     /// to be used frequently internally as a part of dependency tracking.
+    ///
+    /// It's sole purpose is to prevent the dirty propagation from crossing
+    /// certain boundaries defined by firewall queries.
     Projection,
 
     /// A firewall query that acts as a boundary between a group of queries
@@ -55,7 +58,7 @@ pub enum QueryKind {
 /// A type erased query interface.
 ///
 /// Used internally for dynamic dispatch of queries.
-pub trait DynQuery: 'static + Send + Sync + Any {
+pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
     /// Returns the stable type ID of the query.
     fn stable_type_id(&self) -> StableTypeID;
 
@@ -63,7 +66,7 @@ pub trait DynQuery: 'static + Send + Sync + Any {
     fn hash_128(&self, initial_seed: u64) -> u128;
 
     /// Compares this query with another dynamically typed query for equality.
-    fn eq_dyn(&self, other: &dyn DynQuery) -> bool;
+    fn eq_dyn(&self, other: &dyn DynQuery<C>) -> bool;
 
     /// Hashes this query into the std hash state.
     fn hash_dyn(&self, state: &mut dyn std::hash::Hasher);
@@ -81,9 +84,12 @@ pub trait DynQuery: 'static + Send + Sync + Any {
             },
         }
     }
+
+    /// Clones this query into a type erased box.
+    fn dyn_clone(&self) -> DynQueryBox<C>;
 }
 
-impl<Q: Query> DynQuery for Q {
+impl<Q: Query, C: Config> DynQuery<C> for Q {
     fn stable_type_id(&self) -> StableTypeID { Q::STABLE_TYPE_ID }
 
     fn hash_128(&self, initial_seed: u64) -> u128 {
@@ -95,7 +101,7 @@ impl<Q: Query> DynQuery for Q {
         hasher.finish()
     }
 
-    fn eq_dyn(&self, other: &dyn DynQuery) -> bool {
+    fn eq_dyn(&self, other: &dyn DynQuery<C>) -> bool {
         let Some(other_q) = other.downcast_query::<Q>() else {
             return false;
         };
@@ -106,9 +112,14 @@ impl<Q: Query> DynQuery for Q {
     fn hash_dyn(&self, mut state: &mut dyn std::hash::Hasher) {
         std::hash::Hash::hash(self, &mut state);
     }
+
+    fn dyn_clone(&self) -> DynQueryBox<C> {
+        let boxed: DynQueryBox<C> = smallbox::smallbox!(self.clone());
+        boxed
+    }
 }
 
-impl dyn DynQuery + '_ {
+impl<C: Config> dyn DynQuery<C> + '_ {
     /// Attempt to downcast the query to a specific query type.
     pub fn downcast_query<Q: Query>(&self) -> Option<&Q> {
         let as_any = self as &dyn Any;
@@ -116,13 +127,13 @@ impl dyn DynQuery + '_ {
     }
 }
 
-impl PartialEq for dyn DynQuery + '_ {
+impl<C: Config> PartialEq for dyn DynQuery<C> + '_ {
     fn eq(&self, other: &Self) -> bool { self.eq_dyn(other) }
 }
 
-impl Eq for dyn DynQuery + '_ {}
+impl<C: Config> Eq for dyn DynQuery<C> + '_ {}
 
-impl Hash for dyn DynQuery + '_ {
+impl<C: Config> Hash for dyn DynQuery<C> + '_ {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.hash_dyn(state);
     }
@@ -143,6 +154,10 @@ pub struct QueryID {
 /// A type aliased for boxed-type-erased query value.
 pub type DynValueBox<C> =
     smallbox::SmallBox<dyn DynValue<C>, <C as Config>::Storage>;
+
+/// A type aliased for boxed-type-erased query key.
+pub type DynQueryBox<C> =
+    smallbox::SmallBox<dyn DynQuery<C>, <C as Config>::Storage>;
 
 /// A type erased value interface for [`Query::Value`].
 pub trait DynValue<C: Config>: 'static + Send + Sync + Any {
