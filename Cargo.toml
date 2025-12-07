@@ -1,0 +1,62 @@
+[workspace]
+members = [
+    "crates/qbice",
+    "crates/stable_hash",
+    "crates/stable_hash_derive",
+    "crates/stable_type_id",
+    "crates/identifiable_derive_lib",
+    "crates/identifiable_derive",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-beta.2"
+authors = ["Simmypeet"]
+description = "The Query-Based Incremental Computation Engine"
+edition = "2024"
+rust-version = "1.88.0"
+
+[workspace.dependencies]
+siphasher = "1.0.1"
+static_assertions = "1.1.0"
+dashmap = "6.1.0"
+flexstr = "0.9.1"
+quote = "1.0.42"
+syn = "2.0.111"
+proc-macro2 = "1.0.103"
+smallbox = "0.8.8"
+tokio = { version = "1.48.0", features = ["full"] }
+enum-as-inner = "0.6.1"
+take_mut = "0.2.2"
+thiserror = "2.0.17"
+
+[workspace.lints.rust]
+missing_docs = "deny"
+missing_copy_implementations = "deny"
+missing_debug_implementations = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# this generates errors on enum-as-inner in nightly toolchain
+double-parens = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+use_self = "deny"
+useless_let_if_seq = "deny"
+set_contains_or_insert = "deny"
+option_if_let_else = "deny"
+needless_collect = "deny"
+missing_const_for_fn = "deny"
+equatable_if_let = "deny"
+redundant_clone = "deny"
+cognitive_complexity = "deny"
+type_repetition_in_bounds = "deny"
+trait_duplication_in_bounds = "deny"
+collection_is_never_read = "deny"
+branches_sharing_code = "deny"
+iter_on_empty_collections = "deny"
+iter_on_single_items = "deny"
