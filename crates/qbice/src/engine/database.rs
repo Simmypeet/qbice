@@ -181,8 +181,7 @@ impl<C: Config> Engine<C> {
             // now the `query` state is held in computing state.
             // if `lock_computing` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
-            let Some(lock_computing) = self.database.lock_computing(query)
-            else {
+            let Some(lock_computing) = self.lock_computing(query) else {
                 // try the fast path again
                 continue;
             };
@@ -221,6 +220,70 @@ impl<C: Config> Engine<C> {
 
             Ok(())
         })
+    }
+
+    pub(super) fn lock_computing<Q: Query>(
+        &self,
+        query_id: &QueryWithID<'_, Q>,
+    ) -> Option<ComputingLockGuard<'_, C>> {
+        match self.database.query_metas.entry(*query_id.id()) {
+            dashmap::Entry::Occupied(mut occupied_entry) => {
+                match occupied_entry.get().state() {
+                    State::Computing(_) => {
+                        // another thread is computing the query, try again
+                        None
+                    }
+
+                    State::Computed(computed) => {
+                        if computed.verified_at()
+                            == self.database.current_timestamp
+                        {
+                            // already computed and verified, try fast path
+                            // and retrieve value again
+                            return None;
+                        }
+
+                        let noti = Arc::new(Notify::new());
+
+                        let computed = occupied_entry
+                            .get_mut()
+                            .replace_state(State::Computing(Computing::new(
+                                noti.clone(),
+                            )))
+                            .into_computed()
+                            .expect("should've been computed");
+
+                        Some(ComputingLockGuard {
+                            database: &self.database,
+                            query_id: *query_id.id(),
+                            existing_computed: Some(computed),
+                            defused: false,
+                            notification: noti,
+                        })
+                    }
+                }
+            }
+
+            dashmap::Entry::Vacant(vacant_entry) => {
+                let noti = Arc::new(Notify::new());
+                let executor = self.executor_registry.get_executor_entry::<Q>();
+                let fresh_query_meta = QueryMeta::new(
+                    query_id.query().clone(),
+                    State::Computing(Computing::new(noti.clone())),
+                    executor.obtain_execution_style(),
+                );
+
+                vacant_entry.insert(fresh_query_meta);
+
+                Some(ComputingLockGuard {
+                    database: &self.database,
+                    query_id: *query_id.id(),
+                    existing_computed: None,
+                    defused: false,
+                    notification: noti,
+                })
+            }
+        }
     }
 }
 
@@ -465,66 +528,6 @@ impl<C: Config> Database<C> {
             .get_mut(query_id)
             .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
             .map(|x| x.get_computed_mut())
-    }
-
-    pub(super) fn lock_computing<Q: Query>(
-        &self,
-        query_id: &QueryWithID<'_, Q>,
-    ) -> Option<ComputingLockGuard<'_, C>> {
-        match self.query_metas.entry(*query_id.id()) {
-            dashmap::Entry::Occupied(mut occupied_entry) => {
-                match occupied_entry.get().state() {
-                    State::Computing(_) => {
-                        // another thread is computing the query, try again
-                        None
-                    }
-
-                    State::Computed(computed) => {
-                        if computed.verified_at() == self.current_timestamp {
-                            // already computed and verified, try fast path
-                            // and retrieve value again
-                            return None;
-                        }
-
-                        let noti = Arc::new(Notify::new());
-
-                        let computed = occupied_entry
-                            .get_mut()
-                            .replace_state(State::Computing(Computing::new(
-                                noti.clone(),
-                            )))
-                            .into_computed()
-                            .expect("should've been computed");
-
-                        Some(ComputingLockGuard {
-                            database: self,
-                            query_id: *query_id.id(),
-                            existing_computed: Some(computed),
-                            defused: false,
-                            notification: noti,
-                        })
-                    }
-                }
-            }
-
-            dashmap::Entry::Vacant(vacant_entry) => {
-                let noti = Arc::new(Notify::new());
-                let fresh_query_meta = QueryMeta::new(
-                    query_id.query().clone(),
-                    State::Computing(Computing::new(noti.clone())),
-                );
-
-                vacant_entry.insert(fresh_query_meta);
-
-                Some(ComputingLockGuard {
-                    database: self,
-                    query_id: *query_id.id(),
-                    existing_computed: None,
-                    defused: false,
-                    notification: noti,
-                })
-            }
-        }
     }
 
     pub(super) fn set_computed_from_existing_lock_computing_and_defuse(

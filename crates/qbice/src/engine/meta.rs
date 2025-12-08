@@ -21,7 +21,8 @@ use crate::{
     },
     executor::CyclicError,
     query::{
-        DynQuery, DynQueryBox, DynValue, DynValueBox, Query, QueryID, QueryKind,
+        DynQuery, DynQueryBox, DynValue, DynValueBox, ExecutionStyle, Query,
+        QueryID,
     },
 };
 
@@ -139,8 +140,18 @@ pub struct QueryMeta<C: Config> {
     state: State<C>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum QueryKind {
+    Input,
+    Execute(ExecutionStyle),
+}
+
 impl<C: Config> QueryMeta<C> {
-    pub fn new<Q>(original_key: Q, state: State<C>) -> Self
+    pub fn new<Q>(
+        original_key: Q,
+        state: State<C>,
+        execution_style: ExecutionStyle,
+    ) -> Self
     where
         Q: Query,
     {
@@ -148,7 +159,7 @@ impl<C: Config> QueryMeta<C> {
             original_key: smallbox::smallbox!(original_key),
             caller_info: CallerInfo::default(),
             is_input: false,
-            query_kind: Q::query_kind(),
+            query_kind: QueryKind::Execute(execution_style),
             state,
         }
     }
@@ -165,7 +176,7 @@ impl<C: Config> QueryMeta<C> {
             original_key: smallbox::smallbox!(query_key),
             caller_info: CallerInfo::default(),
             is_input: true,
-            query_kind: Q::query_kind(),
+            query_kind: QueryKind::Input,
             state: State::Computed(Computed {
                 result: smallbox::smallbox!(query_value),
                 callee_info: CalleeInfo::default(),
@@ -323,7 +334,10 @@ impl<C: Config> Database<C> {
             );
 
             match callee_kind {
-                QueryKind::Normal | QueryKind::Projection => {
+                QueryKind::Input
+                | QueryKind::Execute(
+                    ExecutionStyle::Normal | ExecutionStyle::Projection,
+                ) => {
                     for dep in
                         &computed_callee.callee_info.transitive_firewall_callees
                     {
@@ -332,7 +346,7 @@ impl<C: Config> Database<C> {
                             .insert(*dep);
                     }
                 }
-                QueryKind::Firewall => {
+                QueryKind::Execute(ExecutionStyle::Firewall) => {
                     caller_callee_info
                         .transitive_firewall_callees
                         .insert(*callee_target);
@@ -772,7 +786,8 @@ impl<C: Config> Engine<C> {
         );
 
         let value = result.unwrap_or_else(|_| {
-            let smallbox: DynValueBox<C> = smallbox::smallbox!(Q::scc_value());
+            let smallbox: DynValueBox<C> =
+                smallbox::smallbox!(entry.obtain_scc_value::<Q>());
 
             smallbox
         });

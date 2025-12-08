@@ -504,10 +504,6 @@ pub struct CyclicQueryA;
 
 impl Query for CyclicQueryA {
     type Value = i32;
-
-    fn scc_value() -> Self::Value {
-        42 // default value to use in case of cycle
-    }
 }
 
 #[derive(
@@ -526,10 +522,6 @@ pub struct CyclicQueryB;
 
 impl Query for CyclicQueryB {
     type Value = i32;
-
-    fn scc_value() -> Self::Value {
-        84 // default value to use in case of cycle
-    }
 }
 
 #[derive(
@@ -573,6 +565,10 @@ impl<C: Config> Executor<CyclicQueryA, C> for CyclicExecutorA {
 
         Ok(b_value + 10)
     }
+
+    fn scc_value() -> i32 {
+        42 // default value to use in case of cycle
+    }
 }
 
 #[derive(Debug, Default)]
@@ -596,6 +592,10 @@ impl<C: Config> Executor<CyclicQueryB, C> for CyclicExecutorB {
         // This completes the cycle: B depends on A, A depends on B
         let a_value = engine.query(&CyclicQueryA).await?;
         Ok(a_value + 20)
+    }
+
+    fn scc_value() -> i32 {
+        84 // default value to use in case of cycle
     }
 }
 
@@ -1623,8 +1623,6 @@ pub struct ConditionalCyclicQueryA;
 
 impl Query for ConditionalCyclicQueryA {
     type Value = i32;
-
-    fn scc_value() -> Self::Value { 0 }
 }
 
 #[derive(
@@ -1643,8 +1641,6 @@ pub struct ConditionalCyclicQueryB;
 
 impl Query for ConditionalCyclicQueryB {
     type Value = i32;
-
-    fn scc_value() -> Self::Value { 0 }
 }
 
 #[derive(
@@ -1704,6 +1700,8 @@ impl<C: Config> Executor<ConditionalCyclicQueryA, C>
             control_value * 100
         })
     }
+
+    fn scc_value() -> i32 { 0 }
 }
 
 #[derive(Debug, Default)]
@@ -1745,6 +1743,8 @@ impl<C: Config> Executor<ConditionalCyclicQueryB, C>
             control_value * 200
         })
     }
+
+    fn scc_value() -> i32 { 0 }
 }
 
 #[tokio::test]

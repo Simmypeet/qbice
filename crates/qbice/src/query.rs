@@ -26,19 +26,6 @@ pub trait Query:
 {
     /// The output value type associated with this query.
     type Value: 'static + Send + Sync + Clone + Debug + StableHash;
-
-    /// The kind of the query.
-    ///
-    /// See [`QueryKind`] for details.
-    #[must_use]
-    fn query_kind() -> QueryKind { QueryKind::Normal }
-
-    /// The default value for the SCC (Strongly Connected Component) value.
-    ///
-    /// This is the value to returned when another query that is not a part of a
-    /// SCC try to query for it.
-    #[must_use]
-    fn scc_value() -> Self::Value { panic!("SCC value is not specified") }
 }
 
 /// Specifies the kind of a query.
@@ -46,7 +33,7 @@ pub trait Query:
 /// The query kinds other than `Normal` are mainly used for optimization
 /// purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum QueryKind {
+pub enum ExecutionStyle {
     /// A normal query without any special properties.
     Normal,
 

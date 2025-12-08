@@ -1,13 +1,15 @@
 //! Defines the [`Executor`] trait for executing queries.
 
-use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
+use std::{
+    any::Any, collections::HashMap, mem::MaybeUninit, pin::Pin, sync::Arc,
+};
 
 use qbice_stable_type_id::StableTypeID;
 
 use crate::{
     config::Config,
     engine::{Engine, TrackedEngine},
-    query::{DynValueBox, Query, QueryID},
+    query::{DynValueBox, ExecutionStyle, Query, QueryID},
 };
 
 /// Error indicating that a cyclic query dependency was detected.
@@ -38,6 +40,17 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     ) -> impl Future<Output = Result<Q::Value, CyclicError>>
     + Send
     + use<'s, 'q, 'e, Self, Q, C>;
+
+    /// The kind of the query.
+    #[must_use]
+    fn execution_style() -> ExecutionStyle { ExecutionStyle::Normal }
+
+    /// The default value for the SCC (Strongly Connected Component) value.
+    ///
+    /// This is the value to returned when another query that is not a part of a
+    /// SCC try to query for it.
+    #[must_use]
+    fn scc_value() -> Q::Value { panic!("SCC value is not specified") }
 }
 
 fn invoke_executor<
@@ -78,12 +91,40 @@ type RecursivelyRepairQueryFn<C> = for<'a> fn(
 ) -> Pin<
     Box<dyn std::future::Future<Output = Result<(), CyclicError>> + Send + 'a>,
 >;
+type ObtainSccValueFn = for<'a> fn(buffer: &'a mut dyn Any);
+
+type ObtainExecutionStyleFn = fn() -> ExecutionStyle;
+
+fn obtain_scc_value<
+    C: Config,
+    E: Executor<K, C> + 'static,
+    K: Query + 'static,
+>(
+    buffer: &mut dyn Any,
+) {
+    let buffer = buffer
+        .downcast_mut::<MaybeUninit<K::Value>>()
+        .expect("SCC value buffer type mismatch");
+
+    let scc_value = E::scc_value();
+    buffer.write(scc_value);
+}
+
+fn obtain_execution_style<
+    C: Config,
+    E: Executor<K, C> + 'static,
+    K: Query + 'static,
+>() -> ExecutionStyle {
+    E::execution_style()
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Entry<C: Config> {
     executor: Arc<dyn Any + Send + Sync>,
     invoke_executor: InvokeExecutorFn<C>,
     recursively_repair_query: RecursivelyRepairQueryFn<C>,
+    obtain_scc_value: ObtainSccValueFn,
+    obtain_execution_style: ObtainExecutionStyleFn,
 }
 
 impl<C: Config> Entry<C> {
@@ -94,6 +135,8 @@ impl<C: Config> Entry<C> {
             executor,
             invoke_executor: invoke_executor::<C, E, Q>,
             recursively_repair_query: Engine::recursively_repair_query::<Q>,
+            obtain_scc_value: obtain_scc_value::<C, E, Q>,
+            obtain_execution_style: obtain_execution_style::<C, E, Q>,
         }
     }
 
@@ -112,6 +155,17 @@ impl<C: Config> Entry<C> {
         called_from: &QueryID,
     ) -> Result<(), CyclicError> {
         (self.recursively_repair_query)(engine, query_key, called_from).await
+    }
+
+    pub fn obtain_scc_value<Q: Query>(&self) -> Q::Value {
+        let mut buffer = MaybeUninit::<Q::Value>::uninit();
+        (self.obtain_scc_value)(&mut buffer);
+
+        unsafe { buffer.assume_init() }
+    }
+
+    pub fn obtain_execution_style(&self) -> ExecutionStyle {
+        (self.obtain_execution_style)()
     }
 }
 
