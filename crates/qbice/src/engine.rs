@@ -36,7 +36,7 @@ impl<C: Config> Engine<C> {
     }
 }
 
-static_assertions::assert_impl_all!(Engine<DefaultConfig>: Send, Sync);
+static_assertions::assert_impl_all!(&Engine<DefaultConfig>: Send, Sync);
 
 impl<C: Config> Engine<C> {
     /// Creates a new instance of the engine.
@@ -73,11 +73,14 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 ///
 /// The struct is very cheap to clone and can be sent to multiple thread for
 /// concurrent query execution.
+#[derive(Clone)]
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
     caller: Option<Caller>,
 }
+
+static_assertions::assert_impl_all!(&TrackedEngine<DefaultConfig>: Send, Sync);
 
 impl<C: Config> std::fmt::Debug for TrackedEngine<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

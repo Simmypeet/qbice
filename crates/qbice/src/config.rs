@@ -7,7 +7,7 @@ pub trait Config: Default + Debug + Send + Sync + 'static {
     /// The size of static storage allocated for query keys.
     ///
     /// This can avoid heap allocations for small query keys.
-    type Storage;
+    type Storage: Send + Sync + 'static;
 }
 
 /// A default configuration implementation for QBICE.

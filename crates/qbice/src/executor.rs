@@ -36,6 +36,7 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
         query: &'q Q,
         engine: &'e TrackedEngine<C>,
     ) -> impl Future<Output = Result<Q::Value, CyclicError>>
+    + Send
     + use<'s, 'q, 'e, Self, Q, C>;
 }
 
@@ -48,7 +49,9 @@ fn invoke_executor<
     key: &'a dyn Any,
     executor: &'a dyn Any,
     engine: &'a mut TrackedEngine<C>,
-) -> Pin<Box<dyn Future<Output = Result<DynValueBox<C>, CyclicError>> + 'a>> {
+) -> Pin<
+    Box<dyn Future<Output = Result<DynValueBox<C>, CyclicError>> + Send + 'a>,
+> {
     let key = key.downcast_ref::<K>().expect("Key type mismatch");
     let executor =
         executor.downcast_ref::<E>().expect("Executor type mismatch");
@@ -66,14 +69,14 @@ type InvokeExecutorFn<C> = for<'a> fn(
     executor: &'a dyn Any,
     engine: &'a mut TrackedEngine<C>,
 ) -> Pin<
-    Box<dyn Future<Output = Result<DynValueBox<C>, CyclicError>> + 'a>,
+    Box<dyn Future<Output = Result<DynValueBox<C>, CyclicError>> + Send + 'a>,
 >;
 type RecursivelyRepairQueryFn<C> = for<'a> fn(
     engine: &'a Arc<Engine<C>>,
     key: &'a dyn Any,
     called_from: &'a QueryID,
 ) -> Pin<
-    Box<dyn std::future::Future<Output = Result<(), CyclicError>> + 'a>,
+    Box<dyn std::future::Future<Output = Result<(), CyclicError>> + Send + 'a>,
 >;
 
 #[derive(Debug, Clone)]
@@ -96,7 +99,7 @@ impl<C: Config> Entry<C> {
 
     pub async fn invoke_executor(
         &self,
-        query_key: &dyn Any,
+        query_key: &(dyn Any + Send + Sync),
         engine: &mut TrackedEngine<C>,
     ) -> Result<DynValueBox<C>, CyclicError> {
         (self.invoke_executor)(query_key, self.executor.as_ref(), engine).await
@@ -105,7 +108,7 @@ impl<C: Config> Entry<C> {
     pub async fn recursively_repair_query(
         &self,
         engine: &Arc<Engine<C>>,
-        query_key: &dyn Any,
+        query_key: &(dyn Any + Send + Sync),
         called_from: &QueryID,
     ) -> Result<(), CyclicError> {
         (self.recursively_repair_query)(engine, query_key, called_from).await

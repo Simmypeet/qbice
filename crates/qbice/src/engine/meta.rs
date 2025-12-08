@@ -571,7 +571,7 @@ impl<C: Config> Engine<C> {
                     .get_executor_entry_by_type_id(&callee.stable_type_id());
 
                 let callee_value: &dyn DynQuery<C> = &*original_callee_value;
-                let callee_value_any = callee_value as &dyn Any;
+                let callee_value_any = callee_value as &(dyn Any + Send + Sync);
 
                 tracing::info!(
                     "{:?} is repairing {:?}",

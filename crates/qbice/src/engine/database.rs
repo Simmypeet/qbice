@@ -202,8 +202,13 @@ impl<C: Config> Engine<C> {
         engine: &'a Arc<Self>,
         key: &'a dyn Any,
         caller: &'a QueryID,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), CyclicError>> + 'a>>
-    {
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), CyclicError>>
+                + Send
+                + 'a,
+        >,
+    > {
         let key = key
             .downcast_ref::<Q>()
             .expect("should be of the correct query type");
@@ -226,6 +231,10 @@ impl<C: Config> TrackedEngine<C> {
         &self,
         query: &Q,
     ) -> Result<Q::Value, CyclicError> {
+        // YIELD POINT: query function will be called very often, this is a
+        // good point for yielding to allow cancelation.
+        tokio::task::yield_now().await;
+
         let query_with_id = self.engine.database.new_query_with_id(query);
 
         // check local cache

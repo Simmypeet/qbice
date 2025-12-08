@@ -1,4 +1,8 @@
-use std::sync::{Arc, atomic::AtomicUsize};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicUsize},
+    time::Duration,
+};
 
 use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
@@ -692,4 +696,128 @@ async fn dependent_query_uses_cyclic_default_values() {
     assert_eq!(executor_a.get_call_count(), 1);
     assert_eq!(executor_b.get_call_count(), 1);
     assert_eq!(executor_dependent.get_call_count(), 1);
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable, StableHash,
+)]
+pub struct CollectVariables {
+    pub vars: Arc<[Variable]>,
+}
+
+impl Query for CollectVariables {
+    type Value = HashMap<Variable, i64>;
+}
+
+#[derive(Debug, Default)]
+pub struct CollectVariablesExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<CollectVariables, C> for CollectVariablesExecutor {
+    async fn execute(
+        &self,
+        query: &CollectVariables,
+        engine: &TrackedEngine<C>,
+    ) -> Result<HashMap<Variable, i64>, CyclicError> {
+        // track usage
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let mut result = HashMap::new();
+
+        for &var in query.vars.iter() {
+            // simulate some async work
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            let value = engine.query(&var).await?;
+
+            result.insert(var, value);
+        }
+
+        Ok(result)
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Identifiable,
+    StableHash,
+)]
+pub struct ReadVariableMap(pub Variable);
+
+impl Query for ReadVariableMap {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct ReadVariableMapExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<ReadVariableMap, C> for ReadVariableMapExecutor {
+    async fn execute(
+        &self,
+        query: &ReadVariableMap,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i64, CyclicError> {
+        // track usage
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let var_map = engine
+            .query(&CollectVariables {
+                vars: Arc::new([Variable(0), Variable(1), Variable(2)]),
+            })
+            .await?;
+
+        Ok(*var_map.get(&query.0).unwrap())
+    }
+}
+
+impl ReadVariableMap {
+    pub fn new(var: Variable) -> Self { Self(var) }
+}
+
+#[tokio::test]
+#[allow(clippy::cast_possible_wrap)]
+async fn parallel_read_variable_map() {
+    let mut engine = Engine::<DefaultConfig>::default();
+
+    let collect_ex = Arc::new(CollectVariablesExecutor::default());
+    let read_map_ex = Arc::new(ReadVariableMapExecutor::default());
+
+    engine.executor_registry.register(collect_ex.clone());
+    engine.executor_registry.register(read_map_ex.clone());
+
+    let mut input_session = engine.input_session();
+
+    input_session.set_input(Variable(0), 10);
+    input_session.set_input(Variable(1), 20);
+    input_session.set_input(Variable(2), 30);
+
+    drop(input_session);
+
+    let engine = Arc::new(engine);
+    let tracked_engine = engine.tracked();
+
+    let handles: Vec<_> = (0..3)
+        .map(|i| {
+            let tracked_engine = tracked_engine.clone();
+            tokio::spawn(async move {
+                tracked_engine.query(&ReadVariableMap::new(Variable(i))).await
+            })
+        })
+        .collect();
+
+    for (i, handle) in handles.into_iter().enumerate() {
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result, (i as i64 + 1) * 10);
+    }
+
+    // CollectVariablesExecutor should have been called only once
+    assert_eq!(collect_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // ReadVariableMapExecutor should have been called three times
+    assert_eq!(read_map_ex.0.load(std::sync::atomic::Ordering::Relaxed), 3);
 }
