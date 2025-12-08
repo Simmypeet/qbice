@@ -7,7 +7,7 @@ use super::TrackedEngine;
 use crate::{
     config::{Config, DefaultConfig},
     engine::Engine,
-    executor::{CyclicQuery, Executor},
+    executor::{CyclicError, Executor},
     query::Query,
 };
 
@@ -58,7 +58,7 @@ impl<C: Config> Executor<Division, C> for DivisionExecutor {
         &self,
         query: &Division,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicQuery> {
+    ) -> Result<i64, CyclicError> {
         // track usage
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -106,7 +106,7 @@ impl<C: Config> Executor<SafeDivision, C> for SafeDivisionExecutor {
         &self,
         query: &SafeDivision,
         engine: &TrackedEngine<C>,
-    ) -> Result<Option<i64>, CyclicQuery> {
+    ) -> Result<Option<i64>, CyclicError> {
         // track usage
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -324,7 +324,7 @@ impl<C: Config> Executor<Absolute, C> for AbsoluteExecutor {
         &self,
         query: &Absolute,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicQuery> {
+    ) -> Result<i64, CyclicError> {
         // track usage
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -367,7 +367,7 @@ impl<C: Config> Executor<AddTwoAbsolutes, C> for AddTwoAbsolutesExecutor {
         &self,
         query: &AddTwoAbsolutes,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicQuery> {
+    ) -> Result<i64, CyclicError> {
         // track usage
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 

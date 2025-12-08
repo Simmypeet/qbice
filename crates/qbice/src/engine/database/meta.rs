@@ -16,7 +16,7 @@ use crate::{
         Engine, TrackedEngine,
         database::{Database, Timtestamp},
     },
-    executor::CyclicQuery,
+    executor::CyclicError,
     query::{
         DynQuery, DynQueryBox, DynValue, DynValueBox, Query, QueryID, QueryKind,
     },
@@ -277,7 +277,7 @@ impl<C: Config> Database<C> {
         &self,
         called_from: Option<&QueryID>,
         running_state: &Computing,
-    ) -> Result<(), CyclicQuery> {
+    ) -> Result<(), CyclicError> {
         // if there is no caller, we are at the root.
         let Some(called_from) = called_from else {
             return Ok(());
@@ -299,7 +299,7 @@ impl<C: Config> Database<C> {
                 .is_in_scc
                 .store(true, std::sync::atomic::Ordering::SeqCst);
 
-            return Err(CyclicQuery);
+            return Err(CyclicError);
         }
 
         Ok(())
@@ -312,7 +312,7 @@ impl<C: Config> Database<C> {
         query_id: &QueryID,
         required_value: bool,
         caller: Option<&QueryID>,
-    ) -> Result<FastPathResult<V>, CyclicQuery> {
+    ) -> Result<FastPathResult<V>, CyclicError> {
         // checks if the query result is already computed
         let Some(callee_target_meta) = self.query_metas.get(query_id) else {
             return Ok(FastPathResult::ToSlowPath);
@@ -835,7 +835,7 @@ impl<C: Config> Engine<C> {
         engine: &'a Arc<Self>,
         key: &'a dyn Any,
         called_from: &'a QueryID,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), CyclicQuery>> + 'a>>
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), CyclicError>> + 'a>>
     {
         let key = key
             .downcast_ref::<Q>()

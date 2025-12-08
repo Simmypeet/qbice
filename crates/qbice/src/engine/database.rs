@@ -8,7 +8,7 @@ use crate::{
         Engine, TrackedEngine,
         database::meta::{QueryMeta, QueryWithID, SetInputResult},
     },
-    executor::CyclicQuery,
+    executor::CyclicError,
     query::{DynValue, Query, QueryID},
 };
 
@@ -56,7 +56,7 @@ impl<C: Config> Engine<C> {
     fn is_in_scc(
         &self,
         called_from: Option<&QueryID>,
-    ) -> Result<(), CyclicQuery> {
+    ) -> Result<(), CyclicError> {
         let Some(called_from) = called_from else {
             return Ok(());
         };
@@ -68,7 +68,7 @@ impl<C: Config> Engine<C> {
             .expect("should be present")
             .is_running_in_scc()
         {
-            return Err(CyclicQuery);
+            return Err(CyclicError);
         }
 
         Ok(())
@@ -79,7 +79,7 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         required_value: bool,
         caller: Option<&QueryID>,
-    ) -> Result<Option<Q::Value>, CyclicQuery> {
+    ) -> Result<Option<Q::Value>, CyclicError> {
         // register the dependency for the sake of detecting cycles
         self.register_callee(caller);
 
@@ -125,7 +125,7 @@ impl<C: Config> TrackedEngine<C> {
     pub async fn query<Q: Query>(
         &self,
         query: &Q,
-    ) -> Result<Q::Value, CyclicQuery> {
+    ) -> Result<Q::Value, CyclicError> {
         let query_with_id = self.engine.database.new_query_with_id(query);
 
         // check local cache
