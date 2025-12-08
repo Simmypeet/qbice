@@ -41,6 +41,8 @@ pub struct Computing {
 }
 
 impl Computing {
+    pub fn callee_info(&self) -> &CalleeInfo { &self.callee_info }
+
     pub fn new(notification: Arc<Notify>) -> Self {
         Self {
             notification,
@@ -330,6 +332,17 @@ impl<C: Config> Database<C> {
             .insert(*caller_source.query_id());
     }
 
+    pub(super) fn unwire_backward_dependencies_from_callee(
+        &self,
+        query_id: &QueryID,
+        callee_info: &CalleeInfo,
+    ) {
+        // OPTIMIZE: this can be parallelized
+        for callee in &callee_info.callee_order {
+            self.unwire_backward_dependency(query_id, callee);
+        }
+    }
+
     /// Checks whether the stack of computing queries contains a cycle
     fn check_cyclic(&self, computing: &Computing, target: QueryID) -> bool {
         if computing.callee_info.callee_queries.contains_key(&target) {
@@ -504,7 +517,7 @@ impl<C: Config> Database<C> {
         }
     }
 
-    pub(crate) fn unwire_backward_dependencies(
+    pub(crate) fn unwire_backward_dependency(
         &self,
         caller_source: &QueryID,
         callee_target: &QueryID,
@@ -666,12 +679,10 @@ impl<C: Config> Engine<C> {
         // the previous repairing add dependencies that are no longer valid.
 
         {
-            // loop through each callee and remove their backward dependencies
-            // OPTIMIZE: this can be parallelized
-            for callee in &computed_callee.callee_info.callee_order {
-                self.database
-                    .unwire_backward_dependencies(&query_id.id, callee);
-            }
+            self.database.unwire_backward_dependencies_from_callee(
+                &query_id.id,
+                &computed_callee.callee_info,
+            );
 
             // clear all callees, that might have been added during repairing
             self.database.get_computing_caller(&caller_id).callee_info =

@@ -331,16 +331,25 @@ impl<C: Config> Drop for ComputingLockGuard<'_, C> {
             return;
         }
 
-        if let Some(computed) = self.existing_computed.take() {
-            let mut query_meta = self
-                .database
-                .query_metas
-                .get_mut(&self.query_id)
-                .expect("query ID should be present");
+        let mut query_meta = self
+            .database
+            .query_metas
+            .get_mut(&self.query_id)
+            .expect("query ID should be present");
 
+        // unwire backward dendencies
+        self.database.unwire_backward_dependencies_from_callee(
+            &self.query_id,
+            query_meta.get_computing().callee_info(),
+        );
+
+        if let Some(computed) = self.existing_computed.take() {
             // restore to previous computed state
             query_meta.replace_state(State::Computed(computed));
         } else {
+            // drop query meta lock
+            drop(query_meta);
+
             // remove the query meta entirely
             self.database.query_metas.remove(&self.query_id);
         }
