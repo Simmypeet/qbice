@@ -83,7 +83,8 @@ impl<C: Config> Drop for UndoRegisterCallee<'_, '_, C> {
         }
 
         if let Some(caller) = self.caller {
-            let mut caller_meta = self.database.get_computing_caller(caller);
+            let mut caller_meta =
+                self.database.get_computing_caller_mut(caller);
 
             caller_meta.remove_callee(&self.callee);
         }
@@ -102,7 +103,7 @@ impl<C: Config> Engine<C> {
             || None,
             |caller| {
                 let mut caller_meta =
-                    self.database.get_computing_caller(caller);
+                    self.database.get_computing_caller_mut(caller);
 
                 caller_meta.add_callee(calee);
 
@@ -383,7 +384,7 @@ impl<C: Config> Database<C> {
     ///
     /// We assume that the caller token is valid and corresponds to that the
     /// query is currently in computing state.
-    pub(super) fn get_computing_caller(
+    pub(super) fn get_computing_caller_mut(
         &self,
         caller: &Caller,
     ) -> MappedRefMut<'_, QueryID, QueryMeta<C>, Computing> {

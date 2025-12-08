@@ -288,7 +288,7 @@ impl<C: Config> Database<C> {
         callee_kind: QueryKind,
     ) {
         // add dependency for the caller
-        let mut caller_computing = self.get_computing_caller(caller_source);
+        let mut caller_computing = self.get_computing_caller_mut(caller_source);
         {
             assert!(
                 caller_computing
@@ -393,7 +393,7 @@ impl<C: Config> Database<C> {
 
         // mark the caller as being in scc
         if is_in_scc {
-            let meta = self.get_computing_caller(called_from);
+            let meta = self.get_computing_caller_mut(called_from);
 
             meta.is_in_scc.store(true, std::sync::atomic::Ordering::SeqCst);
 
@@ -685,7 +685,7 @@ impl<C: Config> Engine<C> {
             );
 
             // clear all callees, that might have been added during repairing
-            self.database.get_computing_caller(&caller_id).callee_info =
+            self.database.get_computing_caller_mut(&caller_id).callee_info =
                 CalleeInfo::default();
         }
 
@@ -741,7 +741,7 @@ impl<C: Config> Engine<C> {
 
         let is_in_scc = self
             .database
-            .get_computing_caller(&caller_query)
+            .get_computing_caller_mut(&caller_query)
             .is_in_scc
             .load(std::sync::atomic::Ordering::Relaxed);
 
