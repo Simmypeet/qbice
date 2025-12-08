@@ -1,11 +1,15 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::AtomicUsize},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize},
+    },
     time::Duration,
 };
 
 use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
+use tokio::task::yield_now;
 
 use super::TrackedEngine;
 use crate::{
@@ -820,4 +824,90 @@ async fn parallel_read_variable_map() {
     assert_eq!(collect_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
     // ReadVariableMapExecutor should have been called three times
     assert_eq!(read_map_ex.0.load(std::sync::atomic::Ordering::Relaxed), 3);
+}
+
+// Cancellation safety tests
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Identifiable,
+    StableHash,
+)]
+pub struct SlowQuery(pub u64);
+
+impl Query for SlowQuery {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct SlowExecutor {
+    pub make_it_stuck: AtomicBool,
+}
+
+impl<C: Config> Executor<SlowQuery, C> for SlowExecutor {
+    async fn execute(
+        &self,
+        query: &SlowQuery,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i64, CyclicError> {
+        if self.make_it_stuck.load(std::sync::atomic::Ordering::Relaxed) {
+            loop {
+                yield_now().await;
+            }
+        } else {
+            engine.query(&Variable(query.0)).await
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancellation_safety() {
+    let mut engine = Engine::<DefaultConfig>::default();
+
+    let slow_executor = Arc::new(SlowExecutor::default());
+
+    engine.register_executor(slow_executor.clone());
+
+    let mut input_session = engine.input_session();
+
+    input_session.set_input(Variable(0), 123);
+
+    drop(input_session);
+
+    let engine = Arc::new(engine);
+    let tracked_engine = engine.tracked();
+
+    // Now, set the executor to make it stuck
+    slow_executor
+        .make_it_stuck
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let tracked_engine_clone = tracked_engine.clone();
+
+    // Spawn a task to run the slow query
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_millis(100)) => {
+            // After a short delay, we cancel the task
+        }
+        result = tracked_engine_clone.query(&SlowQuery(0)) => {
+            panic!("The slow query task should have been aborted, but it completed with result: {result:?}");
+        }
+    };
+
+    // Finally, reset the executor to not be stuck and ensure we can run the
+    // query again
+    slow_executor
+        .make_it_stuck
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let result = tracked_engine.query(&SlowQuery(0)).await.unwrap();
+
+    assert_eq!(result, 123);
 }
