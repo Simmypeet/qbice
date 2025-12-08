@@ -478,3 +478,174 @@ async fn add_two_absolutes_sign_change() {
         1
     );
 }
+
+// Test cases for cyclic dependency handling
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Identifiable,
+    StableHash,
+)]
+pub struct CyclicQueryA;
+
+impl Query for CyclicQueryA {
+    type Value = i32;
+
+    fn scc_value() -> Self::Value {
+        42 // default value to use in case of cycle
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Identifiable,
+    StableHash,
+)]
+pub struct CyclicQueryB;
+
+impl Query for CyclicQueryB {
+    type Value = i32;
+
+    fn scc_value() -> Self::Value {
+        84 // default value to use in case of cycle
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Identifiable,
+    StableHash,
+)]
+pub struct DependentQuery;
+
+impl Query for DependentQuery {
+    type Value = i32;
+}
+
+#[derive(Debug, Default)]
+pub struct CyclicExecutorA {
+    pub call_count: AtomicUsize,
+}
+
+impl CyclicExecutorA {
+    pub fn get_call_count(&self) -> usize {
+        self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<C: Config> Executor<CyclicQueryA, C> for CyclicExecutorA {
+    async fn execute(
+        &self,
+        _key: &CyclicQueryA,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i32, CyclicError> {
+        self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // This creates a cycle: A depends on B, B depends on A
+        let b_value = engine.query(&CyclicQueryB).await?;
+
+        Ok(b_value + 10)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct CyclicExecutorB {
+    pub call_count: AtomicUsize,
+}
+
+impl CyclicExecutorB {
+    pub fn get_call_count(&self) -> usize {
+        self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<C: Config> Executor<CyclicQueryB, C> for CyclicExecutorB {
+    async fn execute(
+        &self,
+        _key: &CyclicQueryB,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i32, CyclicError> {
+        self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // This completes the cycle: B depends on A, A depends on B
+        let a_value = engine.query(&CyclicQueryA).await?;
+        Ok(a_value + 20)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct DependentExecutor {
+    pub call_count: AtomicUsize,
+}
+
+impl DependentExecutor {
+    pub fn get_call_count(&self) -> usize {
+        self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl<C: Config> Executor<DependentQuery, C> for DependentExecutor {
+    async fn execute(
+        &self,
+        _key: &DependentQuery,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i32, CyclicError> {
+        self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // This query depends on the cyclic queries
+        let a_value = engine.query(&CyclicQueryA).await?;
+        let b_value = engine.query(&CyclicQueryB).await?;
+
+        Ok(a_value + b_value + 100)
+    }
+}
+
+#[tokio::test]
+async fn cyclic_dependency_returns_default_values() {
+    let mut engine = Engine::<DefaultConfig>::default();
+
+    let executor_a = Arc::new(CyclicExecutorA::default());
+    let executor_b = Arc::new(CyclicExecutorB::default());
+
+    engine.register_executor(executor_a.clone());
+    engine.register_executor(executor_b.clone());
+
+    let engine = Arc::new(engine);
+    let tracked_engine = engine.tracked();
+
+    // When we query CyclicQueryA, it should detect the cycle A -> B -> A
+    // and return default values (0 for i32) without calling the executors
+    let result_a = tracked_engine.query(&CyclicQueryA).await.unwrap();
+    let result_b = tracked_engine.query(&CyclicQueryB).await.unwrap();
+
+    // Both should return default values (0 for i32)
+    assert_eq!(result_a, 42);
+    assert_eq!(result_b, 84);
+
+    // The executors will be called and increment their call counts,
+    // but they will receive CyclicError when trying to query their dependencies
+    // and return early without completing their computation
+
+    // Both executors should be called exactly once during cycle detection:
+    // A is called first, then B is called, then when B tries to call A again,
+    // the cycle is detected and CyclicError is returned without calling A again
+    assert_eq!(executor_a.get_call_count(), 1);
+    assert_eq!(executor_b.get_call_count(), 1);
+}
