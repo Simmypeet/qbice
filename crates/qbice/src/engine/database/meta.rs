@@ -98,7 +98,7 @@ pub struct QueryMeta<C: Config> {
 }
 
 impl<C: Config> QueryMeta<C> {
-    pub fn add_callee(&self, callee: QueryID) {
+    pub async fn add_callee(&self, callee: QueryID) {
         let computing = self
             .state
             .as_computing()
@@ -108,6 +108,9 @@ impl<C: Config> QueryMeta<C> {
             dashmap::mapref::entry::Entry::Occupied(_) => {}
             dashmap::mapref::entry::Entry::Vacant(v) => {
                 v.insert(None);
+
+                // if haven't inserted, add to dependency order
+                computing.callee_info.callee_order.write().await.push(callee);
             }
         }
     }
@@ -177,7 +180,7 @@ pub struct SetInputResult {
 
 impl<C: Config> Database<C> {
     /// Add both forward and backward dependencies for both caller and callee.
-    async fn observe_callee_fingerprint(
+    fn observe_callee_fingerprint(
         caller_meta: &QueryMeta<C>,
         computed_callee: &Computed<C>,
         callee_target: &QueryID,
@@ -191,27 +194,20 @@ impl<C: Config> Database<C> {
             .expect("caller should've been computing");
 
         {
-            let inserted = caller_computing
-                .callee_info
-                .callee_queries
-                .insert(
-                    *callee_target,
-                    Some(Observation {
-                        seen_fingerprint: computed_callee.fingerprint,
-                        dirty: false,
-                    }),
-                )
-                .is_some();
-
-            // if haven't inserted, add to dependency order
-            if inserted.not() {
+            assert!(
                 caller_computing
                     .callee_info
-                    .callee_order
-                    .write()
-                    .await
-                    .push(*callee_target);
-            }
+                    .callee_queries
+                    .insert(
+                        *callee_target,
+                        Some(Observation {
+                            seen_fingerprint: computed_callee.fingerprint,
+                            dirty: false,
+                        }),
+                    )
+                    .is_some(),
+                "should've been pre-inserted in `query_for`"
+            );
 
             match callee_kind {
                 QueryKind::Normal | QueryKind::Projection => {
@@ -365,8 +361,7 @@ impl<C: Config> Database<C> {
                         query_id,
                         caller,
                         callee_target_meta.query_kind,
-                    )
-                    .await;
+                    );
                 }
 
                 Ok(FastPathResult::Hit(required_value.then(|| {
@@ -667,10 +662,7 @@ impl<C: Config> Database<C> {
 }
 
 impl<C: Config> Engine<C> {
-    #[tracing::instrument(
-        skip(self, query_id, computed_callee),
-        level = "info"
-    )]
+    #[tracing::instrument(skip(self, computed_callee), ret, level = "info")]
     pub(super) async fn should_recompute_query<Q: Query>(
         self: &Arc<Self>,
         query_id: &QueryWithID<'_, Q>,
@@ -761,6 +753,11 @@ impl<C: Config> Engine<C> {
 
                 // fingerprint is the same, mark as clean
                 if obs.seen_fingerprint == new_fingerprint {
+                    tracing::info!(
+                        "{:?} observed {:?} is clean",
+                        query_id.query,
+                        callee_meta.original_key
+                    );
                     obs.dirty = false;
                 } else {
                     // fingerprint changed, need to recompute this node, stop
@@ -774,6 +771,7 @@ impl<C: Config> Engine<C> {
         false
     }
 
+    #[tracing::instrument(skip(self, computed_callee, notify), level = "info")]
     pub(super) async fn repair_query<Q: Query>(
         self: &Arc<Self>,
         query_id: &QueryWithID<'_, Q>,

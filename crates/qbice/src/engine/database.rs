@@ -39,7 +39,7 @@ impl<C: Config> Default for Database<C> {
 }
 
 impl<C: Config> Engine<C> {
-    fn register_callee(&self, caller: Option<&QueryID>) {
+    async fn register_callee(&self, caller: Option<&QueryID>, calee: QueryID) {
         // record the dependency first, don't necessary need to figure out
         // the observed value fingerprint yet
         if let Some(caller) = caller {
@@ -49,7 +49,7 @@ impl<C: Config> Engine<C> {
                 .get(caller)
                 .expect("caller query meta must exist");
 
-            caller_meta.add_callee(*caller);
+            caller_meta.add_callee(calee).await;
         }
     }
 
@@ -81,7 +81,7 @@ impl<C: Config> Engine<C> {
         caller: Option<&QueryID>,
     ) -> Result<Option<Q::Value>, CyclicError> {
         // register the dependency for the sake of detecting cycles
-        self.register_callee(caller);
+        self.register_callee(caller, *query.id()).await;
 
         // pulling the value
         let value = loop {

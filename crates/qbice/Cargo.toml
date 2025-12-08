@@ -18,6 +18,7 @@ take_mut.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
+tracing-test.workspace = true
 
 
 [lints]
