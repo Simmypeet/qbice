@@ -649,3 +649,47 @@ async fn cyclic_dependency_returns_default_values() {
     assert_eq!(executor_a.get_call_count(), 1);
     assert_eq!(executor_b.get_call_count(), 1);
 }
+
+#[tokio::test]
+async fn dependent_query_uses_cyclic_default_values() {
+    let mut engine = Engine::<DefaultConfig>::default();
+
+    let executor_a = Arc::new(CyclicExecutorA::default());
+    let executor_b = Arc::new(CyclicExecutorB::default());
+    let executor_dependent = Arc::new(DependentExecutor::default());
+
+    engine.register_executor(executor_a.clone());
+    engine.register_executor(executor_b.clone());
+    engine.register_executor(executor_dependent.clone());
+
+    // Query the dependent query, which depends on the cyclic queries
+    let engine = Arc::new(engine).tracked();
+
+    let result = engine.query(&DependentQuery).await.unwrap();
+
+    // DependentQuery should execute and use the default values from the cyclic
+    // queries Default values: CyclicQueryA = 0, CyclicQueryB = 0
+    // So result = 84 + 42 + 100 = 226
+    assert_eq!(result, 226);
+
+    // When DependentQuery queries CyclicQueryA, the executor for CyclicQueryA
+    // will be called and try to query CyclicQueryB, which triggers cycle
+    // detection. Both cyclic executors will be called exactly once during
+    // cycle detection.
+    assert_eq!(executor_a.get_call_count(), 1);
+    assert_eq!(executor_b.get_call_count(), 1);
+
+    // The dependent executor should have been called once
+    assert_eq!(executor_dependent.get_call_count(), 1);
+
+    // Try calling the dependent query again
+    let result_again = engine.query(&DependentQuery).await.unwrap();
+
+    // It should return the same result without calling the executors again
+    assert_eq!(result_again, 226);
+
+    // The call counts should remain the same since the result is cached
+    assert_eq!(executor_a.get_call_count(), 1);
+    assert_eq!(executor_b.get_call_count(), 1);
+    assert_eq!(executor_dependent.get_call_count(), 1);
+}
