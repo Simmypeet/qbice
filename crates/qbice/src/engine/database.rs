@@ -100,7 +100,7 @@ impl<C: Config> Engine<C> {
             }
 
             let (notify, continuation) = match self.database.slow_path(query) {
-                // try the slow path again
+                // try the fast path again
                 meta::SlowPathResult::TryAgain => continue,
 
                 // proceed with the continuation

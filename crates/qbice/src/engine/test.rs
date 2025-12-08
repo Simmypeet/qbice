@@ -295,3 +295,186 @@ async fn safe_division_input_changes() {
         3
     );
 }
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+)]
+pub struct Absolute {
+    variable: Variable,
+}
+
+impl Query for Absolute {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct AbsoluteExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<Absolute, C> for AbsoluteExecutor {
+    async fn execute(
+        &self,
+        query: &Absolute,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i64, CyclicQuery> {
+        // track usage
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let value = engine.query(&query.variable).await?;
+
+        Ok(value.abs())
+    }
+}
+
+impl Absolute {
+    pub fn new(variable: Variable) -> Self { Self { variable } }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+)]
+pub struct AddTwoAbsolutes {
+    var_a: Variable,
+    var_b: Variable,
+}
+
+impl Query for AddTwoAbsolutes {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct AddTwoAbsolutesExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<AddTwoAbsolutes, C> for AddTwoAbsolutesExecutor {
+    async fn execute(
+        &self,
+        query: &AddTwoAbsolutes,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i64, CyclicQuery> {
+        // track usage
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let abs_a = engine.query(&Absolute::new(query.var_a)).await?;
+        let abs_b = engine.query(&Absolute::new(query.var_b)).await?;
+
+        Ok(abs_a + abs_b)
+    }
+}
+
+impl AddTwoAbsolutes {
+    pub fn new(var_a: Variable, var_b: Variable) -> Self {
+        Self { var_a, var_b }
+    }
+}
+
+#[tokio::test]
+async fn add_two_absolutes_sign_change() {
+    let mut engine = Engine::<DefaultConfig>::default();
+
+    let absolute_ex = Arc::new(AbsoluteExecutor::default());
+    let add_two_absolutes_ex = Arc::new(AddTwoAbsolutesExecutor::default());
+
+    engine.executor_registry.register(absolute_ex.clone());
+    engine.executor_registry.register(add_two_absolutes_ex.clone());
+
+    let mut input_session = engine.input_session();
+
+    input_session.set_input(Variable(0), 200);
+    input_session.set_input(Variable(1), 150);
+
+    drop(input_session);
+
+    let mut engine = Arc::new(engine);
+    let tracked_engine = engine.clone().tracked();
+
+    // Initial query: abs(200) + abs(150) = 350
+    assert_eq!(
+        tracked_engine
+            .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
+            .await,
+        Ok(350)
+    );
+
+    // Both absolute executors should run once, and add_two_absolutes once
+    assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // Drop tracked engine to release references
+    drop(tracked_engine);
+
+    // Change Variable(0) from 200 to -200
+    {
+        let mut input_session =
+            Arc::get_mut(&mut engine).unwrap().input_session();
+
+        input_session.set_input(Variable(0), -200);
+    }
+
+    let tracked_engine = engine.clone().tracked();
+
+    // Result should still be 350: abs(-200) + abs(150) = 200 + 150 = 350
+    assert_eq!(
+        tracked_engine
+            .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
+            .await,
+        Ok(350)
+    );
+
+    // Only the Absolute query for Variable(0) should re-execute (3 total)
+    // The result is the same (200), so AddTwoAbsolutes should NOT re-execute
+    assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 3);
+    assert_eq!(
+        add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // Drop tracked engine
+    drop(tracked_engine);
+
+    // Change Variable(1) from 150 to -150
+    {
+        let mut input_session =
+            Arc::get_mut(&mut engine).unwrap().input_session();
+
+        input_session.set_input(Variable(1), -150);
+    }
+
+    let tracked_engine = engine.tracked();
+
+    // Result should still be 350: abs(-200) + abs(-150) = 200 + 150 = 350
+    assert_eq!(
+        tracked_engine
+            .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
+            .await,
+        Ok(350)
+    );
+
+    // Only the Absolute query for Variable(1) should re-execute (4 total)
+    // The result is still the same (150), so AddTwoAbsolutes should still NOT
+    // re-execute
+    assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 4);
+    assert_eq!(
+        add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
