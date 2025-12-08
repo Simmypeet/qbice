@@ -539,13 +539,7 @@ impl<C: Config> Database<C> {
         callee_target: &QueryID,
     ) {
         let callee_meta = self.get_read_meta(callee_target);
-        assert!(
-            callee_meta
-                .caller_info
-                .caller_queries
-                .remove(caller_source)
-                .is_some()
-        );
+        callee_meta.caller_info.caller_queries.remove(caller_source);
     }
 
     fn is_query_input(&self, query_id: &QueryID) -> bool {
