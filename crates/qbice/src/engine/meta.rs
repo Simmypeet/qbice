@@ -2,7 +2,10 @@ use std::{
     any::Any,
     collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
     ops::Not,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use dashmap::{DashMap, DashSet};
@@ -37,7 +40,11 @@ impl Compact128 {
 #[derive(Debug)]
 pub struct Computing {
     notification: Arc<Notify>,
+
+    // We use a RwLock here since we want to avoid acquiring a write lock
+    // when observing callees.
     callee_info: RwLock<CalleeInfo>,
+
     is_in_scc: AtomicBool,
 }
 
@@ -104,8 +111,11 @@ pub enum State<C: Config> {
 
 #[derive(Debug)]
 pub struct Observation {
-    pub seen_fingerprint: Compact128,
-    pub dirty: bool,
+    seen_fingerprint: Compact128,
+
+    // Dirty flag is used as an atomic because we want to avoid acquiring
+    // write lock when marking as dirty when propagating dirtiness.
+    dirty: AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -217,6 +227,10 @@ impl<C: Config> QueryMeta<C> {
         self.state.as_computed_mut().expect("should be computed")
     }
 
+    pub fn get_computed(&self) -> &Computed<C> {
+        self.state.as_computed().expect("should be computed")
+    }
+
     pub const fn state(&self) -> &State<C> { &self.state }
 
     pub fn take_state_mut(&mut self, f: impl FnOnce(State<C>) -> State<C>) {
@@ -301,7 +315,7 @@ impl<C: Config> Database<C> {
                         *callee_target,
                         Some(Observation {
                             seen_fingerprint: computed_callee.fingerprint,
-                            dirty: false,
+                            dirty: AtomicBool::new(false),
                         }),
                     )
                     .is_some(),
@@ -499,17 +513,17 @@ impl<C: Config> Database<C> {
             // iterate through all callers and mark their
             // observations as dirty
             for caller in meta.caller_info.caller_queries.iter() {
-                let mut caller_meta = self.get_computed_mut(caller.key());
+                let caller_meta = self.get_computed(caller.key());
 
                 let obs = caller_meta
                     .callee_info
                     .callee_queries
-                    .get_mut(&query_id)
+                    .get(&query_id)
                     .expect("should be present");
 
-                let obs = obs.as_mut().expect("should be present");
+                let obs = obs.as_ref().expect("should be present");
 
-                obs.dirty = true;
+                obs.dirty.store(true, Ordering::SeqCst);
 
                 // if hasn't already dirty, add to dirty batch
                 if dirtied.insert(*caller.key()) {
@@ -560,7 +574,7 @@ impl<C: Config> Engine<C> {
                 let obs =
                     obs.as_ref().expect("should've been set in the fast path");
 
-                if obs.dirty.not() {
+                if obs.dirty.load(Ordering::SeqCst).not() {
                     continue;
                 }
             }
@@ -628,7 +642,7 @@ impl<C: Config> Engine<C> {
                         query_id.query,
                         callee_meta.original_key
                     );
-                    obs.dirty = false;
+                    obs.dirty = false.into();
                 } else {
                     // fingerprint changed, need to recompute this node, stop
                     // repairing further callees
