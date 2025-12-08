@@ -331,13 +331,13 @@ impl<C: Config> Drop for ComputingLockGuard<'_, C> {
             return;
         }
 
-        let mut query_meta = self
-            .database
-            .query_metas
-            .get_mut(&self.query_id)
-            .expect("query ID should be present");
-
         if let Some(computed) = self.existing_computed.take() {
+            let mut query_meta = self
+                .database
+                .query_metas
+                .get_mut(&self.query_id)
+                .expect("query ID should be present");
+
             // restore to previous computed state
             query_meta.replace_state(State::Computed(computed));
         } else {
