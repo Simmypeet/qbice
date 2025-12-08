@@ -2,7 +2,7 @@ use std::{any::Any, collections::VecDeque, pin::Pin, sync::Arc};
 
 use dashmap::{
     DashMap,
-    mapref::one::{MappedRefMut, Ref, RefMut},
+    mapref::one::{MappedRef, MappedRefMut, Ref, RefMut},
 };
 use tokio::sync::Notify;
 
@@ -83,8 +83,7 @@ impl<C: Config> Drop for UndoRegisterCallee<'_, '_, C> {
         }
 
         if let Some(caller) = self.caller {
-            let mut caller_meta =
-                self.database.get_computing_caller_mut(caller);
+            let caller_meta = self.database.get_computing_caller(caller);
 
             caller_meta.remove_callee(&self.callee);
         }
@@ -102,8 +101,7 @@ impl<C: Config> Engine<C> {
         caller.map_or_else(
             || None,
             |caller| {
-                let mut caller_meta =
-                    self.database.get_computing_caller_mut(caller);
+                let caller_meta = self.database.get_computing_caller(caller);
 
                 caller_meta.add_callee(calee);
 
@@ -332,17 +330,27 @@ impl<C: Config> Drop for ComputingLockGuard<'_, C> {
             return;
         }
 
-        let mut query_meta = self
+        // held read lock first
+        let query_meta = self
             .database
             .query_metas
-            .get_mut(&self.query_id)
+            .get(&self.query_id)
             .expect("query ID should be present");
 
         // unwire backward dendencies
         self.database.unwire_backward_dependencies_from_callee(
             &self.query_id,
-            query_meta.get_computing().callee_info(),
+            &query_meta.get_computing().callee_info(),
         );
+
+        drop(query_meta);
+
+        // then mutably restore the state
+        let mut query_meta = self
+            .database
+            .query_metas
+            .get_mut(&self.query_id)
+            .expect("query ID should be present");
 
         if let Some(computed) = self.existing_computed.take() {
             // restore to previous computed state
@@ -384,14 +392,14 @@ impl<C: Config> Database<C> {
     ///
     /// We assume that the caller token is valid and corresponds to that the
     /// query is currently in computing state.
-    pub(super) fn get_computing_caller_mut(
+    pub(super) fn get_computing_caller(
         &self,
         caller: &Caller,
-    ) -> MappedRefMut<'_, QueryID, QueryMeta<C>, Computing> {
+    ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computing> {
         self.query_metas
-            .get_mut(&caller.0)
+            .get(&caller.0)
             .unwrap_or_else(|| panic!("query ID {:?} is not found", caller.0))
-            .map(|x| x.get_computing_mut())
+            .map(|x| x.get_computing())
     }
 
     pub(super) fn get_read_meta(

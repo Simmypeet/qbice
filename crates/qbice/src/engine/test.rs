@@ -729,7 +729,7 @@ impl<C: Config> Executor<CollectVariables, C> for CollectVariablesExecutor {
 
         for &var in query.vars.iter() {
             // simulate some async work
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(16)).await;
 
             let value = engine.query(&var).await?;
 

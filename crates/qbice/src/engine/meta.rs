@@ -7,6 +7,7 @@ use std::{
 
 use dashmap::{DashMap, DashSet};
 use enum_as_inner::EnumAsInner;
+use parking_lot::{RwLock, RwLockReadGuard};
 use tokio::sync::Notify;
 
 use crate::{
@@ -36,48 +37,49 @@ impl Compact128 {
 #[derive(Debug)]
 pub struct Computing {
     notification: Arc<Notify>,
-    callee_info: CalleeInfo,
+    callee_info: RwLock<CalleeInfo>,
     is_in_scc: AtomicBool,
 }
 
 impl Computing {
-    pub fn callee_info(&self) -> &CalleeInfo { &self.callee_info }
+    pub fn callee_info(&self) -> RwLockReadGuard<'_, CalleeInfo> {
+        self.callee_info.read()
+    }
 
     pub fn new(notification: Arc<Notify>) -> Self {
         Self {
             notification,
-            callee_info: CalleeInfo {
+            callee_info: RwLock::new(CalleeInfo {
                 callee_queries: HashMap::new(),
                 callee_order: Vec::new(),
                 transitive_firewall_callees: HashSet::new(),
-            },
+            }),
             is_in_scc: AtomicBool::new(false),
         }
     }
 
-    pub fn add_callee(&mut self, calee: QueryID) {
-        match self.callee_info.callee_queries.entry(calee) {
+    pub fn add_callee(&self, calee: QueryID) {
+        let mut callee_info = self.callee_info.write();
+
+        match callee_info.callee_queries.entry(calee) {
             Entry::Occupied(_) => {}
             Entry::Vacant(v) => {
                 v.insert(None);
 
                 // if haven't inserted, add to dependency order
-                self.callee_info.callee_order.push(calee);
+                callee_info.callee_order.push(calee);
             }
         }
     }
 
-    pub fn remove_callee(&mut self, callee: &QueryID) {
-        assert!(self.callee_info.callee_queries.remove(callee).is_some());
-        assert!(
-            self.callee_info.callee_order.remove(
-                self.callee_info
-                    .callee_order
-                    .iter()
-                    .position(|x| x == callee)
-                    .unwrap()
-            ) == *callee
-        );
+    pub fn remove_callee(&self, callee: &QueryID) {
+        let mut callee_info = self.callee_info.write();
+
+        assert!(callee_info.callee_queries.remove(callee).is_some());
+        let pos =
+            callee_info.callee_order.iter().position(|x| x == callee).unwrap();
+
+        assert!(callee_info.callee_order.remove(pos) == *callee);
     }
 }
 
@@ -206,6 +208,7 @@ impl<C: Config> QueryMeta<C> {
         self.state.as_computing().expect("should be computing")
     }
 
+    #[allow(unused)]
     pub fn get_computing_mut(&mut self) -> &mut Computing {
         self.state.as_computing_mut().expect("should be computing")
     }
@@ -288,11 +291,11 @@ impl<C: Config> Database<C> {
         callee_kind: QueryKind,
     ) {
         // add dependency for the caller
-        let mut caller_computing = self.get_computing_caller_mut(caller_source);
+        let caller_computing = self.get_computing_caller(caller_source);
+        let mut caller_callee_info = caller_computing.callee_info.write();
         {
             assert!(
-                caller_computing
-                    .callee_info
+                caller_callee_info
                     .callee_queries
                     .insert(
                         *callee_target,
@@ -310,15 +313,13 @@ impl<C: Config> Database<C> {
                     for dep in
                         &computed_callee.callee_info.transitive_firewall_callees
                     {
-                        caller_computing
-                            .callee_info
+                        caller_callee_info
                             .transitive_firewall_callees
                             .insert(*dep);
                     }
                 }
                 QueryKind::Firewall => {
-                    caller_computing
-                        .callee_info
+                    caller_callee_info
                         .transitive_firewall_callees
                         .insert(*callee_target);
                 }
@@ -345,7 +346,8 @@ impl<C: Config> Database<C> {
 
     /// Checks whether the stack of computing queries contains a cycle
     fn check_cyclic(&self, computing: &Computing, target: QueryID) -> bool {
-        if computing.callee_info.callee_queries.contains_key(&target) {
+        let caller_callee_info = computing.callee_info();
+        if caller_callee_info.callee_queries.contains_key(&target) {
             computing
                 .is_in_scc
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -356,7 +358,7 @@ impl<C: Config> Database<C> {
         let mut found = false;
 
         // OPTIMIZE: this can be parallelized
-        for dep in computing.callee_info.callee_queries.keys() {
+        for dep in caller_callee_info.callee_queries.keys() {
             let Some(state) = self.try_get_read_meta(dep) else {
                 continue;
             };
@@ -393,7 +395,7 @@ impl<C: Config> Database<C> {
 
         // mark the caller as being in scc
         if is_in_scc {
-            let meta = self.get_computing_caller_mut(called_from);
+            let meta = self.get_computing_caller(called_from);
 
             meta.is_in_scc.store(true, std::sync::atomic::Ordering::SeqCst);
 
@@ -478,7 +480,7 @@ impl<C: Config> Database<C> {
             calling_query,
             |computing| Computed {
                 result: value,
-                callee_info: computing.callee_info,
+                callee_info: computing.callee_info.into_inner(),
                 verified_at: self.current_timestamp(),
                 fingerprint: Compact128::from_u128(hash_128),
             },
@@ -685,8 +687,11 @@ impl<C: Config> Engine<C> {
             );
 
             // clear all callees, that might have been added during repairing
-            self.database.get_computing_caller_mut(&caller_id).callee_info =
-                CalleeInfo::default();
+            *self
+                .database
+                .get_computing_caller(&caller_id)
+                .callee_info
+                .write() = CalleeInfo::default();
         }
 
         // take the lock_computing's computed state in case execute_query
@@ -741,7 +746,7 @@ impl<C: Config> Engine<C> {
 
         let is_in_scc = self
             .database
-            .get_computing_caller_mut(&caller_query)
+            .get_computing_caller(&caller_query)
             .is_in_scc
             .load(std::sync::atomic::Ordering::Relaxed);
 
