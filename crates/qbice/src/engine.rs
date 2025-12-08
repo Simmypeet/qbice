@@ -6,12 +6,13 @@ use dashmap::DashMap;
 
 use crate::{
     config::{Config, DefaultConfig},
-    engine::database::Database,
+    engine::database::{Caller, Database},
     executor::{Executor, Registry},
     query::{DynValueBox, Query, QueryID},
 };
 
 mod database;
+mod meta;
 
 /// The main central database engine for managing query execution and storage.
 ///
@@ -75,7 +76,7 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
-    caller: Option<QueryID>,
+    caller: Option<Caller>,
 }
 
 impl<C: Config> std::fmt::Debug for TrackedEngine<C> {
