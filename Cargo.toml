@@ -15,6 +15,7 @@ authors = ["Simmypeet"]
 description = "The Query-Based Incremental Computation Engine"
 edition = "2024"
 rust-version = "1.88.0"
+license = "MIT"
 
 [workspace.dependencies]
 siphasher = "1.0.1"
