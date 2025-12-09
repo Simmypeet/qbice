@@ -18,6 +18,7 @@ use crate::{
     engine::{
         Engine, TrackedEngine,
         database::{Caller, ComputingLockGuard, Database, Timtestamp},
+        fingerprint,
     },
     executor::CyclicError,
     query::{
@@ -50,6 +51,10 @@ pub struct Computing {
 }
 
 impl Computing {
+    pub fn notification_owned(&self) -> Arc<Notify> {
+        self.notification.clone()
+    }
+
     pub fn callee_info(&self) -> RwLockReadGuard<'_, CalleeInfo> {
         self.callee_info.read()
     }
@@ -97,7 +102,8 @@ pub struct Computed<C: Config> {
     callee_info: CalleeInfo,
     verified_at: Timtestamp,
 
-    fingerprint: Compact128,
+    value_fingerprint: Compact128,
+    transitive_firewall_callees_fingerprint: Compact128,
 }
 
 impl<C: Config> Computed<C> {
@@ -118,18 +124,21 @@ pub enum State<C: Config> {
 
 #[derive(Debug)]
 pub struct Observation {
-    seen_fingerprint: Compact128,
+    seen_value_fingerprint: Compact128,
+    seen_transitive_firewall_callees_fingerprint: Compact128,
 
     // Dirty flag is used as an atomic because we want to avoid acquiring
     // write lock when marking as dirty when propagating dirtiness.
     dirty: AtomicBool,
 }
 
+pub type TransitiveFirewallSet = HashSet<QueryID>;
+
 #[derive(Debug, Default)]
 pub struct CalleeInfo {
     callee_queries: HashMap<QueryID, Option<Observation>>,
     callee_order: Vec<QueryID>,
-    transitive_firewall_callees: HashSet<QueryID>,
+    transitive_firewall_callees: TransitiveFirewallSet,
 }
 
 impl CalleeInfo {
@@ -230,7 +239,13 @@ impl<C: Config> QueryMeta<C> {
                 result: smallbox::smallbox!(query_value),
                 callee_info: CalleeInfo::default(),
                 verified_at: *timestamp,
-                fingerprint: Compact128::from_u128(hash_128),
+                value_fingerprint: Compact128::from_u128(hash_128),
+                transitive_firewall_callees_fingerprint: Compact128::from_u128(
+                    fingerprint::calculate_fingerprint(
+                        &TransitiveFirewallSet::default(),
+                        hash_seed,
+                    ),
+                ),
             }),
         }
     }
@@ -254,7 +269,7 @@ impl<C: Config> QueryMeta<C> {
             hash_seed,
         ));
 
-        let fingerprint_diff = hash != computed.fingerprint;
+        let fingerprint_diff = hash != computed.value_fingerprint;
 
         // if haven't incremented and the hash is different,
         // update the timestamp
@@ -268,7 +283,7 @@ impl<C: Config> QueryMeta<C> {
         // delete all callees
         computed.callee_info = CalleeInfo::default();
         computed.result = smallbox::smallbox!(query_value);
-        computed.fingerprint = hash;
+        computed.value_fingerprint = hash;
 
         SetInputResult { incremented: this_has_incremented, fingerprint_diff }
     }
@@ -382,8 +397,12 @@ impl<C: Config> Database<C> {
                     .insert(
                         *callee_target,
                         Some(Observation {
-                            seen_fingerprint: computed_callee.fingerprint,
+                            seen_value_fingerprint: computed_callee
+                                .value_fingerprint,
                             dirty: AtomicBool::new(false),
+                            seen_transitive_firewall_callees_fingerprint:
+                                computed_callee
+                                    .transitive_firewall_callees_fingerprint,
                         }),
                     )
                     .is_some(),
@@ -556,15 +575,24 @@ impl<C: Config> Database<C> {
         value: DynValueBox<C>,
         lock_computing: ComputingLockGuard<'_, C>,
     ) {
-        let hash_128 = value.hash_128_value(self.initial_seed());
+        let value_hash_128 = value.hash_128_value(self.initial_seed());
 
         self.set_computed_from_computing_and_defuse(
             calling_query,
-            |computing| Computed {
-                result: value,
-                callee_info: computing.callee_info.into_inner(),
-                verified_at: self.current_timestamp(),
-                fingerprint: Compact128::from_u128(hash_128),
+            |computing| {
+                let tfc_hash_128 = fingerprint::calculate_fingerprint(
+                    &computing.callee_info.read().transitive_firewall_callees,
+                    self.initial_seed(),
+                );
+
+                Computed {
+                    result: value,
+                    callee_info: computing.callee_info.into_inner(),
+                    verified_at: self.current_timestamp(),
+                    value_fingerprint: Compact128::from_u128(value_hash_128),
+                    transitive_firewall_callees_fingerprint:
+                        Compact128::from_u128(tfc_hash_128),
+                }
             },
             lock_computing,
         );
@@ -616,13 +644,21 @@ impl<C: Config> Database<C> {
     }
 }
 
+#[derive(Debug)]
+pub enum RepairDecision {
+    Recompute,
+    Clean { repair_transitive_firewall_callees: bool },
+}
+
 impl<C: Config> Engine<C> {
     #[tracing::instrument(skip(self, computed_callee), ret, level = "info")]
     pub(super) async fn should_recompute_query<Q: Query>(
         self: &Arc<Self>,
         query_id: &QueryWithID<'_, Q>,
-        computed_callee: &mut Computed<C>,
-    ) -> bool {
+        computed_callee: &Computed<C>,
+    ) -> RepairDecision {
+        let mut repair_transitive_firewall_callees = false;
+
         // search for queries that are dirty
         for callee in &computed_callee.callee_info.callee_order {
             // skip if not dirty
@@ -690,31 +726,32 @@ impl<C: Config> Engine<C> {
                 let obs = computed_callee
                     .callee_info
                     .callee_queries
-                    .get_mut(callee)
+                    .get(callee)
                     .expect("should be present");
 
-                let obs = obs.as_mut().expect("should be present");
+                let obs = obs.as_ref().expect("should be present");
 
-                let new_fingerprint = callee_computed.fingerprint;
+                let new_fingerprint = callee_computed.value_fingerprint;
+                let new_tfc_fingerprint =
+                    callee_computed.transitive_firewall_callees_fingerprint;
+
+                if obs.seen_transitive_firewall_callees_fingerprint
+                    != new_tfc_fingerprint
+                {
+                    repair_transitive_firewall_callees = true;
+                }
 
                 // fingerprint is the same, mark as clean
-                if obs.seen_fingerprint == new_fingerprint {
-                    tracing::info!(
-                        "{:?} observed {:?} is clean",
-                        query_id.query,
-                        callee_meta.original_key
-                    );
-                    obs.dirty = false.into();
-                } else {
+                if obs.seen_value_fingerprint != new_fingerprint {
                     // fingerprint changed, need to recompute this node, stop
                     // repairing further callees
-                    return true;
+                    return RepairDecision::Recompute;
                 }
             }
         }
 
         // all callees are clean, no need to recompute
-        false
+        RepairDecision::Clean { repair_transitive_firewall_callees }
     }
 
     #[tracing::instrument(skip(self, lock_computing), level = "info")]
@@ -737,14 +774,59 @@ impl<C: Config> Engine<C> {
         let recompute =
             self.should_recompute_query(query_id, computed_callee).await;
 
-        // the query is clean, update the verified timestamp
-        if !recompute {
-            computed_callee.verified_at = self.database.current_timestamp();
-            self.database.set_computed_from_existing_lock_computing_and_defuse(
-                &caller_id,
-                lock_computing,
-            );
-            return;
+        match recompute {
+            RepairDecision::Recompute => {
+                // continue to recompute
+            }
+
+            // the query is clean, update the verified timestamp
+            RepairDecision::Clean {
+                repair_transitive_firewall_callees: false,
+            } => {
+                computed_callee.verified_at = self.database.current_timestamp();
+                self.database
+                    .set_computed_from_existing_lock_computing_and_defuse(
+                        &caller_id,
+                        lock_computing,
+                    );
+                return;
+            }
+
+            // the query is clean, but need to repair transitive firewall
+            // callees
+            RepairDecision::Clean {
+                repair_transitive_firewall_callees: true,
+            } => {
+                let mut transitive_firewall_callees =
+                    TransitiveFirewallSet::new();
+
+                for callee in &computed_callee.callee_info.callee_order {
+                    // SAFETY: the previous call to `should_recompute_query`
+                    // has already ensured that all callees are clean
+
+                    // use spin get computed since some of the callees are not
+                    // dirty, so they might be called by a different thread and
+                    // turn into computing state.
+                    let callee_meta =
+                        self.database.spin_get_computed(callee).await;
+
+                    transitive_firewall_callees.extend(
+                        &callee_meta.callee_info.transitive_firewall_callees,
+                    );
+                }
+
+                computed_callee.callee_info.transitive_firewall_callees =
+                    transitive_firewall_callees;
+                computed_callee.verified_at = self.database.current_timestamp();
+
+                self.database
+                    .set_computed_from_existing_lock_computing_and_defuse(
+                        &caller_id,
+                        lock_computing,
+                    );
+
+                return;
+            }
         }
 
         // before recomputing the query, unwire all previous dependencies
@@ -772,7 +854,7 @@ impl<C: Config> Engine<C> {
 
         // take the lock_computing's computed state in case execute_query
         // cancels as we have already unwired the dependencies.
-        lock_computing.take_prior_computed();
+        assert!(lock_computing.take_prior_computed().is_some());
 
         // now, execute the query again
         self.execute_query(query_id, lock_computing).await;

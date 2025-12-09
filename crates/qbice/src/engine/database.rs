@@ -773,6 +773,27 @@ impl<C: Config> Database<C> {
         lock_computing.defuse_and_notify();
     }
 
+    pub(super) async fn spin_get_computed(
+        &self,
+        query_id: &QueryID,
+    ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computed<C>> {
+        loop {
+            let meta = self.query_metas.get(query_id).unwrap();
+            match meta.state() {
+                State::Computing(computing) => {
+                    // wait for notification
+                    let noti = computing.notification_owned();
+                    drop(meta);
+
+                    noti.notified().await;
+                }
+                State::Computed(_) => {
+                    return meta.map(|x| x.get_computed());
+                }
+            }
+        }
+    }
+
     pub(super) fn set_input<Q: Query>(
         &mut self,
         query_key: Q,

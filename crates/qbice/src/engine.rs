@@ -114,6 +114,7 @@ use crate::{
 };
 
 mod database;
+mod fingerprint;
 mod meta;
 mod visualization;
 
