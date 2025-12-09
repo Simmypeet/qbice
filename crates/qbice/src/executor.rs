@@ -1,4 +1,113 @@
-//! Defines the [`Executor`] trait for executing queries.
+//! Query executor definitions and registry.
+//!
+//! This module provides the [`Executor`] trait for defining query computation
+//! logic, the [`CyclicError`] type for reporting cyclic dependencies, and the
+//! [`Registry`] for managing executors.
+//!
+//! # Defining Executors
+//!
+//! An executor defines how to compute the value for a specific query type.
+//! Executors are async and can depend on other queries through the
+//! [`TrackedEngine`].
+//!
+//! ## Basic Executor
+//!
+//! ```rust
+//! use std::sync::Arc;
+//! use qbice::{
+//!     Identifiable, StableHash,
+//!     config::{Config, DefaultConfig},
+//!     engine::{Engine, TrackedEngine},
+//!     executor::{CyclicError, Executor},
+//!     query::Query,
+//! };
+//!
+//! // Define a query
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+//! struct Factorial(u64);
+//!
+//! impl Query for Factorial {
+//!     type Value = u64;
+//! }
+//!
+//! // Define the executor
+//! struct FactorialExecutor;
+//!
+//! impl<C: Config> Executor<Factorial, C> for FactorialExecutor {
+//!     async fn execute(
+//!         &self,
+//!         query: &Factorial,
+//!         engine: &TrackedEngine<C>,
+//!     ) -> Result<u64, CyclicError> {
+//!         let n = query.0;
+//!         if n <= 1 {
+//!             Ok(1)
+//!         } else {
+//!             // Query for factorial of n-1
+//!             let prev = engine.query(&Factorial(n - 1)).await?;
+//!             Ok(n * prev)
+//!         }
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! // Register and use
+//! let mut engine = Engine::<DefaultConfig>::new();
+//! engine.register_executor::<Factorial, _>(Arc::new(FactorialExecutor));
+//!
+//! // Set base case as input
+//! {
+//!     let mut session = engine.input_session();
+//!     session.set_input(Factorial(0), 1);
+//!     session.set_input(Factorial(1), 1);
+//! }
+//!
+//! let engine = Arc::new(engine);
+//! let tracked = engine.tracked();
+//! assert_eq!(tracked.query(&Factorial(5)).await, Ok(120));
+//! # }
+//! ```
+//!
+//! ## Executor with State
+//!
+//! Executors can hold state (e.g., caches, configuration):
+//!
+//! ```rust
+//! use std::sync::atomic::{AtomicUsize, Ordering};
+//! use qbice::{
+//!     Identifiable, StableHash,
+//!     config::Config,
+//!     engine::TrackedEngine,
+//!     executor::{CyclicError, Executor},
+//!     query::Query,
+//! };
+//!
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+//! struct CountedQuery(u64);
+//!
+//! impl Query for CountedQuery {
+//!     type Value = u64;
+//! }
+//!
+//! /// An executor that tracks how many times it has been called.
+//! struct CountingExecutor {
+//!     call_count: AtomicUsize,
+//! }
+//!
+//! impl<C: Config> Executor<CountedQuery, C> for CountingExecutor {
+//!     async fn execute(
+//!         &self,
+//!         query: &CountedQuery,
+//!         _engine: &TrackedEngine<C>,
+//!     ) -> Result<u64, CyclicError> {
+//!         self.call_count.fetch_add(1, Ordering::Relaxed);
+//!         Ok(query.0 * 2)
+//!     }
+//! }
+//! ```
+//!
+//! [`TrackedEngine`]: crate::engine::TrackedEngine
 
 use std::{
     any::Any, collections::HashMap, mem::MaybeUninit, pin::Pin, sync::Arc,
@@ -13,6 +122,65 @@ use crate::{
 };
 
 /// Error indicating that a cyclic query dependency was detected.
+///
+/// This error is returned when a query directly or indirectly depends on
+/// itself, creating an infinite loop in the dependency graph.
+///
+/// # Example
+///
+/// A cycle occurs when Query A depends on Query B, which depends on Query A:
+///
+/// ```text
+/// Query A ──depends on──> Query B ──depends on──> Query A (cycle!)
+/// ```
+///
+/// # Handling Cycles
+///
+/// There are several strategies for handling cyclic dependencies:
+///
+/// 1. **Restructure queries**: Break the cycle by introducing intermediate
+///    queries or restructuring the computation
+///
+/// 2. **Use SCC values**: For queries that intentionally form cycles (e.g.,
+///    fixed-point computations), implement [`Executor::scc_value`] to provide
+///    a default value when a cycle is detected
+///
+/// # Example of SCC Handling
+///
+/// ```rust
+/// use qbice::{
+///     Identifiable, StableHash,
+///     config::Config,
+///     engine::TrackedEngine,
+///     executor::{CyclicError, Executor},
+///     query::{Query, ExecutionStyle},
+/// };
+///
+/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// struct FixedPoint(u64);
+///
+/// impl Query for FixedPoint {
+///     type Value = i64;
+/// }
+///
+/// struct FixedPointExecutor;
+///
+/// impl<C: Config> Executor<FixedPoint, C> for FixedPointExecutor {
+///     async fn execute(
+///         &self,
+///         query: &FixedPoint,
+///         engine: &TrackedEngine<C>,
+///     ) -> Result<i64, CyclicError> {
+///         // Computation that may form cycles
+///         Ok(0)
+///     }
+///
+///     fn scc_value() -> i64 {
+///         // Return a default value when a cycle is detected
+///         0
+///     }
+/// }
+/// ```
 #[derive(
     Debug,
     Clone,
@@ -28,11 +196,78 @@ use crate::{
 #[error("cyclic query detected")]
 pub struct CyclicError;
 
-/// Representing the executor of a [`Query`].
+/// Defines the computation logic for a specific query type.
 ///
-/// The executor defines the computation logic for a specific query type.
+/// An executor is responsible for computing the value associated with a
+/// query key. Executors are registered with the engine and invoked
+/// automatically when a query is requested.
+///
+/// # Type Parameters
+///
+/// - `Q`: The query type this executor handles
+/// - `C`: The engine configuration type
+///
+/// # Thread Safety
+///
+/// Executors must be `Send + Sync` since they may be called from multiple
+/// threads concurrently. Use interior mutability (e.g., `Mutex`, `RwLock`,
+/// atomics) if the executor needs mutable state.
+///
+/// # Querying Dependencies
+///
+/// Use the [`TrackedEngine`] parameter to query for dependent values:
+///
+/// ```rust
+/// use qbice::{
+///     Identifiable, StableHash,
+///     config::Config,
+///     engine::TrackedEngine,
+///     executor::{CyclicError, Executor},
+///     query::Query,
+/// };
+///
+/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// struct Input(u64);
+/// impl Query for Input { type Value = i64; }
+///
+/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// struct Doubled(u64);
+/// impl Query for Doubled { type Value = i64; }
+///
+/// struct DoubledExecutor;
+///
+/// impl<C: Config> Executor<Doubled, C> for DoubledExecutor {
+///     async fn execute(
+///         &self,
+///         query: &Doubled,
+///         engine: &TrackedEngine<C>,
+///     ) -> Result<i64, CyclicError> {
+///         // Query the input - this creates a dependency
+///         let input = engine.query(&Input(query.0)).await?;
+///         Ok(input * 2)
+///     }
+/// }
+/// ```
+///
+/// [`TrackedEngine`]: crate::engine::TrackedEngine
 pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
-    /// Execute the given query using the provided tracked engine.
+    /// Executes the query and returns its computed value.
+    ///
+    /// # Arguments
+    ///
+    /// - `query`: The query key to compute
+    /// - `engine`: The tracked engine for querying dependencies
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(value)` on success, or `Err(CyclicError)` if a cyclic
+    /// dependency is detected.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This method should be cancellation-safe. If the future is dropped
+    /// before completion, the engine will properly clean up any partial
+    /// state.
     fn execute<'s, 'q, 'e>(
         &'s self,
         query: &'q Q,
@@ -41,14 +276,32 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     + Send
     + use<'s, 'q, 'e, Self, Q, C>;
 
-    /// The kind of the query.
+    /// Returns the execution style for this query type.
+    ///
+    /// Override this to specify non-default execution behavior:
+    ///
+    /// - [`ExecutionStyle::Normal`]: Standard dependency tracking (default)
+    /// - [`ExecutionStyle::Projection`]: Fast field extraction
+    /// - [`ExecutionStyle::Firewall`]: Change boundary
+    ///
+    /// # Default
+    ///
+    /// Returns [`ExecutionStyle::Normal`].
     #[must_use]
     fn execution_style() -> ExecutionStyle { ExecutionStyle::Normal }
 
-    /// The default value for the SCC (Strongly Connected Component) value.
+    /// Returns the default value for strongly-connected component (SCC)
+    /// resolution.
     ///
-    /// This is the value to returned when another query that is not a part of a
-    /// SCC try to query for it.
+    /// When a query is part of a cycle and another query outside the SCC
+    /// tries to access it, this value is returned instead of causing a
+    /// deadlock or infinite recursion.
+    ///
+    /// # Panics
+    ///
+    /// The default implementation panics. Override this method if your
+    /// query intentionally participates in cycles (e.g., fixed-point
+    /// computations).
     #[must_use]
     fn scc_value() -> Q::Value { panic!("SCC value is not specified") }
 }
@@ -169,15 +422,82 @@ impl<C: Config> Entry<C> {
     }
 }
 
-/// Contains the [`Executor`] objects for each key type. This struct allows
-/// registering and retrieving executors for different query key types.
+/// Registry for managing query executors.
+///
+/// The registry stores executors for different query types and provides
+/// lookup functionality for the engine. Each query type can have exactly
+/// one executor registered.
+///
+/// # Thread Safety
+///
+/// The registry itself is not thread-safe for mutation. Executors should
+/// be registered during engine setup before any queries are executed.
+///
+/// # Example
+///
+/// ```rust
+/// use std::sync::Arc;
+/// use qbice::{
+///     Identifiable, StableHash,
+///     config::{Config, DefaultConfig},
+///     engine::{Engine, TrackedEngine},
+///     executor::{CyclicError, Executor, Registry},
+///     query::Query,
+/// };
+///
+/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// struct MyQuery(u64);
+/// impl Query for MyQuery { type Value = i64; }
+///
+/// struct MyExecutor;
+/// impl<C: Config> Executor<MyQuery, C> for MyExecutor {
+///     async fn execute(&self, q: &MyQuery, _: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+///         Ok(q.0 as i64)
+///     }
+/// }
+///
+/// let mut engine = Engine::<DefaultConfig>::new();
+/// engine.register_executor::<MyQuery, _>(Arc::new(MyExecutor));
+/// ```
 #[derive(Debug, Default)]
 pub struct Registry<C: Config> {
     executors_by_key_type_id: HashMap<StableTypeID, Entry<C>>,
 }
 
 impl<C: Config> Registry<C> {
-    /// Register a new executor for the given query type.
+    /// Registers an executor for the given query type.
+    ///
+    /// # Panics
+    ///
+    /// If an executor is already registered for this query type, the
+    /// previous registration is silently replaced.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use qbice::{
+    ///     Identifiable, StableHash,
+    ///     config::{Config, DefaultConfig},
+    ///     engine::TrackedEngine,
+    ///     executor::{CyclicError, Executor, Registry},
+    ///     query::Query,
+    /// };
+    ///
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// struct MyQuery;
+    /// impl Query for MyQuery { type Value = (); }
+    ///
+    /// struct MyExecutor;
+    /// impl<C: Config> Executor<MyQuery, C> for MyExecutor {
+    ///     async fn execute(&self, _: &MyQuery, _: &TrackedEngine<C>) -> Result<(), CyclicError> {
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// let mut registry = Registry::<DefaultConfig>::default();
+    /// registry.register::<MyQuery, _>(Arc::new(MyExecutor));
+    /// ```
     pub fn register<Q: Query, E: Executor<Q, C> + 'static>(
         &mut self,
         executor: Arc<E>,
@@ -186,7 +506,11 @@ impl<C: Config> Registry<C> {
         self.executors_by_key_type_id.insert(Q::STABLE_TYPE_ID, entry);
     }
 
-    /// Retrieve the executor entry for the given query type id.
+    /// Retrieves the executor entry for the given query type ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no executor is registered for the query type.
     #[must_use]
     pub(crate) fn get_executor_entry_by_type_id(
         &self,
@@ -197,7 +521,11 @@ impl<C: Config> Registry<C> {
         })
     }
 
-    /// Retrieve the executor entry for the given query type.
+    /// Retrieves the executor entry for the given query type.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no executor is registered for the query type.
     #[must_use]
     pub(crate) fn get_executor_entry<Q: Query>(&self) -> &Entry<C> {
         self.executors_by_key_type_id.get(&Q::STABLE_TYPE_ID).unwrap_or_else(

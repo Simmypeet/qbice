@@ -296,7 +296,70 @@ impl<C: Config> Engine<C> {
 }
 
 impl<C: Config> TrackedEngine<C> {
-    /// Query the database for a value.
+    /// Executes a query and returns its value.
+    ///
+    /// This is the primary method for retrieving computed values from the
+    /// engine. The engine will:
+    ///
+    /// 1. Check the local cache for a cached result
+    /// 2. Check if the query has a valid cached result in the database
+    /// 3. If not valid, execute the query's registered executor
+    /// 4. Track dependencies if called from within another executor
+    ///
+    /// # Incremental Behavior
+    ///
+    /// Results are cached and reused when possible. A query is recomputed
+    /// only if:
+    /// - It has never been computed before
+    /// - Any of its dependencies have changed since the last computation
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CyclicError`] if a cyclic dependency is detected (the query
+    /// directly or indirectly depends on itself).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use qbice::{
+    ///     Identifiable, StableHash,
+    ///     config::DefaultConfig,
+    ///     engine::{Engine, TrackedEngine},
+    ///     executor::{CyclicError, Executor},
+    ///     query::Query,
+    /// };
+    ///
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// struct Double(i64);
+    /// impl Query for Double { type Value = i64; }
+    ///
+    /// struct DoubleExecutor;
+    /// impl<C: qbice::config::Config> Executor<Double, C> for DoubleExecutor {
+    ///     async fn execute(&self, q: &Double, _: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+    ///         Ok(q.0 * 2)
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut engine = Engine::<DefaultConfig>::new();
+    /// engine.register_executor::<Double, _>(Arc::new(DoubleExecutor));
+    ///
+    /// let engine = Arc::new(engine);
+    /// let tracked = engine.tracked();
+    ///
+    /// // Execute the query
+    /// let result = tracked.query(&Double(21)).await;
+    /// assert_eq!(result, Ok(42));
+    ///
+    /// // Subsequent queries return cached result
+    /// let result2 = tracked.query(&Double(21)).await;
+    /// assert_eq!(result2, Ok(42));
+    /// # }
+    /// ```
+    ///
+    /// [`CyclicError`]: crate::executor::CyclicError
     pub async fn query<Q: Query>(
         &self,
         query: &Q,
@@ -326,7 +389,58 @@ impl<C: Config> TrackedEngine<C> {
     }
 }
 
-/// A struct allowing to set input values for queries.
+/// A session for setting input values in the engine.
+///
+/// Input sessions provide a way to set initial values or update existing
+/// input queries. When the session is dropped, it triggers dirty propagation
+/// to mark affected queries for recomputation.
+///
+/// # Creating an Input Session
+///
+/// Create an input session from a mutable reference to the engine:
+///
+/// ```rust
+/// use qbice::{config::DefaultConfig, engine::Engine};
+///
+/// let mut engine = Engine::<DefaultConfig>::new();
+/// let mut session = engine.input_session();
+/// // Set inputs here
+/// drop(session); // Or let it go out of scope
+/// ```
+///
+/// # Input Queries
+///
+/// Input queries are leaf nodes in the dependency graph. They don't depend
+/// on other queries and their values are set directly via this session.
+///
+/// ```rust
+/// use qbice::{
+///     Identifiable, StableHash,
+///     config::DefaultConfig,
+///     engine::Engine,
+///     query::Query,
+/// };
+///
+/// // Define an input query
+/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// struct ConfigValue(String);
+/// impl Query for ConfigValue { type Value = i64; }
+///
+/// let mut engine = Engine::<DefaultConfig>::new();
+///
+/// // Set input values
+/// {
+///     let mut session = engine.input_session();
+///     session.set_input(ConfigValue("max_connections".into()), 100);
+///     session.set_input(ConfigValue("timeout_ms".into()), 5000);
+/// } // Dirty propagation happens here
+/// ```
+///
+/// # Batching
+///
+/// Multiple `set_input` calls within the same session are batched together.
+/// Dirty propagation only occurs once when the session is dropped, making
+/// bulk updates efficient.
 #[derive(Debug)]
 pub struct InputSession<'x, C: Config> {
     engine: &'x mut Engine<C>,
@@ -335,7 +449,36 @@ pub struct InputSession<'x, C: Config> {
 }
 
 impl<C: Config> Engine<C> {
-    /// Create a [`InputSession`] allowing to set input values for queries.
+    /// Creates an input session for setting query input values.
+    ///
+    /// The returned session allows you to set values for input queries. When
+    /// the session is dropped, dirty propagation is triggered for any changed
+    /// inputs.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use qbice::{
+    ///     Identifiable, StableHash,
+    ///     config::DefaultConfig,
+    ///     engine::Engine,
+    ///     query::Query,
+    /// };
+    ///
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// struct Input(u64);
+    /// impl Query for Input { type Value = i64; }
+    ///
+    /// let mut engine = Engine::<DefaultConfig>::new();
+    ///
+    /// // Create a session and set inputs
+    /// {
+    ///     let mut session = engine.input_session();
+    ///     session.set_input(Input(0), 42);
+    ///     session.set_input(Input(1), 100);
+    /// }
+    /// // Dirty propagation happens when session is dropped
+    /// ```
     #[must_use]
     pub const fn input_session(&mut self) -> InputSession<'_, C> {
         InputSession {
@@ -347,7 +490,53 @@ impl<C: Config> Engine<C> {
 }
 
 impl<C: Config> InputSession<'_, C> {
-    /// Set an input value for a query.
+    /// Sets an input value for a query.
+    ///
+    /// This method stores the value for the given query key. If the value
+    /// differs from the previously stored value (based on fingerprint
+    /// comparison), the query will be marked for dirty propagation when
+    /// the session is dropped.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `Q`: The query type (must implement [`Query`])
+    ///
+    /// # Arguments
+    ///
+    /// - `query_key`: The query key to set the value for
+    /// - `value`: The value to store
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use qbice::{
+    ///     Identifiable, StableHash,
+    ///     config::DefaultConfig,
+    ///     engine::Engine,
+    ///     query::Query,
+    /// };
+    ///
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// struct Counter(u64);
+    /// impl Query for Counter { type Value = i64; }
+    ///
+    /// let mut engine = Engine::<DefaultConfig>::new();
+    ///
+    /// {
+    ///     let mut session = engine.input_session();
+    ///     
+    ///     // Set initial value
+    ///     session.set_input(Counter(0), 0);
+    ///     
+    ///     // Setting the same value again won't trigger recomputation
+    ///     session.set_input(Counter(0), 0);
+    ///     
+    ///     // Setting a different value will trigger dirty propagation
+    ///     session.set_input(Counter(0), 1);
+    /// }
+    /// ```
+    ///
+    /// [`Query`]: crate::query::Query
     pub fn set_input<Q: Query>(&mut self, query_key: Q, value: Q::Value) {
         let query_id = self.engine.database.query_id(&query_key);
 

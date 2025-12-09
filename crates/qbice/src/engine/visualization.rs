@@ -1,7 +1,77 @@
-//! HTML+JS visualization of the dependency graph using Cytoscape.js.
+//! Interactive HTML visualization of the query dependency graph.
 //!
 //! This module provides functionality to export the query dependency graph
-//! as an interactive HTML page.
+//! as an interactive HTML page using Cytoscape.js. This is useful for
+//! debugging, understanding query relationships, and optimizing your
+//! incremental computation graph.
+//!
+//! # Features
+//!
+//! The generated visualization supports:
+//! - **Pan and zoom**: Navigate large dependency graphs
+//! - **Node inspection**: Click nodes to see query details and computed values
+//! - **Search**: Find specific queries by name
+//! - **Filtering**: Filter by query type
+//! - **Edge coloring**: Distinguish clean vs dirty dependency edges
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::sync::Arc;
+//! use qbice::{
+//!     Identifiable, StableHash,
+//!     config::DefaultConfig,
+//!     engine::{Engine, TrackedEngine},
+//!     executor::{CyclicError, Executor},
+//!     query::Query,
+//! };
+//!
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+//! struct Input(u64);
+//! impl Query for Input { type Value = i64; }
+//!
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+//! struct Sum { a: Input, b: Input }
+//! impl Query for Sum { type Value = i64; }
+//!
+//! struct SumExecutor;
+//! impl<C: qbice::config::Config> Executor<Sum, C> for SumExecutor {
+//!     async fn execute(&self, q: &Sum, e: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+//!         Ok(e.query(&q.a).await? + e.query(&q.b).await?)
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() -> std::io::Result<()> {
+//!     let mut engine = Engine::<DefaultConfig>::new();
+//!     engine.register_executor::<Sum, _>(Arc::new(SumExecutor));
+//!
+//!     {
+//!         let mut session = engine.input_session();
+//!         session.set_input(Input(0), 10);
+//!         session.set_input(Input(1), 20);
+//!     }
+//!
+//!     let mut engine = Arc::new(engine);
+//!     let tracked = engine.clone().tracked();
+//!     let query = Sum { a: Input(0), b: Input(1) };
+//!     let _ = tracked.query(&query).await;
+//!     drop(tracked);
+//!
+//!     // Generate visualization
+//!     let engine_mut = Arc::get_mut(&mut engine).unwrap();
+//!     engine_mut.visualize_html(&query, "dependency_graph.html")?;
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Graph Structure
+//!
+//! The visualization shows:
+//! - **Nodes**: Each query instance (input queries are highlighted)
+//! - **Edges**: Dependencies between queries (caller → callee)
+//! - **Colors**: Clean edges (green), dirty edges (red), unknown (gray)
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -17,54 +87,85 @@ use crate::{
     query::{DynQuery, Query, QueryID},
 };
 
-/// Information about a node in the dependency graph.
+/// Information about a node in the dependency graph visualization.
+///
+/// Each node represents a single query instance in the graph.
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
-    /// The query ID of this node.
+    /// The unique identifier for this query.
     pub id: QueryID,
-    /// Debug representation of the query key.
+    /// Human-readable debug representation of the query key.
     pub label: String,
-    /// Whether this node is an input query.
+    /// Whether this is an input query (leaf node).
     pub is_input: bool,
-    /// The type name of the query.
+    /// The type name of the query for filtering.
     pub type_name: String,
-    /// Debug representation of the computed result value.
+    /// Debug representation of the computed result, if available.
     pub result: Option<String>,
 }
 
-/// Information about an edge in the dependency graph.
+/// Information about an edge in the dependency graph visualization.
+///
+/// Edges represent dependencies between queries (caller depends on callee).
 #[derive(Debug, Clone, Copy)]
 pub struct EdgeInfo {
-    /// The source query ID (caller).
+    /// The query ID of the caller (the query that depends on another).
     pub source: QueryID,
-    /// The target query ID (callee).
+    /// The query ID of the callee (the query being depended upon).
     pub target: QueryID,
-    /// Whether this dependency edge is dirty (needs revalidation).
+    /// Whether this dependency is dirty (needs revalidation).
+    /// - `Some(true)`: The edge is dirty
+    /// - `Some(false)`: The edge is clean
+    /// - `None`: Dirty status unknown
     pub is_dirty: Option<bool>,
 }
 
 /// A snapshot of the dependency graph for visualization.
+///
+/// This struct captures the state of the query graph at a point in time,
+/// including all nodes and their dependency relationships.
 #[derive(Debug, Clone)]
 pub struct GraphSnapshot {
-    /// All nodes in the graph.
+    /// All query nodes in the graph.
     pub nodes: Vec<NodeInfo>,
-    /// All edges in the graph (caller -> callee, i.e., forward dependencies).
+    /// All dependency edges (caller → callee).
     pub edges: Vec<EdgeInfo>,
 }
 
 impl<C: Config> Engine<C> {
-    /// Creates a snapshot of the dependency graph starting from a specific
-    /// query, traversing only forward dependencies (callees).
+    /// Creates a snapshot of the dependency graph starting from a query.
     ///
     /// This captures all queries that the given query depends on, directly or
-    /// transitively.
-    ///
-    /// This method takes `&mut self` to ensure no concurrent requests or
-    /// modifications are made while traversing the database.
+    /// transitively, by traversing forward dependencies (callees).
     ///
     /// # Arguments
     ///
-    /// * `query` - The root query to start the traversal from.
+    /// * `query` - The root query to start the traversal from
+    ///
+    /// # Returns
+    ///
+    /// A [`GraphSnapshot`] containing all reachable nodes and edges.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use qbice::{
+    ///     Identifiable, StableHash,
+    ///     config::DefaultConfig,
+    ///     engine::Engine,
+    ///     query::Query,
+    /// };
+    ///
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// struct MyQuery(u64);
+    /// impl Query for MyQuery { type Value = i64; }
+    ///
+    /// let mut engine = Engine::<DefaultConfig>::new();
+    /// // ... register executors and run queries ...
+    ///
+    /// let snapshot = engine.snapshot_graph_from(&MyQuery(0));
+    /// println!("Graph has {} nodes", snapshot.nodes.len());
+    /// ```
     #[must_use]
     pub fn snapshot_graph_from<Q: Query>(
         &mut self,
@@ -137,28 +238,50 @@ impl<C: Config> Engine<C> {
         GraphSnapshot { nodes, edges }
     }
 
-    /// Generates an interactive HTML visualization of the dependency graph
-    /// starting from a specific query.
+    /// Generates an interactive HTML visualization of the dependency graph.
     ///
-    /// The generated HTML file uses Cytoscape.js to render an interactive
-    /// graph showing only forward dependencies (what the query depends on).
-    /// Features include:
-    /// - Pan and zoom the graph
-    /// - Click nodes to see details
-    /// - Search for specific queries
-    /// - Filter by query type
+    /// Creates an HTML file with an interactive Cytoscape.js-based
+    /// visualization of the query dependency graph starting from the
+    /// specified query.
     ///
-    /// This method takes `&mut self` to ensure no concurrent requests or
-    /// modifications are made while visualizing the database.
+    /// # Features
+    ///
+    /// The generated page includes:
+    /// - Interactive pan and zoom
+    /// - Click-to-inspect node details
+    /// - Search functionality
+    /// - Query type filtering
+    /// - Color-coded edges (clean/dirty/unknown)
     ///
     /// # Arguments
     ///
-    /// * `query` - The root query to start visualization from.
-    /// * `output_path` - The path where the HTML file will be written.
+    /// * `query` - The root query to start visualization from
+    /// * `output_path` - Path where the HTML file will be written
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use qbice::{
+    ///     Identifiable, StableHash,
+    ///     config::DefaultConfig,
+    ///     engine::Engine,
+    ///     query::Query,
+    /// };
+    ///
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// struct MyQuery(u64);
+    /// impl Query for MyQuery { type Value = i64; }
+    ///
+    /// let mut engine = Engine::<DefaultConfig>::new();
+    /// // ... register executors and run queries ...
+    ///
+    /// engine.visualize_html(&MyQuery(0), "graph.html")
+    ///     .expect("Failed to write visualization");
+    /// ```
     pub fn visualize_html<Q: Query>(
         &mut self,
         query: &Q,
@@ -169,11 +292,34 @@ impl<C: Config> Engine<C> {
     }
 }
 
-/// Writes the HTML visualization to a file.
+/// Writes a graph snapshot to an HTML file.
+///
+/// This is a lower-level function for when you have a [`GraphSnapshot`]
+/// and want to write it to a file. For most use cases, prefer
+/// [`Engine::visualize_html`].
+///
+/// # Arguments
+///
+/// * `snapshot` - The graph snapshot to visualize
+/// * `output_path` - Path where the HTML file will be written
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be written.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use qbice::engine::{GraphSnapshot, write_html_visualization};
+///
+/// let snapshot = GraphSnapshot {
+///     nodes: vec![],
+///     edges: vec![],
+/// };
+///
+/// write_html_visualization(&snapshot, "empty_graph.html")
+///     .expect("Failed to write");
+/// ```
 pub fn write_html_visualization(
     snapshot: &GraphSnapshot,
     output_path: impl AsRef<Path>,
