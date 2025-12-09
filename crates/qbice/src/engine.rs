@@ -96,31 +96,5 @@ impl<C: Config> std::fmt::Debug for TrackedEngine<C> {
     }
 }
 
-impl<C: Config> TrackedEngine<C> {
-    /// Generates an interactive HTML visualization of the dependency graph.
-    ///
-    /// This is a convenience method that delegates to
-    /// [`Engine::visualize_html`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be written.
-    pub fn visualize_html(
-        &self,
-        output_path: impl AsRef<std::path::Path>,
-    ) -> std::io::Result<()> {
-        self.engine.visualize_html(output_path)
-    }
-
-    /// Creates a snapshot of the current dependency graph.
-    ///
-    /// This is a convenience method that delegates to
-    /// [`Engine::snapshot_graph`].
-    #[must_use]
-    pub fn snapshot_graph(&self) -> GraphSnapshot {
-        self.engine.snapshot_graph()
-    }
-}
-
 #[cfg(test)]
 mod test;

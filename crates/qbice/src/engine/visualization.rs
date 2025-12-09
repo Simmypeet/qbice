@@ -4,14 +4,18 @@
 //! as an interactive HTML page.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Write as FmtWrite,
     fs,
     io::Write,
     path::Path,
 };
 
-use crate::{config::Config, engine::Engine, query::QueryID};
+use crate::{
+    config::Config,
+    engine::{TrackedEngine, meta::State},
+    query::{DynQuery, Query, QueryID},
+};
 
 /// Information about a node in the dependency graph.
 #[derive(Debug, Clone)]
@@ -40,23 +44,46 @@ pub struct EdgeInfo {
 pub struct GraphSnapshot {
     /// All nodes in the graph.
     pub nodes: Vec<NodeInfo>,
-    /// All edges in the graph (caller -> callee).
+    /// All edges in the graph (caller -> callee, i.e., forward dependencies).
     pub edges: Vec<EdgeInfo>,
 }
 
-impl<C: Config> Engine<C> {
-    /// Creates a snapshot of the current dependency graph.
+impl<C: Config> TrackedEngine<C> {
+    /// Creates a snapshot of the dependency graph starting from a specific
+    /// query, traversing only forward dependencies (callees).
     ///
-    /// This captures all queries and their dependencies at the current moment.
+    /// This captures all queries that the given query depends on, directly or
+    /// transitively.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The root query to start the traversal from.
     #[must_use]
-    pub fn snapshot_graph(&self) -> GraphSnapshot {
+    pub fn snapshot_graph_from<Q: Query>(&self, query: &Q) -> GraphSnapshot {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
-        let mut seen_edges: HashSet<(QueryID, QueryID)> = HashSet::new();
+        let mut visited: HashSet<QueryID> = HashSet::new();
+        let mut queue: VecDeque<QueryID> = VecDeque::new();
 
-        // Iterate through all query metas
-        for entry in &self.database.query_metas {
-            let query_id = *entry.key();
+        // Compute the root query ID
+        let root_id = DynQuery::<C>::query_identifier(
+            query,
+            self.engine.database.initial_seed(),
+        );
+
+        queue.push_back(root_id);
+
+        // BFS traversal of forward dependencies
+        while let Some(current_id) = queue.pop_front() {
+            if !visited.insert(current_id) {
+                continue;
+            }
+
+            // Get the query meta with proper synchronization via DashMap
+            let Some(entry) = self.engine.database.query_metas.get(&current_id)
+            else {
+                continue;
+            };
             let meta = entry.value();
 
             // Create node info
@@ -64,19 +91,25 @@ impl<C: Config> Engine<C> {
             let type_name = format!("{:?}", meta.original_key.stable_type_id());
 
             nodes.push(NodeInfo {
-                id: query_id,
+                id: current_id,
                 label,
                 is_input: meta.is_input,
                 type_name,
             });
 
-            // Create edges from callers to this query
-            for caller in meta.caller_info.caller_queries.iter() {
-                let caller_id: QueryID = *caller.key();
-                let edge = (caller_id, query_id);
-                if seen_edges.insert(edge) {
-                    edges
-                        .push(EdgeInfo { source: caller_id, target: query_id });
+            // Get forward dependencies (callees) from computed state
+            if let State::Computed(computed) = meta.state() {
+                for callee_id in computed.callee_info().callee_order() {
+                    // Add edge: current -> callee (forward dependency)
+                    edges.push(EdgeInfo {
+                        source: current_id,
+                        target: *callee_id,
+                    });
+
+                    // Queue callee for traversal if not visited
+                    if !visited.contains(callee_id) {
+                        queue.push_back(*callee_id);
+                    }
                 }
             }
         }
@@ -84,10 +117,12 @@ impl<C: Config> Engine<C> {
         GraphSnapshot { nodes, edges }
     }
 
-    /// Generates an interactive HTML visualization of the dependency graph.
+    /// Generates an interactive HTML visualization of the dependency graph
+    /// starting from a specific query.
     ///
     /// The generated HTML file uses Cytoscape.js to render an interactive
-    /// graph where you can:
+    /// graph showing only forward dependencies (what the query depends on).
+    /// Features include:
     /// - Pan and zoom the graph
     /// - Click nodes to see details
     /// - Search for specific queries
@@ -95,16 +130,18 @@ impl<C: Config> Engine<C> {
     ///
     /// # Arguments
     ///
+    /// * `query` - The root query to start visualization from.
     /// * `output_path` - The path where the HTML file will be written.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
-    pub fn visualize_html(
+    pub fn visualize_html<Q: Query>(
         &self,
+        query: &Q,
         output_path: impl AsRef<Path>,
     ) -> std::io::Result<()> {
-        let snapshot = self.snapshot_graph();
+        let snapshot = self.snapshot_graph_from(query);
         write_html_visualization(&snapshot, output_path)
     }
 }
@@ -144,8 +181,8 @@ fn escape_js_string(s: &str) -> String {
 
 /// Converts a `QueryID` to a stable string identifier for Cytoscape.
 fn query_id_to_string(id: &QueryID) -> String {
-    // Use the hash_128 as a unique identifier
-    format!("q_{:032x}", id.hash_128())
+    // Use both stable_type_id and hash_128 to ensure uniqueness across types
+    format!("q_{:032x}_{:032x}", id.stable_type_id().as_u128(), id.hash_128())
 }
 
 /// Generates the nodes JSON array for Cytoscape.

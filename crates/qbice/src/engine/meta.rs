@@ -102,6 +102,9 @@ pub struct Computed<C: Config> {
 
 impl<C: Config> Computed<C> {
     pub const fn verified_at(&self) -> Timtestamp { self.verified_at }
+
+    /// Returns the callee info containing forward dependencies.
+    pub const fn callee_info(&self) -> &CalleeInfo { &self.callee_info }
 }
 
 #[derive(Debug, EnumAsInner)]
@@ -124,6 +127,11 @@ pub struct CalleeInfo {
     callee_queries: HashMap<QueryID, Option<Observation>>,
     callee_order: Vec<QueryID>,
     transitive_firewall_callees: HashSet<QueryID>,
+}
+
+impl CalleeInfo {
+    /// Returns the ordered list of callee query IDs (forward dependencies).
+    pub fn callee_order(&self) -> &[QueryID] { &self.callee_order }
 }
 
 #[derive(Debug, Default)]
