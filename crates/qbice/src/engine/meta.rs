@@ -128,14 +128,14 @@ pub struct CalleeInfo {
 
 #[derive(Debug, Default)]
 pub struct CallerInfo {
-    caller_queries: DashSet<QueryID>,
+    pub(super) caller_queries: DashSet<QueryID>,
 }
 
 pub struct QueryMeta<C: Config> {
-    original_key: DynQueryBox<C>,
-    caller_info: CallerInfo,
+    pub(super) original_key: DynQueryBox<C>,
+    pub(super) caller_info: CallerInfo,
 
-    is_input: bool,
+    pub(super) is_input: bool,
     query_kind: QueryKind,
     state: State<C>,
 }

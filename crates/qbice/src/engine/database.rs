@@ -27,7 +27,7 @@ impl Timtestamp {
 }
 
 pub struct Database<C: Config> {
-    query_metas: DashMap<QueryID, QueryMeta<C>>,
+    pub(super) query_metas: DashMap<QueryID, QueryMeta<C>>,
 
     initial_seed: u64,
     current_timestamp: Timtestamp,
