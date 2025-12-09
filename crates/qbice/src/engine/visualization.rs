@@ -447,15 +447,6 @@ fn generate_type_options(type_counts: &HashMap<String, usize>) -> String {
 }
 
 /// Generates the HTML content for the visualization.
-///
-/// This function is used internally and is exposed for testing.
-#[allow(clippy::too_many_lines)]
-#[cfg(test)]
-pub(super) fn generate_html_for_test(snapshot: &GraphSnapshot) -> String {
-    generate_html(snapshot)
-}
-
-/// Generates the HTML content for the visualization.
 #[allow(clippy::too_many_lines)]
 fn generate_html(snapshot: &GraphSnapshot) -> String {
     let mut type_counts: HashMap<String, usize> = HashMap::new();

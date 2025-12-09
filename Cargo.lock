@@ -224,6 +224,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "qbice_integration_test"
+version = "0.1.0"
+dependencies = [
+ "qbice",
+ "qbice_stable_hash",
+ "qbice_stable_type_id",
+ "tokio",
+]
+
+[[package]]
 name = "qbice_stable_hash"
 version = "0.1.0"
 dependencies = [

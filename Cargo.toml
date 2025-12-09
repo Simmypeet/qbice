@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/qbice",
+    "crates/integration_test",
     "crates/stable_hash",
     "crates/stable_hash_derive",
     "crates/stable_type_id",

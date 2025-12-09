@@ -1,0 +1,42 @@
+[package]
+name = "qbice_integration_test"
+version.workspace = true
+authors.workspace = true
+description = "Integration tests for QBICE"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+qbice = { path = "../qbice" }
+qbice_stable_hash = { path = "../stable_hash" }
+qbice_stable_type_id = { path = "../stable_type_id" }
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "basic_queries"
+path = "tests/basic_queries.rs"
+
+[[test]]
+name = "input_changes"
+path = "tests/input_changes.rs"
+
+[[test]]
+name = "cyclic_dependencies"
+path = "tests/cyclic_dependencies.rs"
+
+[[test]]
+name = "cancellation"
+path = "tests/cancellation.rs"
+
+[[test]]
+name = "parallel_queries"
+path = "tests/parallel_queries.rs"
+
+[[test]]
+name = "visualization"
+path = "tests/visualization.rs"
