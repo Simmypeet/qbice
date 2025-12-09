@@ -135,6 +135,16 @@ pub struct CalleeInfo {
 impl CalleeInfo {
     /// Returns the ordered list of callee query IDs (forward dependencies).
     pub fn callee_order(&self) -> &[QueryID] { &self.callee_order }
+
+    /// Returns whether the dependency on a specific callee is dirty.
+    ///
+    /// Returns `None` if the callee is not found or has no observation yet.
+    pub fn is_callee_dirty(&self, callee_id: &QueryID) -> Option<bool> {
+        self.callee_queries
+            .get(callee_id)
+            .and_then(|obs| obs.as_ref())
+            .map(|obs| obs.dirty.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 #[derive(Debug, Default)]

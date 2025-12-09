@@ -39,6 +39,8 @@ pub struct EdgeInfo {
     pub source: QueryID,
     /// The target query ID (callee).
     pub target: QueryID,
+    /// Whether this dependency edge is dirty (needs revalidation).
+    pub is_dirty: Option<bool>,
 }
 
 /// A snapshot of the dependency graph for visualization.
@@ -109,11 +111,16 @@ impl<C: Config> TrackedEngine<C> {
 
             // Get forward dependencies (callees) from computed state
             if let State::Computed(computed) = meta.state() {
-                for callee_id in computed.callee_info().callee_order() {
+                let callee_info = computed.callee_info();
+                for callee_id in callee_info.callee_order() {
+                    // Check if this dependency edge is dirty
+                    let is_dirty = callee_info.is_callee_dirty(callee_id);
+
                     // Add edge: current -> callee (forward dependency)
                     edges.push(EdgeInfo {
                         source: current_id,
                         target: *callee_id,
+                        is_dirty,
                     });
 
                     // Queue callee for traversal if not visited
@@ -243,9 +250,16 @@ fn generate_edges_json(edges: &[EdgeInfo]) -> String {
         let source_str = query_id_to_string(&edge.source);
         let target_str = query_id_to_string(&edge.target);
 
+        // Determine edge class based on dirty status
+        let edge_class = match edge.is_dirty {
+            Some(true) => "dirty",
+            Some(false) => "clean",
+            None => "unknown",
+        };
+
         write!(
             &mut result,
-            r"{{ data: {{ source: '{source_str}', target: '{target_str}' }} }}"
+            r"{{ data: {{ source: '{source_str}', target: '{target_str}' }}, classes: '{edge_class}' }}"
         )
         .unwrap();
     }
@@ -351,6 +365,10 @@ fn generate_html(snapshot: &GraphSnapshot) -> String {
         .legend-color {{ width: 20px; height: 20px; border-radius: 50%; margin-right: 10px; }}
         .legend-input {{ background: #4ecdc4; }}
         .legend-computed {{ background: #6c5ce7; }}
+        .legend-line {{ width: 30px; height: 3px; margin-right: 10px; }}
+        .legend-clean {{ background: #4ecdc4; }}
+        .legend-dirty {{ background: #e94560; background: repeating-linear-gradient(90deg, #e94560, #e94560 5px, transparent 5px, transparent 10px); height: 3px; }}
+        .legend-unknown {{ background: repeating-linear-gradient(90deg, #888, #888 3px, transparent 3px, transparent 6px); height: 3px; }}
         .layout-buttons {{ display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 15px; }}
     </style>
 </head>
@@ -404,6 +422,10 @@ fn generate_html(snapshot: &GraphSnapshot) -> String {
                 <h2>Legend</h2>
                 <div class="legend-item"><div class="legend-color legend-input"></div><span>Input Query</span></div>
                 <div class="legend-item"><div class="legend-color legend-computed"></div><span>Computed Query</span></div>
+                <h3 style="margin-top: 15px; font-size: 0.9rem; color: #e94560;">Edges</h3>
+                <div class="legend-item"><div class="legend-line legend-clean"></div><span>Clean (validated)</span></div>
+                <div class="legend-item"><div class="legend-line legend-dirty"></div><span>Dirty (needs revalidation)</span></div>
+                <div class="legend-item"><div class="legend-line legend-unknown"></div><span>Unknown</span></div>
             </div>
         </div>
     </div>
@@ -423,9 +445,12 @@ fn generate_html(snapshot: &GraphSnapshot) -> String {
                 }} }},
                 {{ selector: 'node.input', style: {{ 'background-color': '#4ecdc4', 'border-color': '#6ee7de', 'shape': 'ellipse' }} }},
                 {{ selector: 'edge', style: {{
-                    'width': 2, 'line-color': '#e94560', 'target-arrow-color': '#e94560',
+                    'width': 2, 'line-color': '#4ecdc4', 'target-arrow-color': '#4ecdc4',
                     'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'opacity': 0.7
                 }} }},
+                {{ selector: 'edge.clean', style: {{ 'line-color': '#4ecdc4', 'target-arrow-color': '#4ecdc4' }} }},
+                {{ selector: 'edge.dirty', style: {{ 'line-color': '#e94560', 'target-arrow-color': '#e94560', 'line-style': 'dashed' }} }},
+                {{ selector: 'edge.unknown', style: {{ 'line-color': '#888', 'target-arrow-color': '#888', 'line-style': 'dotted' }} }},
                 {{ selector: 'node:selected', style: {{ 'border-width': 4, 'border-color': '#ff6b6b' }} }},
                 {{ selector: 'node.highlighted', style: {{ 'background-color': '#ffd93d', 'border-color': '#ffec8b' }} }},
                 {{ selector: 'node.dependency', style: {{ 'background-color': '#ff6b6b', 'border-color': '#ff8c8c' }} }},
