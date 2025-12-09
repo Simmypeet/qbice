@@ -7,6 +7,7 @@ edition.workspace = true
 rust-version.workspace = true
 readme = "README.md"
 license = "MIT"
+documentation = "https://docs.rs/qbice"
 repository = "https://github.com/Simmypeet/qbice"
 keywords = ["incremental", "computation", "query", "cache", "async"]
 categories = ["caching", "concurrency", "asynchronous"]
