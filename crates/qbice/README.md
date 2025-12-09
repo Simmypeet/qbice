@@ -112,21 +112,63 @@ impl Query for FileContents {
 **Executors** define how to compute values for queries. They must behave as **pure functions**—given the same inputs, they must always produce the same output.
 
 ```rust
-struct FileContentsExecutor;
+// A division query that computes dividend / divisor
+#[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+struct Division {
+    dividend: Variable,
+    divisor: Variable,
+}
 
-impl<C: Config> Executor<FileContents, C> for FileContentsExecutor {
+impl Query for Division {
+    type Value = i64;
+}
+
+struct DivisionExecutor;
+
+impl<C: Config> Executor<Division, C> for DivisionExecutor {
     async fn execute(
         &self,
-        query: &FileContents,
+        query: &Division,
         engine: &TrackedEngine<C>,
-    ) -> Result<Arc<[u8]>, CyclicError> {
-        // Query dependencies through the engine
-        let base_path = engine.query(&BasePath).await?;
-        let full_path = format!("{}/{}", base_path, query.path);
+    ) -> Result<i64, CyclicError> {
+        let dividend = engine.query(&query.dividend).await?;
+        let divisor = engine.query(&query.divisor).await?;
+        Ok(dividend / divisor)
+    }
+}
 
-        // Pure computation based on inputs
-        let contents = std::fs::read(&full_path).unwrap_or_default();
-        Ok(contents.into())
+// A safe division that returns None for division by zero.
+// Demonstrates queries depending on other queries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+struct SafeDivision {
+    dividend: Variable,
+    divisor: Variable,
+}
+
+impl Query for SafeDivision {
+    type Value = Option<i64>;
+}
+
+struct SafeDivisionExecutor;
+
+impl<C: Config> Executor<SafeDivision, C> for SafeDivisionExecutor {
+    async fn execute(
+        &self,
+        query: &SafeDivision,
+        engine: &TrackedEngine<C>,
+    ) -> Result<Option<i64>, CyclicError> {
+        let divisor = engine.query(&query.divisor).await?;
+
+        if divisor == 0 {
+            Ok(None)  // Avoid division by zero
+        } else {
+            // Delegate to the Division query
+            let result = engine.query(&Division {
+                dividend: query.dividend,
+                divisor: query.divisor,
+            }).await?;
+            Ok(Some(result))
+        }
     }
 }
 ```
