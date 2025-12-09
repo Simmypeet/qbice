@@ -106,6 +106,45 @@ use crate::config::Config;
 /// - [`Debug`]: For debugging and visualization
 /// - [`StableHash`]: For change detection (fingerprinting)
 ///
+/// # Performance: Cheap Cloning
+///
+/// **Both the query type and its value type should be cheaply cloneable.**
+///
+/// The engine frequently clones queries and values internally for:
+/// - Storing query keys in the dependency graph
+/// - Caching computed results
+/// - Returning values to callers
+/// - Tracking dependencies across async boundaries
+///
+/// For types containing heap-allocated data, consider using shared ownership:
+///
+/// | Instead of | Use |
+/// |------------|-----|
+/// | `String` | `Arc<str>` or a shared string type |
+/// | `Vec<T>` | `Arc<[T]>` |
+/// | `HashMap<K, V>` | `Arc<HashMap<K, V>>` |
+/// | Large structs | `Arc<T>` |
+///
+/// ## Example: Using Shared Types
+///
+/// ```rust
+/// use std::sync::Arc;
+///
+/// use qbice::{Identifiable, StableHash, query::Query};
+///
+/// /// A query with cheaply cloneable fields.
+/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// struct ParseFile {
+///     // Arc<str> clones in O(1) vs String's O(n)
+///     path: Arc<str>,
+/// }
+///
+/// impl Query for ParseFile {
+///     // Arc<[T]> clones in O(1) vs Vec<T>'s O(n)
+///     type Value = Arc<[u8]>;
+/// }
+/// ```
+///
 /// # Example: Input Query
 ///
 /// Input queries are simple keys whose values are set directly:

@@ -209,6 +209,75 @@ pub struct CyclicError;
 /// - `Q`: The query type this executor handles
 /// - `C`: The engine configuration type
 ///
+/// # Pure Function Semantics
+///
+/// **Executors must behave as pure functions** - given the same query key
+/// and the same values from dependent queries, they must return the same
+/// result. This is critical for correctness of the incremental computation
+/// system.
+///
+/// The engine relies on this property to:
+/// - Cache and reuse computed values safely
+/// - Skip recomputation when dependencies haven't changed
+/// - Detect changes via fingerprint comparison
+///
+/// ## What "Pure" Means Here
+///
+/// - **Deterministic**: Same inputs → same output, always
+/// - **No hidden state**: Don't read from global mutable state, files, network,
+///   or system time without modeling them as query dependencies
+/// - **No side effects**: Don't write to files, databases, or external systems
+///
+/// ## Example: Correct (Pure) Executor
+///
+/// ```rust
+/// # use qbice::{Identifiable, StableHash, config::Config, engine::TrackedEngine, executor::{CyclicError, Executor}, query::Query};
+/// # #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// # struct Input(u64);
+/// # impl Query for Input { type Value = i64; }
+/// # #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// # struct Sum { a: Input, b: Input }
+/// # impl Query for Sum { type Value = i64; }
+/// struct SumExecutor;
+///
+/// impl<C: Config> Executor<Sum, C> for SumExecutor {
+///     async fn execute(
+///         &self,
+///         query: &Sum,
+///         engine: &TrackedEngine<C>,
+///     ) -> Result<i64, CyclicError> {
+///         // Pure: only depends on query inputs
+///         let a = engine.query(&query.a).await?;
+///         let b = engine.query(&query.b).await?;
+///         Ok(a + b)
+///     }
+/// }
+/// ```
+///
+/// ## Example: Incorrect (Impure) Executor
+///
+/// ```rust,ignore
+/// // DON'T DO THIS!
+/// impl<C: Config> Executor<MyQuery, C> for BadExecutor {
+///     async fn execute(&self, query: &MyQuery, engine: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+///         // BAD: Reading system time makes this non-deterministic
+///         let now = std::time::SystemTime::now();
+///         
+///         // BAD: Reading from filesystem without it being a dependency
+///         let data = std::fs::read_to_string("config.txt").unwrap();
+///         
+///         // BAD: Using global mutable state
+///         static COUNTER: AtomicU64 = AtomicU64::new(0);
+///         let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+///         
+///         Ok(count as i64)
+///     }
+/// }
+/// ```
+///
+/// If you need external data, model it as an input query that you update
+/// via an input session when the external state changes.
+///
 /// # Thread Safety
 ///
 /// Executors must be `Send + Sync` since they may be called from multiple
