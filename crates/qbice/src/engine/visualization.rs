@@ -28,6 +28,8 @@ pub struct NodeInfo {
     pub is_input: bool,
     /// The type name of the query.
     pub type_name: String,
+    /// Debug representation of the computed result value.
+    pub result: Option<String>,
 }
 
 /// Information about an edge in the dependency graph.
@@ -90,11 +92,19 @@ impl<C: Config> TrackedEngine<C> {
             let label = format!("{:?}", &*meta.original_key);
             let type_name = format!("{:?}", meta.original_key.stable_type_id());
 
+            // Get the computed result if available
+            let result = if let State::Computed(computed) = meta.state() {
+                Some(format!("{:?}", computed.result()))
+            } else {
+                None
+            };
+
             nodes.push(NodeInfo {
                 id: current_id,
                 label,
                 is_input: meta.is_input,
                 type_name,
+                result,
             });
 
             // Get forward dependencies (callees) from computed state
@@ -204,10 +214,15 @@ fn generate_nodes_json(
         let escaped_type = escape_js_string(&node.type_name);
         let id_str = query_id_to_string(&node.id);
         let truncated = escape_js_string(&truncate_label(&node.label, 30));
+        let escaped_result = node
+            .result
+            .as_ref()
+            .map(|r| escape_js_string(r))
+            .unwrap_or_default();
 
         write!(
             &mut result,
-            r"{{ data: {{ id: '{id_str}', label: '{escaped_label}', typeName: '{escaped_type}', isInput: {is_input}, truncatedLabel: '{truncated}' }}, classes: '{node_class}' }}",
+            r"{{ data: {{ id: '{id_str}', label: '{escaped_label}', typeName: '{escaped_type}', isInput: {is_input}, truncatedLabel: '{truncated}', result: '{escaped_result}' }}, classes: '{node_class}' }}",
             is_input = node.is_input,
         )
         .unwrap();
@@ -374,6 +389,8 @@ fn generate_html(snapshot: &GraphSnapshot) -> String {
                 <div class="detail-value" id="detail-type"></div>
                 <div class="detail-label">Label</div>
                 <div class="detail-value" id="detail-label"></div>
+                <div class="detail-label">Result</div>
+                <div class="detail-value" id="detail-result"></div>
                 <div class="detail-label">Kind</div>
                 <div class="detail-value" id="detail-kind"></div>
                 <div class="detail-label">Dependencies (Callees)</div>
@@ -426,6 +443,7 @@ fn generate_html(snapshot: &GraphSnapshot) -> String {
             const data = node.data();
             document.getElementById('detail-type').textContent = data.typeName;
             document.getElementById('detail-label').textContent = data.label;
+            document.getElementById('detail-result').textContent = data.result || '(not computed)';
             document.getElementById('detail-kind').innerHTML = data.isInput 
                 ? '<span class="badge badge-input">Input</span>' 
                 : '<span class="badge badge-computed">Computed</span>';

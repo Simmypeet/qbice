@@ -105,6 +105,9 @@ impl<C: Config> Computed<C> {
 
     /// Returns the callee info containing forward dependencies.
     pub const fn callee_info(&self) -> &CalleeInfo { &self.callee_info }
+
+    /// Returns the computed result value.
+    pub fn result(&self) -> &dyn crate::query::DynValue<C> { &*self.result }
 }
 
 #[derive(Debug, EnumAsInner)]
