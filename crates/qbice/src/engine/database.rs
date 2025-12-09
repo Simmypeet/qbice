@@ -27,7 +27,7 @@ impl Timtestamp {
 }
 
 pub struct Database<C: Config> {
-    pub(super) query_metas: DashMap<QueryID, QueryMeta<C>>,
+    query_metas: DashMap<QueryID, QueryMeta<C>>,
 
     initial_seed: u64,
     current_timestamp: Timtestamp,
@@ -39,6 +39,14 @@ impl<C: Config> Database<C> {
     }
 
     pub const fn initial_seed(&self) -> u64 { self.initial_seed }
+
+    /// Returns a reference to the query meta for the given query ID.
+    pub fn get_query_meta(
+        &self,
+        query_id: &QueryID,
+    ) -> Option<Ref<'_, QueryID, QueryMeta<C>>> {
+        self.query_metas.get(query_id)
+    }
 }
 
 impl<C: Config> Default for Database<C> {

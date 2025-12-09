@@ -133,30 +133,58 @@ pub struct CalleeInfo {
 }
 
 impl CalleeInfo {
-    /// Returns the ordered list of callee query IDs (forward dependencies).
-    pub fn callee_order(&self) -> &[QueryID] { &self.callee_order }
-
-    /// Returns whether the dependency on a specific callee is dirty.
+    /// Returns an iterator over callee query IDs (forward dependencies) along
+    /// with their dirty flag status.
     ///
-    /// Returns `None` if the callee is not found or has no observation yet.
-    pub fn is_callee_dirty(&self, callee_id: &QueryID) -> Option<bool> {
-        self.callee_queries
-            .get(callee_id)
-            .and_then(|obs| obs.as_ref())
-            .map(|obs| obs.dirty.load(std::sync::atomic::Ordering::Relaxed))
+    /// Each item is a tuple of `(QueryID, Option<bool>)` where:
+    /// - The `QueryID` is the callee's identifier
+    /// - The `Option<bool>` indicates the dirty status:
+    ///   - `Some(true)` if the dependency is dirty (needs revalidation)
+    ///   - `Some(false)` if the dependency is clean (validated)
+    ///   - `None` if the observation status is unknown
+    pub fn callee_order(
+        &self,
+    ) -> impl Iterator<Item = (QueryID, Option<bool>)> + '_ {
+        self.callee_order.iter().map(|callee_id| {
+            let is_dirty = self
+                .callee_queries
+                .get(callee_id)
+                .and_then(|obs| obs.as_ref())
+                .map(|obs| {
+                    obs.dirty.load(std::sync::atomic::Ordering::Relaxed)
+                });
+            (*callee_id, is_dirty)
+        })
     }
 }
 
 #[derive(Debug, Default)]
 pub struct CallerInfo {
-    pub(super) caller_queries: DashSet<QueryID>,
+    caller_queries: DashSet<QueryID>,
+}
+
+impl CallerInfo {
+    /// Returns an iterator over all caller query IDs.
+    pub fn iter(&self) -> impl Iterator<Item = QueryID> + '_ {
+        self.caller_queries.iter().map(|r| *r.key())
+    }
+
+    /// Inserts a caller query ID.
+    pub(super) fn insert(&self, query_id: QueryID) {
+        self.caller_queries.insert(query_id);
+    }
+
+    /// Removes a caller query ID.
+    pub(super) fn remove(&self, query_id: &QueryID) {
+        self.caller_queries.remove(query_id);
+    }
 }
 
 pub struct QueryMeta<C: Config> {
-    pub(super) original_key: DynQueryBox<C>,
-    pub(super) caller_info: CallerInfo,
+    original_key: DynQueryBox<C>,
+    caller_info: CallerInfo,
 
-    pub(super) is_input: bool,
+    is_input: bool,
     query_kind: QueryKind,
     state: State<C>,
 }
@@ -264,6 +292,14 @@ impl<C: Config> QueryMeta<C> {
     }
 
     pub const fn state(&self) -> &State<C> { &self.state }
+
+    /// Returns a reference to the original query key.
+    pub fn original_key(&self) -> &dyn crate::query::DynQuery<C> {
+        &*self.original_key
+    }
+
+    /// Returns whether this query is an input query.
+    pub const fn is_input(&self) -> bool { self.is_input }
 
     pub fn take_state_mut(&mut self, f: impl FnOnce(State<C>) -> State<C>) {
         take_mut::take(&mut self.state, f);
@@ -376,10 +412,7 @@ impl<C: Config> Database<C> {
         }
 
         // add dependency for the callee
-        callee_meta
-            .caller_info
-            .caller_queries
-            .insert(*caller_source.query_id());
+        callee_meta.caller_info.insert(*caller_source.query_id());
     }
 
     pub(super) fn unwire_backward_dependencies_from_callee(
@@ -547,8 +580,8 @@ impl<C: Config> Database<C> {
 
             // iterate through all callers and mark their
             // observations as dirty
-            for caller in meta.caller_info.caller_queries.iter() {
-                let caller_meta = self.get_computed(caller.key());
+            for caller in meta.caller_info.iter() {
+                let caller_meta = self.get_computed(&caller);
 
                 let obs = caller_meta
                     .callee_info
@@ -561,8 +594,8 @@ impl<C: Config> Database<C> {
                 obs.dirty.store(true, Ordering::SeqCst);
 
                 // if hasn't already dirty, add to dirty batch
-                if dirtied.insert(*caller.key()) {
-                    queries.push_back(*caller.key());
+                if dirtied.insert(caller) {
+                    queries.push_back(caller);
                 }
             }
         }
@@ -574,7 +607,7 @@ impl<C: Config> Database<C> {
         callee_target: &QueryID,
     ) {
         let callee_meta = self.get_read_meta(callee_target);
-        callee_meta.caller_info.caller_queries.remove(caller_source);
+        callee_meta.caller_info.remove(caller_source);
     }
 
     fn is_query_input(&self, query_id: &QueryID) -> bool {

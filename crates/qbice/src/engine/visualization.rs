@@ -13,7 +13,7 @@ use std::{
 
 use crate::{
     config::Config,
-    engine::{TrackedEngine, meta::State},
+    engine::{Engine, meta::State},
     query::{DynQuery, Query, QueryID},
 };
 
@@ -52,18 +52,24 @@ pub struct GraphSnapshot {
     pub edges: Vec<EdgeInfo>,
 }
 
-impl<C: Config> TrackedEngine<C> {
+impl<C: Config> Engine<C> {
     /// Creates a snapshot of the dependency graph starting from a specific
     /// query, traversing only forward dependencies (callees).
     ///
     /// This captures all queries that the given query depends on, directly or
     /// transitively.
     ///
+    /// This method takes `&mut self` to ensure no concurrent requests or
+    /// modifications are made while traversing the database.
+    ///
     /// # Arguments
     ///
     /// * `query` - The root query to start the traversal from.
     #[must_use]
-    pub fn snapshot_graph_from<Q: Query>(&self, query: &Q) -> GraphSnapshot {
+    pub fn snapshot_graph_from<Q: Query>(
+        &mut self,
+        query: &Q,
+    ) -> GraphSnapshot {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         let mut visited: HashSet<QueryID> = HashSet::new();
@@ -72,7 +78,7 @@ impl<C: Config> TrackedEngine<C> {
         // Compute the root query ID
         let root_id = DynQuery::<C>::query_identifier(
             query,
-            self.engine.database.initial_seed(),
+            self.database.initial_seed(),
         );
 
         queue.push_back(root_id);
@@ -83,16 +89,15 @@ impl<C: Config> TrackedEngine<C> {
                 continue;
             }
 
-            // Get the query meta with proper synchronization via DashMap
-            let Some(entry) = self.engine.database.query_metas.get(&current_id)
-            else {
+            // Get the query meta
+            let Some(meta) = self.database.get_query_meta(&current_id) else {
                 continue;
             };
-            let meta = entry.value();
 
             // Create node info
-            let label = format!("{:?}", &*meta.original_key);
-            let type_name = format!("{:?}", meta.original_key.stable_type_id());
+            let label = format!("{:?}", meta.original_key());
+            let type_name =
+                format!("{:?}", meta.original_key().stable_type_id());
 
             // Get the computed result if available
             let result = if let State::Computed(computed) = meta.state() {
@@ -104,28 +109,26 @@ impl<C: Config> TrackedEngine<C> {
             nodes.push(NodeInfo {
                 id: current_id,
                 label,
-                is_input: meta.is_input,
+                is_input: meta.is_input(),
                 type_name,
                 result,
             });
 
             // Get forward dependencies (callees) from computed state
             if let State::Computed(computed) = meta.state() {
-                let callee_info = computed.callee_info();
-                for callee_id in callee_info.callee_order() {
-                    // Check if this dependency edge is dirty
-                    let is_dirty = callee_info.is_callee_dirty(callee_id);
-
+                for (callee_id, is_dirty) in
+                    computed.callee_info().callee_order()
+                {
                     // Add edge: current -> callee (forward dependency)
                     edges.push(EdgeInfo {
                         source: current_id,
-                        target: *callee_id,
+                        target: callee_id,
                         is_dirty,
                     });
 
                     // Queue callee for traversal if not visited
-                    if !visited.contains(callee_id) {
-                        queue.push_back(*callee_id);
+                    if !visited.contains(&callee_id) {
+                        queue.push_back(callee_id);
                     }
                 }
             }
@@ -145,6 +148,9 @@ impl<C: Config> TrackedEngine<C> {
     /// - Search for specific queries
     /// - Filter by query type
     ///
+    /// This method takes `&mut self` to ensure no concurrent requests or
+    /// modifications are made while visualizing the database.
+    ///
     /// # Arguments
     ///
     /// * `query` - The root query to start visualization from.
@@ -154,7 +160,7 @@ impl<C: Config> TrackedEngine<C> {
     ///
     /// Returns an error if the file cannot be written.
     pub fn visualize_html<Q: Query>(
-        &self,
+        &mut self,
         query: &Q,
         output_path: impl AsRef<Path>,
     ) -> std::io::Result<()> {
