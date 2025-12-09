@@ -8,21 +8,21 @@
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
 //! │                        Engine<C>                                │
-//! │  ┌─────────────────────┐    ┌─────────────────────────────┐    │
-//! │  │   Query Database    │    │    Executor Registry        │    │
-//! │  │  - Cached values    │    │  - Query type → Executor    │    │
-//! │  │  - Dependencies     │    └─────────────────────────────┘    │
-//! │  │  - Dirty flags      │                                       │
-//! │  └─────────────────────┘                                       │
+//! │  ┌─────────────────────┐    ┌─────────────────────────────┐     │
+//! │  │   Query Database    │    │    Executor Registry        │     │
+//! │  │  - Cached values    │    │  - Query type → Executor   │     │
+//! │  │  - Dependencies     │    └─────────────────────────────┘     │
+//! │  │  - Dirty flags      │                                        │
+//! │  └─────────────────────┘                                        │
 //! └─────────────────────────────────────────────────────────────────┘
 //!                              │
 //!                              │ Arc::new(engine).tracked()
 //!                              ▼
 //! ┌─────────────────────────────────────────────────────────────────┐
 //! │                    TrackedEngine<C>                             │
-//! │  - Reference to Engine                                         │
-//! │  - Local query cache                                           │
-//! │  - Caller tracking for dependencies                            │
+//! │  - Reference to Engine                                          │
+//! │  - Local query cache                                            │
+//! │  - Caller tracking for dependencies                             │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 //!
