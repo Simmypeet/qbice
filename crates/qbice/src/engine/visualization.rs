@@ -18,6 +18,7 @@
 //!
 //! ```rust,no_run
 //! use std::sync::Arc;
+//!
 //! use qbice::{
 //!     Identifiable, StableHash,
 //!     config::DefaultConfig,
@@ -28,15 +29,26 @@
 //!
 //! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 //! struct Input(u64);
-//! impl Query for Input { type Value = i64; }
+//! impl Query for Input {
+//!     type Value = i64;
+//! }
 //!
 //! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-//! struct Sum { a: Input, b: Input }
-//! impl Query for Sum { type Value = i64; }
+//! struct Sum {
+//!     a: Input,
+//!     b: Input,
+//! }
+//! impl Query for Sum {
+//!     type Value = i64;
+//! }
 //!
 //! struct SumExecutor;
 //! impl<C: qbice::config::Config> Executor<Sum, C> for SumExecutor {
-//!     async fn execute(&self, q: &Sum, e: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+//!     async fn execute(
+//!         &self,
+//!         q: &Sum,
+//!         e: &TrackedEngine<C>,
+//!     ) -> Result<i64, CyclicError> {
 //!         Ok(e.query(&q.a).await? + e.query(&q.b).await?)
 //!     }
 //! }
@@ -150,15 +162,15 @@ impl<C: Config> Engine<C> {
     ///
     /// ```rust,no_run
     /// use qbice::{
-    ///     Identifiable, StableHash,
-    ///     config::DefaultConfig,
-    ///     engine::Engine,
+    ///     Identifiable, StableHash, config::DefaultConfig, engine::Engine,
     ///     query::Query,
     /// };
     ///
     /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
     /// struct MyQuery(u64);
-    /// impl Query for MyQuery { type Value = i64; }
+    /// impl Query for MyQuery {
+    ///     type Value = i64;
+    /// }
     ///
     /// let mut engine = Engine::<DefaultConfig>::new();
     /// // ... register executors and run queries ...
@@ -266,20 +278,21 @@ impl<C: Config> Engine<C> {
     ///
     /// ```rust,no_run
     /// use qbice::{
-    ///     Identifiable, StableHash,
-    ///     config::DefaultConfig,
-    ///     engine::Engine,
+    ///     Identifiable, StableHash, config::DefaultConfig, engine::Engine,
     ///     query::Query,
     /// };
     ///
     /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
     /// struct MyQuery(u64);
-    /// impl Query for MyQuery { type Value = i64; }
+    /// impl Query for MyQuery {
+    ///     type Value = i64;
+    /// }
     ///
     /// let mut engine = Engine::<DefaultConfig>::new();
     /// // ... register executors and run queries ...
     ///
-    /// engine.visualize_html(&MyQuery(0), "graph.html")
+    /// engine
+    ///     .visualize_html(&MyQuery(0), "graph.html")
     ///     .expect("Failed to write visualization");
     /// ```
     pub fn visualize_html<Q: Query>(
@@ -312,10 +325,7 @@ impl<C: Config> Engine<C> {
 /// ```rust,no_run
 /// use qbice::engine::{GraphSnapshot, write_html_visualization};
 ///
-/// let snapshot = GraphSnapshot {
-///     nodes: vec![],
-///     edges: vec![],
-/// };
+/// let snapshot = GraphSnapshot { nodes: vec![], edges: vec![] };
 ///
 /// write_html_visualization(&snapshot, "empty_graph.html")
 ///     .expect("Failed to write");

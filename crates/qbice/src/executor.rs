@@ -14,6 +14,7 @@
 //!
 //! ```rust
 //! use std::sync::Arc;
+//!
 //! use qbice::{
 //!     Identifiable, StableHash,
 //!     config::{Config, DefaultConfig},
@@ -75,6 +76,7 @@
 //!
 //! ```rust
 //! use std::sync::atomic::{AtomicUsize, Ordering};
+//!
 //! use qbice::{
 //!     Identifiable, StableHash,
 //!     config::Config,
@@ -142,8 +144,8 @@ use crate::{
 ///    queries or restructuring the computation
 ///
 /// 2. **Use SCC values**: For queries that intentionally form cycles (e.g.,
-///    fixed-point computations), implement [`Executor::scc_value`] to provide
-///    a default value when a cycle is detected
+///    fixed-point computations), implement [`Executor::scc_value`] to provide a
+///    default value when a cycle is detected
 ///
 /// # Example of SCC Handling
 ///
@@ -153,7 +155,7 @@ use crate::{
 ///     config::Config,
 ///     engine::TrackedEngine,
 ///     executor::{CyclicError, Executor},
-///     query::{Query, ExecutionStyle},
+///     query::{ExecutionStyle, Query},
 /// };
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
@@ -228,11 +230,15 @@ pub struct CyclicError;
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 /// struct Input(u64);
-/// impl Query for Input { type Value = i64; }
+/// impl Query for Input {
+///     type Value = i64;
+/// }
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 /// struct Doubled(u64);
-/// impl Query for Doubled { type Value = i64; }
+/// impl Query for Doubled {
+///     type Value = i64;
+/// }
 ///
 /// struct DoubledExecutor;
 ///
@@ -437,6 +443,7 @@ impl<C: Config> Entry<C> {
 ///
 /// ```rust
 /// use std::sync::Arc;
+///
 /// use qbice::{
 ///     Identifiable, StableHash,
 ///     config::{Config, DefaultConfig},
@@ -447,11 +454,17 @@ impl<C: Config> Entry<C> {
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 /// struct MyQuery(u64);
-/// impl Query for MyQuery { type Value = i64; }
+/// impl Query for MyQuery {
+///     type Value = i64;
+/// }
 ///
 /// struct MyExecutor;
 /// impl<C: Config> Executor<MyQuery, C> for MyExecutor {
-///     async fn execute(&self, q: &MyQuery, _: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+///     async fn execute(
+///         &self,
+///         q: &MyQuery,
+///         _: &TrackedEngine<C>,
+///     ) -> Result<i64, CyclicError> {
 ///         Ok(q.0 as i64)
 ///     }
 /// }
@@ -476,6 +489,7 @@ impl<C: Config> Registry<C> {
     ///
     /// ```rust
     /// use std::sync::Arc;
+    ///
     /// use qbice::{
     ///     Identifiable, StableHash,
     ///     config::{Config, DefaultConfig},
@@ -486,11 +500,17 @@ impl<C: Config> Registry<C> {
     ///
     /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
     /// struct MyQuery;
-    /// impl Query for MyQuery { type Value = (); }
+    /// impl Query for MyQuery {
+    ///     type Value = ();
+    /// }
     ///
     /// struct MyExecutor;
     /// impl<C: Config> Executor<MyQuery, C> for MyExecutor {
-    ///     async fn execute(&self, _: &MyQuery, _: &TrackedEngine<C>) -> Result<(), CyclicError> {
+    ///     async fn execute(
+    ///         &self,
+    ///         _: &MyQuery,
+    ///         _: &TrackedEngine<C>,
+    ///     ) -> Result<(), CyclicError> {
     ///         Ok(())
     ///     }
     /// }

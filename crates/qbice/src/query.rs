@@ -47,7 +47,8 @@
 //!
 //! - [`ExecutionStyle::Normal`]: Standard queries with full dependency tracking
 //! - [`ExecutionStyle::Projection`]: Fast extractors for parts of other queries
-//! - [`ExecutionStyle::Firewall`]: Boundary queries that limit dirty propagation
+//! - [`ExecutionStyle::Firewall`]: Boundary queries that limit dirty
+//!   propagation
 //!
 //! Most queries should use `Normal`. Advanced users can leverage `Projection`
 //! and `Firewall` for performance optimization in complex dependency graphs.
@@ -203,7 +204,7 @@ pub trait Query:
 ///     config::Config,
 ///     engine::TrackedEngine,
 ///     executor::{CyclicError, Executor},
-///     query::{Query, ExecutionStyle},
+///     query::{ExecutionStyle, Query},
 /// };
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]

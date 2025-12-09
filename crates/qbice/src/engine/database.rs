@@ -322,6 +322,7 @@ impl<C: Config> TrackedEngine<C> {
     ///
     /// ```rust
     /// use std::sync::Arc;
+    ///
     /// use qbice::{
     ///     Identifiable, StableHash,
     ///     config::DefaultConfig,
@@ -332,11 +333,17 @@ impl<C: Config> TrackedEngine<C> {
     ///
     /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
     /// struct Double(i64);
-    /// impl Query for Double { type Value = i64; }
+    /// impl Query for Double {
+    ///     type Value = i64;
+    /// }
     ///
     /// struct DoubleExecutor;
     /// impl<C: qbice::config::Config> Executor<Double, C> for DoubleExecutor {
-    ///     async fn execute(&self, q: &Double, _: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+    ///     async fn execute(
+    ///         &self,
+    ///         q: &Double,
+    ///         _: &TrackedEngine<C>,
+    ///     ) -> Result<i64, CyclicError> {
     ///         Ok(q.0 * 2)
     ///     }
     /// }
@@ -415,16 +422,16 @@ impl<C: Config> TrackedEngine<C> {
 ///
 /// ```rust
 /// use qbice::{
-///     Identifiable, StableHash,
-///     config::DefaultConfig,
-///     engine::Engine,
+///     Identifiable, StableHash, config::DefaultConfig, engine::Engine,
 ///     query::Query,
 /// };
 ///
 /// // Define an input query
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 /// struct ConfigValue(String);
-/// impl Query for ConfigValue { type Value = i64; }
+/// impl Query for ConfigValue {
+///     type Value = i64;
+/// }
 ///
 /// let mut engine = Engine::<DefaultConfig>::new();
 ///
@@ -459,15 +466,15 @@ impl<C: Config> Engine<C> {
     ///
     /// ```rust
     /// use qbice::{
-    ///     Identifiable, StableHash,
-    ///     config::DefaultConfig,
-    ///     engine::Engine,
+    ///     Identifiable, StableHash, config::DefaultConfig, engine::Engine,
     ///     query::Query,
     /// };
     ///
     /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
     /// struct Input(u64);
-    /// impl Query for Input { type Value = i64; }
+    /// impl Query for Input {
+    ///     type Value = i64;
+    /// }
     ///
     /// let mut engine = Engine::<DefaultConfig>::new();
     ///
@@ -510,27 +517,27 @@ impl<C: Config> InputSession<'_, C> {
     ///
     /// ```rust
     /// use qbice::{
-    ///     Identifiable, StableHash,
-    ///     config::DefaultConfig,
-    ///     engine::Engine,
+    ///     Identifiable, StableHash, config::DefaultConfig, engine::Engine,
     ///     query::Query,
     /// };
     ///
     /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
     /// struct Counter(u64);
-    /// impl Query for Counter { type Value = i64; }
+    /// impl Query for Counter {
+    ///     type Value = i64;
+    /// }
     ///
     /// let mut engine = Engine::<DefaultConfig>::new();
     ///
     /// {
     ///     let mut session = engine.input_session();
-    ///     
+    ///
     ///     // Set initial value
     ///     session.set_input(Counter(0), 0);
-    ///     
+    ///
     ///     // Setting the same value again won't trigger recomputation
     ///     session.set_input(Counter(0), 0);
-    ///     
+    ///
     ///     // Setting a different value will trigger dirty propagation
     ///     session.set_input(Counter(0), 1);
     /// }

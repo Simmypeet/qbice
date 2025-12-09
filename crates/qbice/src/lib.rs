@@ -246,8 +246,6 @@
 //!
 //! ## Re-exports
 //!
-//! The following traits are re-exported for convenience when defining queries:
-//!
 //! - [`StableHash`]: Derive macro for stable hashing (required for [`Query`])
 //! - [`Identifiable`]: Derive macro for stable type identification (required
 //!   for [`Query`])
@@ -263,5 +261,8 @@ pub mod engine;
 pub mod executor;
 pub mod query;
 
+pub use engine::{Engine, TrackedEngine};
+pub use executor::Executor;
 pub use qbice_stable_hash::StableHash;
 pub use qbice_stable_type_id::Identifiable;
+pub use query::{ExecutionStyle, Query};

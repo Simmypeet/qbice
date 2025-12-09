@@ -39,6 +39,7 @@
 //!
 //! ```rust
 //! use std::sync::Arc;
+//!
 //! use qbice::{
 //!     Identifiable, StableHash,
 //!     config::DefaultConfig,
@@ -50,11 +51,15 @@
 //! // Define queries
 //! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 //! struct Input(u64);
-//! impl Query for Input { type Value = i64; }
+//! impl Query for Input {
+//!     type Value = i64;
+//! }
 //!
 //! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 //! struct Squared(u64);
-//! impl Query for Squared { type Value = i64; }
+//! impl Query for Squared {
+//!     type Value = i64;
+//! }
 //!
 //! // Define executor
 //! struct SquaredExecutor;
@@ -73,19 +78,19 @@
 //! async fn main() {
 //!     // 1. Create engine
 //!     let mut engine = Engine::<DefaultConfig>::new();
-//!     
+//!
 //!     // 2. Register executors
 //!     engine.register_executor::<Squared, _>(Arc::new(SquaredExecutor));
-//!     
+//!
 //!     // 3. Set inputs
 //!     {
 //!         let mut session = engine.input_session();
 //!         session.set_input(Input(0), 5);
 //!     }
-//!     
+//!
 //!     // 4. Wrap in Arc
 //!     let engine = Arc::new(engine);
-//!     
+//!
 //!     // 5. Query
 //!     let tracked = engine.tracked();
 //!     assert_eq!(tracked.query(&Squared(0)).await, Ok(25));
@@ -144,6 +149,7 @@ pub use visualization::{
 ///
 /// ```rust
 /// use std::sync::Arc;
+///
 /// use qbice::{
 ///     Identifiable, StableHash,
 ///     config::DefaultConfig,
@@ -154,11 +160,17 @@ pub use visualization::{
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 /// struct MyQuery(u64);
-/// impl Query for MyQuery { type Value = i64; }
+/// impl Query for MyQuery {
+///     type Value = i64;
+/// }
 ///
 /// struct MyExecutor;
 /// impl<C: qbice::config::Config> Executor<MyQuery, C> for MyExecutor {
-///     async fn execute(&self, q: &MyQuery, _: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+///     async fn execute(
+///         &self,
+///         q: &MyQuery,
+///         _: &TrackedEngine<C>,
+///     ) -> Result<i64, CyclicError> {
 ///         Ok(q.0 as i64 * 2)
 ///     }
 /// }
@@ -201,6 +213,7 @@ impl<C: Config> Engine<C> {
     ///
     /// ```rust
     /// use std::sync::Arc;
+    ///
     /// use qbice::{
     ///     Identifiable, StableHash,
     ///     config::DefaultConfig,
@@ -210,12 +223,21 @@ impl<C: Config> Engine<C> {
     /// };
     ///
     /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-    /// struct Add { a: i64, b: i64 }
-    /// impl Query for Add { type Value = i64; }
+    /// struct Add {
+    ///     a: i64,
+    ///     b: i64,
+    /// }
+    /// impl Query for Add {
+    ///     type Value = i64;
+    /// }
     ///
     /// struct AddExecutor;
     /// impl<C: qbice::config::Config> Executor<Add, C> for AddExecutor {
-    ///     async fn execute(&self, q: &Add, _: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+    ///     async fn execute(
+    ///         &self,
+    ///         q: &Add,
+    ///         _: &TrackedEngine<C>,
+    ///     ) -> Result<i64, CyclicError> {
     ///         Ok(q.a + q.b)
     ///     }
     /// }
@@ -259,19 +281,22 @@ impl<C: Config> Engine<C> {
 
     /// Creates a tracked engine wrapper for querying.
     ///
-    /// The returned [`TrackedEngine`] provides the [`query`][TrackedEngine::query]
-    /// method for executing queries. Multiple `TrackedEngine` instances can be
-    /// created from the same `Arc<Engine>` for concurrent querying.
+    /// The returned [`TrackedEngine`] provides the
+    /// [`query`][TrackedEngine::query] method for executing queries.
+    /// Multiple `TrackedEngine` instances can be created from the same
+    /// `Arc<Engine>` for concurrent querying.
     ///
     /// # Thread Safety
     ///
-    /// `TrackedEngine` is cheap to clone and can be safely sent to other threads.
-    /// Each clone shares the same underlying engine but has its own local cache.
+    /// `TrackedEngine` is cheap to clone and can be safely sent to other
+    /// threads. Each clone shares the same underlying engine but has its
+    /// own local cache.
     ///
     /// # Example
     ///
     /// ```rust
     /// use std::sync::Arc;
+    ///
     /// use qbice::{config::DefaultConfig, engine::Engine};
     ///
     /// let engine = Arc::new(Engine::<DefaultConfig>::new());
@@ -311,6 +336,7 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 ///
 /// ```rust
 /// use std::sync::Arc;
+///
 /// use qbice::{config::DefaultConfig, engine::Engine};
 ///
 /// let engine = Arc::new(Engine::<DefaultConfig>::new());
@@ -323,6 +349,7 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 ///
 /// ```rust
 /// use std::sync::Arc;
+///
 /// use qbice::{
 ///     Identifiable, StableHash,
 ///     config::DefaultConfig,
@@ -333,11 +360,17 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
 /// struct MyQuery(u64);
-/// impl Query for MyQuery { type Value = i64; }
+/// impl Query for MyQuery {
+///     type Value = i64;
+/// }
 ///
 /// struct MyExecutor;
 /// impl<C: qbice::config::Config> Executor<MyQuery, C> for MyExecutor {
-///     async fn execute(&self, q: &MyQuery, _: &TrackedEngine<C>) -> Result<i64, CyclicError> {
+///     async fn execute(
+///         &self,
+///         q: &MyQuery,
+///         _: &TrackedEngine<C>,
+///     ) -> Result<i64, CyclicError> {
 ///         Ok(q.0 as i64)
 ///     }
 /// }
@@ -366,9 +399,6 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 /// is specific to the `TrackedEngine` instance and its clones (they share the
 /// same cache). The local cache provides fast repeated access to the same
 /// query within a single "session".
-///
-/// When modifying inputs, drop all `TrackedEngine` instances first to ensure
-/// the new values are picked up.
 #[derive(Clone)]
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
