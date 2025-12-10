@@ -599,11 +599,17 @@ impl<C: Config> Database<C> {
     }
 
     pub(super) fn dirty_queries(&mut self, mut queries: VecDeque<QueryID>) {
+        // clean up the dirtied queries set
+        self.clear_dirty_queries();
+
         // OPTIMIZE: we could potentially have worker threads to process dirty
         // queries
-        let mut dirtied = HashSet::<QueryID>::default();
-
         while let Some(query_id) = queries.pop_front() {
+            if !self.insert_dirty_query(query_id) {
+                // already dirtied, skip
+                continue;
+            }
+
             let meta = self.get_read_meta(&query_id);
 
             // iterate through all callers and mark their
@@ -622,9 +628,7 @@ impl<C: Config> Database<C> {
                 obs.dirty.store(true, Ordering::SeqCst);
 
                 // if hasn't already dirty, add to dirty batch
-                if dirtied.insert(caller) {
-                    queries.push_back(caller);
-                }
+                queries.push_back(caller);
             }
         }
     }

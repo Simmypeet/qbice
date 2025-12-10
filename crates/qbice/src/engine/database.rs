@@ -1,7 +1,7 @@
 use std::{any::Any, collections::VecDeque, pin::Pin, sync::Arc};
 
 use dashmap::{
-    DashMap,
+    DashMap, DashSet,
     mapref::one::{MappedRef, MappedRefMut, Ref, RefMut},
 };
 use tokio::sync::Notify;
@@ -28,6 +28,7 @@ impl Timtestamp {
 
 pub struct Database<C: Config> {
     query_metas: DashMap<QueryID, QueryMeta<C>>,
+    dirtied_queries: DashSet<QueryID>,
 
     initial_seed: u64,
     current_timestamp: Timtestamp,
@@ -53,6 +54,7 @@ impl<C: Config> Default for Database<C> {
     fn default() -> Self {
         Self {
             query_metas: DashMap::default(),
+            dirtied_queries: DashSet::default(),
             initial_seed: 0,
             current_timestamp: Timtestamp(0),
         }
@@ -825,5 +827,11 @@ impl<C: Config> Database<C> {
                 SetInputResult { incremented, fingerprint_diff: false }
             }
         }
+    }
+
+    pub(super) fn clear_dirty_queries(&self) { self.dirtied_queries.clear(); }
+
+    pub(super) fn insert_dirty_query(&self, query_id: QueryID) -> bool {
+        self.dirtied_queries.insert(query_id)
     }
 }
