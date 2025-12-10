@@ -651,6 +651,49 @@ pub enum RepairDecision {
 }
 
 impl<C: Config> Engine<C> {
+    async fn dynamic_repair_query<T: std::fmt::Debug>(
+        self: &Arc<Self>,
+        callee_target_query_id: &QueryID,
+        caller_source_query_id: &QueryID,
+        caller_query_fmt: Option<&T>,
+    ) {
+        // NOTE: we clone the original key here since we cannot hold the
+        // read lock on the query metas while the repair is happening.
+        let original_callee_value = self
+            .database
+            .get_read_meta(callee_target_query_id)
+            .original_key
+            .dyn_clone();
+
+        // NOTE: we must repair the callee through executor registry
+        // since it's impossible to statically know the
+        // type of the query here.
+        let entry = self.executor_registry.get_executor_entry_by_type_id(
+            &callee_target_query_id.stable_type_id(),
+        );
+
+        let callee_value: &dyn DynQuery<C> = &*original_callee_value;
+        let callee_value_any = callee_value as &(dyn Any + Send + Sync);
+
+        if let Some(query_fmt) = caller_query_fmt {
+            tracing::info!("{:?} is repairing {:?}", query_fmt, callee_value);
+        } else {
+            tracing::info!(
+                "{:?} is repairing {:?}",
+                callee_target_query_id,
+                callee_value
+            );
+        }
+
+        let _ = entry
+            .recursively_repair_query(
+                self,
+                callee_value_any,
+                caller_source_query_id,
+            )
+            .await;
+    }
+
     #[tracing::instrument(skip(self, computed_callee), ret, level = "info")]
     pub(super) async fn should_recompute_query<Q: Query>(
         self: &Arc<Self>,
@@ -682,36 +725,12 @@ impl<C: Config> Engine<C> {
             // compare the fingerprint.
             if !self.database.is_query_input(callee) {
                 // recursively repair the callee.
-                // NOTE: we clone the original key here since we cannot hold the
-                // read lock on the query metas while the repair is happening.
-                let original_callee_value = self
-                    .database
-                    .get_read_meta(callee)
-                    .original_key
-                    .dyn_clone();
-
-                // NOTE: we must repair the callee through executor registry
-                // since it's impossible to statically know the
-                // type of the query here.
-                let entry = self
-                    .executor_registry
-                    .get_executor_entry_by_type_id(&callee.stable_type_id());
-
-                let callee_value: &dyn DynQuery<C> = &*original_callee_value;
-                let callee_value_any = callee_value as &(dyn Any + Send + Sync);
-
-                tracing::info!(
-                    "{:?} is repairing {:?}",
-                    query_id.query,
-                    callee_value
-                );
-                let _ = entry
-                    .recursively_repair_query(
-                        self,
-                        callee_value_any,
-                        &query_id.id,
-                    )
-                    .await;
+                self.dynamic_repair_query(
+                    callee,
+                    query_id.id(),
+                    Some(query_id.query()),
+                )
+                .await;
             }
 
             // SAFETY: after the repair, the callee's state should be at
@@ -754,6 +773,44 @@ impl<C: Config> Engine<C> {
         RepairDecision::Clean { repair_transitive_firewall_callees }
     }
 
+    /// Repair the transitive firewall callees first in order for the dirty
+    /// propagation to be invoked for the firewall callees.
+    async fn repair_transitive_firewall_callees(
+        self: &Arc<Self>,
+        caller_id: &QueryID,
+        computed_callee: &Computed<C>,
+    ) {
+        // OPTIMIZE: this can be parallelized
+        for callee in &computed_callee.callee_info.transitive_firewall_callees {
+            // has to directly repair since the chain of firewall might happen
+            // and the dirty flag might have not yet propagated
+            //
+            //               Input
+            //                 | *
+            //                 V
+            //             Firewall
+            //                 |
+            //                 V
+            //             Firewall2
+            //                 |
+            //                 V
+            //               .....
+            //                 |
+            //                 V
+            //           CurrentQuery
+            //
+            // NOTE: The asterisked on the edge indicates dirty edge.
+            //
+            // Here the `CurrentQuery`` have a transitive dependency on
+            // `Firewall2`. However, due to the `Firewall` node, the dirty
+            // flag doesn't propagate to `Firewall2` and thus the `CurrentQuery`
+            // cannot observe the dirty flag on `Firewall2`. Therefore, we have
+            // to immediately repair the `Firewall2` node to ensure that the
+            // dirty flag from the `Firewall` node is properly propagated.
+            self.dynamic_repair_query::<()>(callee, caller_id, None).await;
+        }
+    }
+
     #[tracing::instrument(skip(self, lock_computing), level = "info")]
     pub(super) async fn repair_query<Q: Query>(
         self: &Arc<Self>,
@@ -766,6 +823,13 @@ impl<C: Config> Engine<C> {
         let computed_callee = lock_computing
             .get_prior_computed_mut()
             .expect("should've had prior computed");
+
+        // repair transitive firewall callees first
+        self.repair_transitive_firewall_callees(
+            caller_id.query_id(),
+            computed_callee,
+        )
+        .await;
 
         if computed_callee.verified_at == self.database.current_timestamp() {
             return;
