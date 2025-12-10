@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 use crate::{
     config::Config,
     engine::{
-        Engine, TrackedEngine,
+        Engine, InitialSeed, TrackedEngine,
         meta::{
             self, Computed, Computing, QueryMeta, QueryWithID, SetInputResult,
             State,
@@ -30,7 +30,7 @@ pub struct Database<C: Config> {
     query_metas: DashMap<QueryID, QueryMeta<C>>,
     dirtied_queries: DashSet<QueryID>,
 
-    initial_seed: u64,
+    initial_seed: InitialSeed,
     current_timestamp: Timtestamp,
 }
 
@@ -39,7 +39,7 @@ impl<C: Config> Database<C> {
         self.current_timestamp
     }
 
-    pub const fn initial_seed(&self) -> u64 { self.initial_seed }
+    pub const fn initial_seed(&self) -> InitialSeed { self.initial_seed }
 
     /// Returns a reference to the query meta for the given query ID.
     pub fn get_query_meta(
@@ -55,7 +55,7 @@ impl<C: Config> Default for Database<C> {
         Self {
             query_metas: DashMap::default(),
             dirtied_queries: DashSet::default(),
-            initial_seed: 0,
+            initial_seed: InitialSeed(0),
             current_timestamp: Timtestamp(0),
         }
     }
@@ -810,7 +810,7 @@ impl<C: Config> Database<C> {
                 meta.set_input::<Q>(
                     value,
                     incremented,
-                    self.initial_seed,
+                    InitialSeed(self.initial_seed.0),
                     &mut self.current_timestamp,
                 )
             }
@@ -821,7 +821,7 @@ impl<C: Config> Database<C> {
                     query_key,
                     value,
                     &self.current_timestamp,
-                    self.initial_seed,
+                    InitialSeed(self.initial_seed.0),
                 ));
 
                 SetInputResult { incremented, fingerprint_diff: false }

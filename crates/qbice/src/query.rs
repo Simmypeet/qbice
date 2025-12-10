@@ -61,7 +61,7 @@ use std::{any::Any, fmt::Debug, hash::Hash};
 use qbice_stable_hash::{Sip128Hasher, StableHash, StableHasher};
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 
-use crate::config::Config;
+use crate::{config::Config, engine::InitialSeed};
 
 /// The query interface of the QBICE engine.
 ///
@@ -307,7 +307,7 @@ pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
     fn stable_type_id(&self) -> StableTypeID;
 
     /// Computes a 128-bit hash of the query, seeded with the given seed.
-    fn hash_128(&self, initial_seed: u64) -> u128;
+    fn hash_128(&self, initial_seed: InitialSeed) -> u128;
 
     /// Compares this query with another type-erased query for equality.
     fn eq_dyn(&self, other: &dyn DynQuery<C>) -> bool;
@@ -316,7 +316,7 @@ pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
     fn hash_dyn(&self, state: &mut dyn std::hash::Hasher);
 
     /// Generates a unique identifier for this query instance.
-    fn query_identifier(&self, initial_seed: u64) -> QueryID {
+    fn query_identifier(&self, initial_seed: InitialSeed) -> QueryID {
         QueryID {
             stable_type_id: self.stable_type_id(),
             hash_128: {
@@ -339,10 +339,10 @@ pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
 impl<Q: Query, C: Config> DynQuery<C> for Q {
     fn stable_type_id(&self) -> StableTypeID { Q::STABLE_TYPE_ID }
 
-    fn hash_128(&self, initial_seed: u64) -> u128 {
+    fn hash_128(&self, initial_seed: InitialSeed) -> u128 {
         let mut hasher = qbice_stable_hash::Sip128Hasher::new();
 
-        hasher.write_u64(initial_seed);
+        initial_seed.stable_hash(&mut hasher);
         self.stable_hash(&mut hasher);
 
         hasher.finish()
@@ -475,7 +475,7 @@ pub trait DynValue<C: Config>: 'static + Send + Sync + Any {
     fn dyn_dbg(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
 
     /// Computes a 128-bit hash of the value for fingerprinting.
-    fn hash_128_value(&self, initial_seed: u64) -> u128;
+    fn hash_128_value(&self, initial_seed: InitialSeed) -> u128;
 }
 
 impl<T: 'static + Send + Sync + Clone + Debug + StableHash, C: Config>
@@ -487,7 +487,7 @@ impl<T: 'static + Send + Sync + Clone + Debug + StableHash, C: Config>
         Debug::fmt(self, f)
     }
 
-    fn hash_128_value(&self, initial_seed: u64) -> u128 {
+    fn hash_128_value(&self, initial_seed: InitialSeed) -> u128 {
         let mut hasher = Sip128Hasher::new();
         initial_seed.stable_hash(&mut hasher);
         self.stable_hash(&mut hasher);

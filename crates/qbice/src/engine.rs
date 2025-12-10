@@ -105,6 +105,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use qbice_stable_hash::StableHash;
 
 use crate::{
     config::{Config, DefaultConfig},
@@ -417,3 +418,19 @@ impl<C: Config> std::fmt::Debug for TrackedEngine<C> {
             .finish_non_exhaustive()
     }
 }
+
+/// A new type wrapper over a u64 representing the initial seed for all
+/// fingerprinting operations.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    StableHash,
+)]
+pub struct InitialSeed(u64);

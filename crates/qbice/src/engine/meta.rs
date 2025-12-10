@@ -17,7 +17,9 @@ use crate::{
     config::Config,
     engine::{
         Engine, TrackedEngine,
-        database::{Caller, ComputingLockGuard, Database, Timtestamp},
+        database::{
+            Caller, ComputingLockGuard, Database, InitialSeed, Timtestamp,
+        },
         fingerprint,
     },
     executor::CyclicError,
@@ -226,9 +228,10 @@ impl<C: Config> QueryMeta<C> {
         query_key: Q,
         query_value: Q::Value,
         timestamp: &Timtestamp,
-        hash_seed: u64,
+        initial_seed: InitialSeed,
     ) -> Self {
-        let hash_128 = DynValue::<C>::hash_128_value(&query_value, hash_seed);
+        let hash_128 =
+            DynValue::<C>::hash_128_value(&query_value, initial_seed);
 
         Self {
             original_key: smallbox::smallbox!(query_key),
@@ -243,7 +246,7 @@ impl<C: Config> QueryMeta<C> {
                 transitive_firewall_callees_fingerprint: Compact128::from_u128(
                     fingerprint::calculate_fingerprint(
                         &TransitiveFirewallSet::default(),
-                        hash_seed,
+                        initial_seed,
                     ),
                 ),
             }),
@@ -254,7 +257,7 @@ impl<C: Config> QueryMeta<C> {
         &mut self,
         query_value: Q::Value,
         has_already_incremented_timestamp: bool,
-        hash_seed: u64,
+        initial_seed: InitialSeed,
         timestamp: &mut Timtestamp,
     ) -> SetInputResult {
         let mut this_has_incremented = false;
@@ -266,7 +269,7 @@ impl<C: Config> QueryMeta<C> {
 
         let hash = Compact128::from_u128(DynValue::<C>::hash_128_value(
             &query_value,
-            hash_seed,
+            initial_seed,
         ));
 
         let fingerprint_diff = hash != computed.value_fingerprint;
