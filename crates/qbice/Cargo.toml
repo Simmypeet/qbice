@@ -25,6 +25,7 @@ thiserror.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
 tracing-test.workspace = true
+bimap.workspace = true
 
 
 [lints]
