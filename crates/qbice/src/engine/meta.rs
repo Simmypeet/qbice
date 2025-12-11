@@ -20,9 +20,9 @@ use crate::{
         database::{
             Caller, Database, Timtestamp,
             storage::{ComputingLockGuard, SetInputResult},
+            tfc_archetype::TfcArchetypeID,
         },
         fingerprint::Compact128,
-        tfc_archetype::TfcArchetypeID,
     },
     executor::CyclicError,
     query::{

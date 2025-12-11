@@ -4,15 +4,18 @@ use crate::{
     config::Config,
     engine::{
         Engine, TrackedEngine,
-        database::storage::{SetInputResult, Storage},
+        database::{
+            storage::{SetInputResult, Storage},
+            tfc_archetype::TfcArchetype,
+        },
         meta::{self, QueryWithID},
-        tfc_archetype::{TfcArchetype, TfcArchetypeID, TfcSet},
     },
     executor::CyclicError,
     query::{DynValue, Query, QueryID},
 };
 
 pub mod storage;
+pub mod tfc_archetype;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Timtestamp(u64);
@@ -29,7 +32,10 @@ pub struct Database<C: Config> {
 
 impl<C: Config> Default for Database<C> {
     fn default() -> Self {
-        Self { storage: Storage::default(), tfc_archetype: TfcArchetype::new() }
+        Self {
+            storage: Storage::default(),
+            tfc_archetype: TfcArchetype::default(),
+        }
     }
 }
 
@@ -486,27 +492,4 @@ impl Caller {
 
     /// Returns the query ID of the caller.
     pub const fn query_id(&self) -> &QueryID { &self.0 }
-}
-
-impl<C: Config> Database<C> {
-    pub(super) fn new_singleton_tfc(
-        &self,
-        query_id: QueryID,
-    ) -> TfcArchetypeID {
-        self.tfc_archetype.new_singleton_tfc(query_id, self.initial_seed())
-    }
-
-    pub(super) fn union_tfcs(
-        &self,
-        observees: impl IntoIterator<Item = TfcArchetypeID>,
-    ) -> Option<TfcArchetypeID> {
-        self.tfc_archetype.observes_other_tfc(observees, self.initial_seed())
-    }
-
-    pub(super) fn get_tfc_set_by_id(
-        &self,
-        tfc_id: &TfcArchetypeID,
-    ) -> Arc<TfcSet> {
-        self.tfc_archetype.get_by_id(tfc_id).unwrap()
-    }
 }

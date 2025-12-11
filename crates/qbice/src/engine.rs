@@ -117,7 +117,6 @@ use crate::{
 mod database;
 mod fingerprint;
 mod meta;
-mod tfc_archetype;
 mod visualization;
 
 pub use visualization::{

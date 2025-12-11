@@ -5,8 +5,9 @@ use parking_lot::RwLock;
 use qbice_stable_hash::StableHash;
 
 use crate::{
+    config::Config,
     engine::{
-        InitialSeed,
+        database::Database,
         fingerprint::{self, Compact128},
     },
     query::QueryID,
@@ -27,46 +28,39 @@ pub type TfcSet = BTreeSet<QueryID>;
 /// Most of the time TFC sets are small and identical across query nodes,
 /// so this structure helps reduce memory usage and improve performance
 /// when checking TFC relationships.
+#[derive(Default)]
 pub struct TfcArchetype {
     pub bimap: RwLock<BiMap<TfcArchetypeID, Arc<TfcSet>>>,
 }
 
-impl TfcArchetype {
-    /// Creates a new, empty `TfcArchetype` manager.
-    pub fn new() -> Self { Self { bimap: RwLock::new(BiMap::new()) } }
-
+impl<C: Config> Database<C> {
     /// Given a `TfcArchetypeID`, returns the corresponding `TfcSet` if it
     /// exists.
-    pub fn get_by_id(&self, id: &TfcArchetypeID) -> Option<Arc<TfcSet>> {
-        let bimap = self.bimap.read();
-        bimap.get_by_left(id).cloned()
+    pub fn get_tfc_set_by_id(&self, id: &TfcArchetypeID) -> Arc<TfcSet> {
+        let bimap = self.tfc_archetype.bimap.read();
+        bimap.get_by_left(id).cloned().unwrap()
     }
 
     /// Creates a new `TfcArchetypeID` for a singleton set containing the given
     /// `QueryID`.
-    pub fn new_singleton_tfc(
-        &self,
-        query_id: QueryID,
-        initial_seed: InitialSeed,
-    ) -> TfcArchetypeID {
+    pub fn new_singleton_tfc(&self, query_id: QueryID) -> TfcArchetypeID {
         let mut set = TfcSet::new();
         set.insert(query_id);
         let tfc_hash_128 = Compact128::from_u128(
-            fingerprint::calculate_fingerprint(&set, initial_seed),
+            fingerprint::calculate_fingerprint(&set, self.initial_seed()),
         );
-        let mut bimap = self.bimap.write();
+        let mut bimap = self.tfc_archetype.bimap.write();
         let _ = bimap
             .insert_no_overwrite(TfcArchetypeID(tfc_hash_128), Arc::new(set));
         TfcArchetypeID(tfc_hash_128)
     }
 
-    /// Given a starting `TfcArchetypeID` and an iterator of other
-    /// `TfcArchetypeIDs`, returns a `TfcArchetypeID` that represents the union
-    /// of all the sets.
-    pub fn observes_other_tfc(
+    /// Continuously unions multiple TFC archetypes into a single archetype.
+    ///
+    /// Returns `None` if no archetypes were provided.
+    pub fn union_tfcs(
         &self,
         others: impl IntoIterator<Item = TfcArchetypeID>,
-        initial_seed: InitialSeed,
     ) -> Option<TfcArchetypeID> {
         let mut current_tfc: Option<TfcArchetypeID> = None;
         let mut new_archetype: Option<TfcSet> = None;
@@ -87,7 +81,7 @@ impl TfcArchetype {
                         continue;
                     }
 
-                    let bimap = self.bimap.read();
+                    let bimap = self.tfc_archetype.bimap.read();
 
                     let current_set = bimap
                         .get_by_left(current)
@@ -123,7 +117,7 @@ impl TfcArchetype {
                 }
                 (Some(_), Some(existing_set)) => {
                     // has already created a new archetype set, just extend it
-                    let bimap = self.bimap.read();
+                    let bimap = self.tfc_archetype.bimap.read();
                     let other_set = bimap
                         .get_by_left(&other)
                         .expect("TfcArchetypeID not found")
@@ -142,11 +136,13 @@ impl TfcArchetype {
             (Some(current_tfc), None) => Some(current_tfc),
 
             (Some(_), Some(set)) => {
-                let tfc_hash_128 = Compact128::from_u128(
-                    fingerprint::calculate_fingerprint(&set, initial_seed),
-                );
+                let tfc_hash_128 =
+                    Compact128::from_u128(fingerprint::calculate_fingerprint(
+                        &set,
+                        self.initial_seed(),
+                    ));
 
-                let mut bimap = self.bimap.write();
+                let mut bimap = self.tfc_archetype.bimap.write();
 
                 let _ = bimap.insert_no_overwrite(
                     TfcArchetypeID(tfc_hash_128),
