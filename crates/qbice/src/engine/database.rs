@@ -1,24 +1,18 @@
 use std::{any::Any, collections::VecDeque, pin::Pin, sync::Arc};
 
-use dashmap::{
-    DashMap, DashSet,
-    mapref::one::{MappedRef, MappedRefMut, Ref, RefMut},
-};
-use tokio::sync::Notify;
-
 use crate::{
     config::Config,
     engine::{
-        Engine, InitialSeed, TrackedEngine,
-        meta::{
-            self, Computed, Computing, QueryMeta, QueryWithID, SetInputResult,
-            State,
-        },
+        Engine, TrackedEngine,
+        database::storage::{SetInputResult, Storage},
+        meta::{self, QueryWithID},
         tfc_archetype::{TfcArchetype, TfcArchetypeID, TfcSet},
     },
     executor::CyclicError,
     query::{DynValue, Query, QueryID},
 };
+
+pub mod storage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Timtestamp(u64);
@@ -28,47 +22,14 @@ impl Timtestamp {
 }
 
 pub struct Database<C: Config> {
-    query_metas: DashMap<QueryID, QueryMeta<C>>,
-
-    // when the state of a query transformed from `Computed` to `Computing` due
-    // to the repair process, we move the `Computed` to this separate map for
-    // easier access
-    computed_placeholders: DashMap<QueryID, Computed<C>>,
+    storage: Storage<C>,
 
     tfc_archetype: TfcArchetype,
-
-    dirtied_queries: DashSet<QueryID>,
-
-    initial_seed: InitialSeed,
-    current_timestamp: Timtestamp,
-}
-
-impl<C: Config> Database<C> {
-    pub const fn current_timestamp(&self) -> Timtestamp {
-        self.current_timestamp
-    }
-
-    pub const fn initial_seed(&self) -> InitialSeed { self.initial_seed }
-
-    /// Returns a reference to the query meta for the given query ID.
-    pub fn get_query_meta(
-        &self,
-        query_id: &QueryID,
-    ) -> Option<Ref<'_, QueryID, QueryMeta<C>>> {
-        self.query_metas.get(query_id)
-    }
 }
 
 impl<C: Config> Default for Database<C> {
     fn default() -> Self {
-        Self {
-            query_metas: DashMap::default(),
-            computed_placeholders: DashMap::default(),
-            tfc_archetype: TfcArchetype::new(),
-            dirtied_queries: DashSet::default(),
-            initial_seed: InitialSeed(0),
-            current_timestamp: Timtestamp(0),
-        }
+        Self { storage: Storage::default(), tfc_archetype: TfcArchetype::new() }
     }
 }
 
@@ -143,13 +104,7 @@ impl<C: Config> Engine<C> {
             return Ok(());
         };
 
-        if self
-            .database
-            .query_metas
-            .get(&called_from.0)
-            .expect("should be present")
-            .is_running_in_scc()
-        {
+        if self.database.is_query_running_in_scc(&called_from.0) {
             return Err(CyclicError);
         }
 
@@ -202,7 +157,9 @@ impl<C: Config> Engine<C> {
             // now the `query` state is held in computing state.
             // if `lock_computing` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
-            let Some(lock_computing) = self.lock_computing(query) else {
+            let Some(lock_computing) =
+                self.database.lock_computing(query, &self.executor_registry)
+            else {
                 // try the fast path again
                 continue;
             };
@@ -241,76 +198,6 @@ impl<C: Config> Engine<C> {
 
             Ok(())
         })
-    }
-
-    pub(super) fn lock_computing<Q: Query>(
-        &self,
-        query_id: &QueryWithID<'_, Q>,
-    ) -> Option<ComputingLockGuard<'_, C>> {
-        match self.database.query_metas.entry(*query_id.id()) {
-            dashmap::Entry::Occupied(mut occupied_entry) => {
-                match occupied_entry.get().state() {
-                    State::Computing(_) => {
-                        // another thread is computing the query, try again
-                        None
-                    }
-
-                    State::Computed(computed) => {
-                        if computed.verified_at()
-                            == self.database.current_timestamp
-                        {
-                            // already computed and verified, try fast path
-                            // and retrieve value again
-                            return None;
-                        }
-
-                        let noti = Arc::new(Notify::new());
-
-                        let computed = occupied_entry
-                            .get_mut()
-                            .replace_state(State::Computing(Computing::new(
-                                noti.clone(),
-                            )))
-                            .into_computed()
-                            .expect("should've been computed");
-
-                        // store the prior computed placeholder
-                        self.database.store_prior_computed_placeholder(
-                            *query_id.id(),
-                            computed,
-                        );
-
-                        Some(ComputingLockGuard {
-                            database: &self.database,
-                            query_id: *query_id.id(),
-                            defused: false,
-                            notification: noti,
-                        })
-                    }
-                }
-            }
-
-            dashmap::Entry::Vacant(vacant_entry) => {
-                let noti = Arc::new(Notify::new());
-                let executor = self.executor_registry.get_executor_entry::<Q>();
-                let fresh_query_meta = QueryMeta::new(
-                    query_id.query().clone(),
-                    State::Computing(Computing::new(noti.clone())),
-                    executor.obtain_execution_style(),
-                );
-
-                vacant_entry.insert(fresh_query_meta);
-
-                // no prior computed state
-
-                Some(ComputingLockGuard {
-                    database: &self.database,
-                    query_id: *query_id.id(),
-                    defused: false,
-                    notification: noti,
-                })
-            }
-        }
     }
 }
 
@@ -601,287 +488,7 @@ impl Caller {
     pub const fn query_id(&self) -> &QueryID { &self.0 }
 }
 
-/// A drop guard for the computing lock of a query.
-pub struct ComputingLockGuard<'a, C: Config> {
-    database: &'a Database<C>,
-    query_id: QueryID,
-    notification: Arc<Notify>,
-    defused: bool,
-}
-
-impl<C: Config> Drop for ComputingLockGuard<'_, C> {
-    fn drop(&mut self) {
-        if self.defused {
-            return;
-        }
-
-        // held read lock first
-        let query_meta = self
-            .database
-            .query_metas
-            .get(&self.query_id)
-            .expect("query ID should be present");
-
-        // unwire backward dendencies
-        self.database.unwire_backward_dependencies_from_callee(
-            &self.query_id,
-            &query_meta.get_computing().callee_info(),
-        );
-
-        drop(query_meta);
-
-        // then mutably restore the state
-        let mut query_meta = self
-            .database
-            .query_metas
-            .get_mut(&self.query_id)
-            .expect("query ID should be present");
-
-        let existed_computed =
-            self.database.computed_placeholders.remove(&self.query_id);
-
-        if let Some(computed) = existed_computed.map(|x| x.1) {
-            // restore to previous computed state
-            query_meta.replace_state(State::Computed(computed));
-        } else {
-            // drop query meta lock
-            drop(query_meta);
-
-            // remove the query meta entirely
-            self.database.query_metas.remove(&self.query_id);
-        }
-
-        self.notification.notify_waiters();
-    }
-}
-
-impl<C: Config> ComputingLockGuard<'_, C> {
-    /// Don't restore the previous state when dropped.
-    fn defuse_and_notify(mut self) {
-        self.defused = true;
-        self.notification.notify_waiters();
-    }
-}
-
 impl<C: Config> Database<C> {
-    /// Gets a mutable reference to the computing state of the running caller.
-    ///
-    /// We assume that the caller token is valid and corresponds to that the
-    /// query is currently in computing state.
-    pub(super) fn get_computing_caller(
-        &self,
-        caller: &Caller,
-    ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computing> {
-        self.query_metas
-            .get(&caller.0)
-            .unwrap_or_else(|| panic!("query ID {:?} is not found", caller.0))
-            .map(|x| x.get_computing())
-    }
-
-    pub(super) fn get_read_meta(
-        &self,
-        query_id: &QueryID,
-    ) -> Ref<'_, QueryID, QueryMeta<C>> {
-        self.query_metas
-            .get(query_id)
-            .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
-    }
-
-    pub(super) fn try_get_read_meta(
-        &self,
-        query_id: &QueryID,
-    ) -> Option<Ref<'_, QueryID, QueryMeta<C>>> {
-        self.query_metas.get(query_id)
-    }
-
-    #[allow(unused)]
-    pub(super) fn get_meta_mut(
-        &self,
-        query_id: &QueryID,
-    ) -> RefMut<'_, QueryID, QueryMeta<C>> {
-        self.query_metas
-            .get_mut(query_id)
-            .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
-    }
-
-    #[allow(unused)]
-    pub(super) fn try_get_meta_mut(
-        &self,
-        query_id: &QueryID,
-    ) -> Option<RefMut<'_, QueryID, QueryMeta<C>>> {
-        self.query_metas.get_mut(query_id)
-    }
-
-    #[allow(unused)]
-    pub(super) fn try_get_computed_mut(
-        &self,
-        query_id: &QueryID,
-    ) -> Option<MappedRefMut<'_, QueryID, QueryMeta<C>, Computed<C>>> {
-        self.query_metas
-            .get_mut(query_id)
-            .map(|meta| meta.map(|x| x.get_computed_mut()))
-    }
-
-    pub(super) fn get_computed(
-        &self,
-        query_id: &QueryID,
-    ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computed<C>> {
-        self.query_metas
-            .get(query_id)
-            .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
-            .map(|x| x.get_computed())
-    }
-
-    #[allow(unused)]
-    pub(super) fn get_computed_mut(
-        &self,
-        query_id: &QueryID,
-    ) -> MappedRefMut<'_, QueryID, QueryMeta<C>, Computed<C>> {
-        self.query_metas
-            .get_mut(query_id)
-            .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
-            .map(|x| x.get_computed_mut())
-    }
-
-    pub(super) fn set_computed_from_existing_lock_computing_and_defuse(
-        &self,
-        query_id: &Caller,
-        lock_computing: ComputingLockGuard<'_, C>,
-    ) {
-        let mut query_meta = self
-            .query_metas
-            .get_mut(&query_id.0)
-            .expect("query ID should be present");
-
-        let computed = self.take_prior_computed_placeholder(query_id);
-
-        query_meta.replace_state(State::Computed(computed));
-
-        // defuse the undoing of computing lock
-        lock_computing.defuse_and_notify();
-    }
-
-    pub(super) fn set_computed_from_computing_and_defuse(
-        &self,
-        query_id: &Caller,
-        computed: impl FnOnce(Computing) -> Computed<C>,
-        lock_computing: ComputingLockGuard<'_, C>,
-    ) {
-        let mut query_meta = self
-            .query_metas
-            .get_mut(&query_id.0)
-            .expect("query ID should be present");
-
-        query_meta.take_state_mut(|x| {
-            State::Computed(computed(x.into_computing().unwrap()))
-        });
-
-        // defuse the undoing of computing lock
-        lock_computing.defuse_and_notify();
-    }
-
-    pub(super) async fn spin_get_computed(
-        &self,
-        query_id: &QueryID,
-    ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computed<C>> {
-        loop {
-            let meta = self.query_metas.get(query_id).unwrap();
-            match meta.state() {
-                State::Computing(computing) => {
-                    // wait for notification
-                    let noti = computing.notification_owned();
-                    drop(meta);
-
-                    noti.notified().await;
-                }
-                State::Computed(_) => {
-                    return meta.map(|x| x.get_computed());
-                }
-            }
-        }
-    }
-
-    pub(super) fn set_input<Q: Query>(
-        &mut self,
-        query_key: Q,
-        query_id: QueryID,
-        value: Q::Value,
-        incremented: bool,
-    ) -> SetInputResult {
-        match self.query_metas.entry(query_id) {
-            dashmap::Entry::Occupied(mut occupied_entry) => {
-                let meta = occupied_entry.get_mut();
-
-                meta.set_input::<Q>(
-                    value,
-                    incremented,
-                    InitialSeed(self.initial_seed.0),
-                    &mut self.current_timestamp,
-                )
-            }
-
-            // new vaccant input
-            dashmap::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(QueryMeta::new_input(
-                    query_key,
-                    value,
-                    &self.current_timestamp,
-                    InitialSeed(self.initial_seed.0),
-                ));
-
-                SetInputResult { incremented, fingerprint_diff: false }
-            }
-        }
-    }
-
-    pub(super) fn clear_dirty_queries(&self) { self.dirtied_queries.clear(); }
-
-    pub(super) fn insert_dirty_query(&self, query_id: QueryID) -> bool {
-        self.dirtied_queries.insert(query_id)
-    }
-
-    pub(super) fn has_prior_computed_placeholder(
-        &self,
-        query_id: &QueryID,
-    ) -> bool {
-        self.computed_placeholders.contains_key(query_id)
-    }
-
-    pub(super) fn take_prior_computed_placeholder(
-        &self,
-        query_id: &Caller,
-    ) -> Computed<C> {
-        self.computed_placeholders
-            .remove(&query_id.0)
-            .expect("should have a prior computed placeholder")
-            .1
-    }
-
-    pub(super) fn store_prior_computed_placeholder(
-        &self,
-        query_id: QueryID,
-        computed: Computed<C>,
-    ) {
-        assert!(
-            self.computed_placeholders.insert(query_id, computed).is_none(),
-            "should have no existing computed placeholder",
-        );
-    }
-
-    pub(super) fn get_prior_computed(
-        &self,
-        query_id: &QueryID,
-    ) -> Ref<'_, QueryID, Computed<C>> {
-        self.computed_placeholders.get(query_id).unwrap()
-    }
-
-    pub(super) fn get_prior_computed_mut(
-        &self,
-        query_id: &QueryID,
-    ) -> RefMut<'_, QueryID, Computed<C>> {
-        self.computed_placeholders.get_mut(query_id).unwrap()
-    }
-
     pub(super) fn new_singleton_tfc(
         &self,
         query_id: QueryID,
@@ -893,7 +500,7 @@ impl<C: Config> Database<C> {
         &self,
         observees: impl IntoIterator<Item = TfcArchetypeID>,
     ) -> Option<TfcArchetypeID> {
-        self.tfc_archetype.observes_other_tfc(observees, self.initial_seed)
+        self.tfc_archetype.observes_other_tfc(observees, self.initial_seed())
     }
 
     pub(super) fn get_tfc_set_by_id(

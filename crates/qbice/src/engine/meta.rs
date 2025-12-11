@@ -17,7 +17,10 @@ use crate::{
     config::Config,
     engine::{
         Engine, InitialSeed, TrackedEngine,
-        database::{Caller, ComputingLockGuard, Database, Timtestamp},
+        database::{
+            Caller, Database, Timtestamp,
+            storage::{ComputingLockGuard, SetInputResult},
+        },
         fingerprint::Compact128,
         tfc_archetype::TfcArchetypeID,
     },
@@ -269,14 +272,8 @@ impl<C: Config> QueryMeta<C> {
         SetInputResult { incremented: this_has_incremented, fingerprint_diff }
     }
 
-    #[allow(unused)]
     pub fn get_computing(&self) -> &Computing {
         self.state.as_computing().expect("should be computing")
-    }
-
-    #[allow(unused)]
-    pub fn get_computing_mut(&mut self) -> &mut Computing {
-        self.state.as_computing_mut().expect("should be computing")
     }
 
     pub fn get_computed_mut(&mut self) -> &mut Computed<C> {
@@ -352,12 +349,6 @@ pub enum FastPathResult<V> {
     Hit(Option<V>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SetInputResult {
-    pub incremented: bool,
-    pub fingerprint_diff: bool,
-}
-
 impl<C: Config> Database<C> {
     /// Add both forward and backward dependencies for both caller and callee.
     fn observe_callee_fingerprint(
@@ -415,17 +406,6 @@ impl<C: Config> Database<C> {
 
         // add dependency for the callee
         callee_meta.caller_info.insert(*caller_source.query_id());
-    }
-
-    pub(super) fn unwire_backward_dependencies_from_callee(
-        &self,
-        query_id: &QueryID,
-        callee_info: &CalleeInfo,
-    ) {
-        // OPTIMIZE: this can be parallelized
-        for callee in &callee_info.callee_order {
-            self.unwire_backward_dependency(query_id, callee);
-        }
     }
 
     /// Checks whether the stack of computing queries contains a cycle
@@ -607,13 +587,24 @@ impl<C: Config> Database<C> {
         }
     }
 
-    pub(crate) fn unwire_backward_dependency(
+    pub fn unwire_backward_dependency(
         &self,
         caller_source: &QueryID,
         callee_target: &QueryID,
     ) {
         let callee_meta = self.get_read_meta(callee_target);
         callee_meta.caller_info.remove(caller_source);
+    }
+
+    pub fn unwire_backward_dependencies_from_callee(
+        &self,
+        query_id: &QueryID,
+        callee_info: &CalleeInfo,
+    ) {
+        // OPTIMIZE: this can be parallelized
+        for callee in &callee_info.callee_order {
+            self.unwire_backward_dependency(query_id, callee);
+        }
     }
 
     fn is_query_input(&self, query_id: &QueryID) -> bool {
