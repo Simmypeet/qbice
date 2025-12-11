@@ -182,7 +182,6 @@ pub struct QueryMeta<C: Config> {
     original_key: DynQueryBox<C>,
     caller_info: CallerInfo,
 
-    is_input: bool,
     query_kind: QueryKind,
     state: State<C>,
 }
@@ -205,7 +204,6 @@ impl<C: Config> QueryMeta<C> {
         Self {
             original_key: smallbox::smallbox!(original_key),
             caller_info: CallerInfo::default(),
-            is_input: false,
             query_kind: QueryKind::Execute(execution_style),
             state,
         }
@@ -223,7 +221,6 @@ impl<C: Config> QueryMeta<C> {
         Self {
             original_key: smallbox::smallbox!(query_key),
             caller_info: CallerInfo::default(),
-            is_input: true,
             query_kind: QueryKind::Input,
             state: State::Computed(Computed {
                 result: smallbox::smallbox!(query_value),
@@ -243,7 +240,7 @@ impl<C: Config> QueryMeta<C> {
     ) -> SetInputResult {
         let mut this_has_incremented = false;
 
-        self.is_input = true;
+        self.query_kind = QueryKind::Input;
 
         let computed =
             self.state.as_computed_mut().expect("should've been computed");
@@ -292,7 +289,7 @@ impl<C: Config> QueryMeta<C> {
     }
 
     /// Returns whether this query is an input query.
-    pub const fn is_input(&self) -> bool { self.is_input }
+    pub fn is_input(&self) -> bool { self.query_kind == QueryKind::Input }
 
     pub fn take_state_mut(&mut self, f: impl FnOnce(State<C>) -> State<C>) {
         take_mut::take(&mut self.state, f);
@@ -606,7 +603,7 @@ impl<C: Config> Database<C> {
 
     fn is_query_input(&self, query_id: &QueryID) -> bool {
         let meta = self.get_read_meta(query_id);
-        meta.is_input
+        meta.is_input()
     }
 
     // this function can't be cancelled
