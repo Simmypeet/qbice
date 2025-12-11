@@ -555,6 +555,7 @@ impl<C: Config> Database<C> {
     pub(super) fn dirty_queries(&mut self, mut queries: VecDeque<QueryID>) {
         // clean up the dirtied queries set
         self.clear_dirty_queries();
+        self.clear_statistics();
 
         // OPTIMIZE: we could potentially have worker threads to process dirty
         // queries
@@ -578,8 +579,13 @@ impl<C: Config> Database<C> {
                     .expect("should be present");
 
                 let obs = obs.as_ref().expect("should be present");
+                let old =
+                    obs.dirty.swap(true, std::sync::atomic::Ordering::SeqCst);
 
-                obs.dirty.store(true, Ordering::SeqCst);
+                // from clean to dirty
+                if !old {
+                    self.increment_dirtied_edges();
+                }
 
                 // if hasn't already dirty, add to dirty batch
                 queries.push_back(caller);

@@ -5,6 +5,7 @@ use crate::{
     engine::{
         Engine, TrackedEngine,
         database::{
+            statistics::Statistics,
             storage::{SetInputResult, Storage},
             tfc_archetype::TfcArchetype,
         },
@@ -14,6 +15,7 @@ use crate::{
     query::{DynValue, Query, QueryID},
 };
 
+pub mod statistics;
 pub mod storage;
 pub mod tfc_archetype;
 
@@ -26,8 +28,8 @@ impl Timtestamp {
 
 pub struct Database<C: Config> {
     storage: Storage<C>,
-
     tfc_archetype: TfcArchetype,
+    statistics: Statistics,
 }
 
 impl<C: Config> Default for Database<C> {
@@ -35,6 +37,7 @@ impl<C: Config> Default for Database<C> {
         Self {
             storage: Storage::default(),
             tfc_archetype: TfcArchetype::default(),
+            statistics: Statistics::default(),
         }
     }
 }
