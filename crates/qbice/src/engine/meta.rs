@@ -719,8 +719,13 @@ impl<C: Config> Database<C> {
             self.increment_dirtied_edges();
         }
 
-        // if this is a firewall, stop propagating further
-        if kind == QueryKind::Execute(ExecutionStyle::Firewall) {
+        // if this is a firewall or projection, stop propagating further
+        if matches!(
+            kind,
+            QueryKind::Execute(
+                ExecutionStyle::Firewall | ExecutionStyle::Projection
+            )
+        ) {
             return;
         }
 
