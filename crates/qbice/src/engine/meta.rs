@@ -570,25 +570,16 @@ impl<C: Config> Database<C> {
             // iterate through all callers and mark their
             // observations as dirty
             for caller in meta.caller_info.iter() {
-                let caller_meta = self.get_computed(&caller);
+                let caller_meta = self.get_read_meta(&caller);
+                let caller_computed = caller_meta.get_computed();
 
-                let obs = caller_meta
-                    .callee_info
-                    .callee_queries
-                    .get(&query_id)
-                    .expect("should be present");
-
-                let obs = obs.as_ref().expect("should be present");
-                let old =
-                    obs.dirty.swap(true, std::sync::atomic::Ordering::SeqCst);
-
-                // from clean to dirty
-                if !old {
-                    self.increment_dirtied_edges();
-                }
-
-                // if hasn't already dirty, add to dirty batch
-                queries.push_back(caller);
+                self.propagate_dirty_from_computed_caller(
+                    caller,
+                    caller_computed,
+                    caller_meta.query_kind,
+                    &query_id,
+                    &mut queries,
+                );
             }
         }
     }
@@ -616,6 +607,108 @@ impl<C: Config> Database<C> {
     fn is_query_input(&self, query_id: &QueryID) -> bool {
         let meta = self.get_read_meta(query_id);
         meta.is_input
+    }
+
+    // this function can't be cancelled
+    fn on_firewall_recompute(
+        &self,
+        query_id: &QueryID,
+        prior_computed: &Computed<C>,
+    ) {
+        let current_meta = self.get_read_meta(query_id);
+
+        // if isn't firewall, quit
+        if current_meta.query_kind
+            != QueryKind::Execute(ExecutionStyle::Firewall)
+        {
+            return;
+        }
+
+        let current_computed = current_meta.state.as_computed().expect(
+            "should've been computed since it was just recomputed earlier",
+        );
+
+        // if the fingerprint is different, we need to propagate dirtiness
+        if current_computed.value_fingerprint
+            != prior_computed.value_fingerprint
+        {
+            self.propagate_dirtiness_from_firewall(query_id);
+        }
+    }
+
+    fn propagate_dirtiness_from_firewall(&self, query_id: &QueryID) {
+        let mut work_queue = VecDeque::new();
+        work_queue.push_back(*query_id);
+
+        while let Some(current_query_id) = work_queue.pop_front() {
+            if self.insert_dirty_query(current_query_id) {
+                // has already dirtied, skip
+                continue;
+            }
+
+            let current_meta = self.get_read_meta(&current_query_id);
+            for caller in current_meta.caller_info.iter() {
+                let caller_meta = self.get_read_meta(&caller);
+
+                match &caller_meta.state {
+                    // if it's computing, it must have been waiting for this
+                    // firewall to complete repairation, so we directly access
+                    // the its `prior_computed` and dirty from there. So that
+                    // when it resumes, it can observe the dirty flag.
+                    State::Computing(_) => {
+                        let caller_computed = self.get_prior_computed(&caller);
+
+                        self.propagate_dirty_from_computed_caller(
+                            caller,
+                            &caller_computed,
+                            caller_meta.query_kind,
+                            &current_query_id,
+                            &mut work_queue,
+                        );
+                    }
+
+                    State::Computed(computed) => {
+                        self.propagate_dirty_from_computed_caller(
+                            caller,
+                            computed,
+                            caller_meta.query_kind,
+                            &current_query_id,
+                            &mut work_queue,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn propagate_dirty_from_computed_caller(
+        &self,
+        target: QueryID,
+        computed: &Computed<C>,
+        kind: QueryKind,
+        from: &QueryID,
+        work_queue: &mut VecDeque<QueryID>,
+    ) {
+        let obs = computed
+            .callee_info
+            .callee_queries
+            .get(from)
+            .expect("should be present");
+
+        let obs = obs.as_ref().expect("should be present");
+        let old = obs.dirty.swap(true, std::sync::atomic::Ordering::SeqCst);
+
+        // from clean to dirty
+        if !old {
+            self.increment_dirtied_edges();
+        }
+
+        // if this is a firewall, stop propagating further
+        if kind == QueryKind::Execute(ExecutionStyle::Firewall) {
+            return;
+        }
+
+        work_queue.push_back(target);
     }
 }
 
@@ -922,10 +1015,15 @@ impl<C: Config> Engine<C> {
 
         // take the lock_computing's computed state in case execute_query
         // cancels as we have already unwired the dependencies.
-        let _ = self.database.take_prior_computed_placeholder(&caller_id);
+        let prior_computed_mut =
+            self.database.take_prior_computed_placeholder(&caller_id);
 
         // now, execute the query again
         self.execute_query(query_id, lock_computing).await;
+
+        // after recomputation, we need to check if the firewall
+        // fingerprint has changed to propagate dirtiness
+        self.database.on_firewall_recompute(&query_id.id, &prior_computed_mut);
     }
 
     pub(super) async fn execute_query<Q: Query>(

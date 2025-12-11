@@ -196,17 +196,6 @@ impl<C: Config> Database<C> {
             .map(|meta| meta.map(|x| x.get_computed_mut()))
     }
 
-    pub fn get_computed(
-        &self,
-        query_id: &QueryID,
-    ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computed<C>> {
-        self.storage
-            .query_metas
-            .get(query_id)
-            .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
-            .map(|x| x.get_computed())
-    }
-
     #[allow(unused)]
     pub fn get_computed_mut(
         &self,
