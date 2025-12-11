@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     ops::Not,
     sync::{
         Arc,
@@ -18,7 +18,7 @@ use crate::{
     engine::{
         Engine, InitialSeed, TrackedEngine,
         database::{Caller, ComputingLockGuard, Database, Timtestamp},
-        fingerprint::{self, Compact128},
+        fingerprint::Compact128,
         tfc_archetype::TfcArchetypeID,
     },
     executor::CyclicError,
@@ -92,7 +92,6 @@ pub struct Computed<C: Config> {
     verified_at: Timtestamp,
 
     value_fingerprint: Compact128,
-    transitive_firewall_callees_fingerprint: Compact128,
 }
 
 impl<C: Config> Computed<C> {
@@ -114,14 +113,12 @@ pub enum State<C: Config> {
 #[derive(Debug)]
 pub struct Observation {
     seen_value_fingerprint: Compact128,
-    seen_transitive_firewall_callees_fingerprint: Compact128,
+    seen_transitive_firewall_callees_fingerprint: Option<TfcArchetypeID>,
 
     // Dirty flag is used as an atomic because we want to avoid acquiring
     // write lock when marking as dirty when propagating dirtiness.
     dirty: AtomicBool,
 }
-
-pub type TransitiveFirewallSet = HashSet<QueryID>;
 
 #[derive(Debug, Default)]
 pub struct CalleeInfo {
@@ -230,12 +227,6 @@ impl<C: Config> QueryMeta<C> {
                 callee_info: CalleeInfo::default(),
                 verified_at: *timestamp,
                 value_fingerprint: Compact128::from_u128(hash_128),
-                transitive_firewall_callees_fingerprint: Compact128::from_u128(
-                    fingerprint::calculate_fingerprint(
-                        &TransitiveFirewallSet::default(),
-                        initial_seed,
-                    ),
-                ),
             }),
         }
     }
@@ -391,8 +382,7 @@ impl<C: Config> Database<C> {
                                 .value_fingerprint,
                             dirty: AtomicBool::new(false),
                             seen_transitive_firewall_callees_fingerprint:
-                                computed_callee
-                                    .transitive_firewall_callees_fingerprint,
+                                computed_callee.callee_info.tfc_archetype,
                         }),
                     )
                     .is_some(),
@@ -572,20 +562,11 @@ impl<C: Config> Database<C> {
 
         self.set_computed_from_computing_and_defuse(
             calling_query,
-            |computing| {
-                let tfc_hash_128 = fingerprint::calculate_fingerprint(
-                    &computing.callee_info.read().tfc_archetype,
-                    self.initial_seed(),
-                );
-
-                Computed {
-                    result: value,
-                    callee_info: computing.callee_info.into_inner(),
-                    verified_at: self.current_timestamp(),
-                    value_fingerprint: Compact128::from_u128(value_hash_128),
-                    transitive_firewall_callees_fingerprint:
-                        Compact128::from_u128(tfc_hash_128),
-                }
+            |computing| Computed {
+                result: value,
+                callee_info: computing.callee_info.into_inner(),
+                verified_at: self.current_timestamp(),
+                value_fingerprint: Compact128::from_u128(value_hash_128),
             },
             lock_computing,
         );
@@ -749,7 +730,7 @@ impl<C: Config> Engine<C> {
 
                 let new_fingerprint = callee_computed.value_fingerprint;
                 let new_tfc_fingerprint =
-                    callee_computed.transitive_firewall_callees_fingerprint;
+                    callee_computed.callee_info.tfc_archetype;
 
                 if obs.seen_transitive_firewall_callees_fingerprint
                     != new_tfc_fingerprint
