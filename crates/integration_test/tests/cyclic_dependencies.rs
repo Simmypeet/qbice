@@ -1,5 +1,4 @@
 //! Tests for cyclic dependency detection and handling.
-
 #![allow(missing_docs)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::missing_const_for_fn)]

@@ -234,10 +234,13 @@ dependencies = [
 name = "qbice_integration_test"
 version = "0.1.0"
 dependencies = [
+ "flexstr",
  "qbice",
  "qbice_stable_hash",
  "qbice_stable_type_id",
  "tokio",
+ "tracing",
+ "tracing-test",
 ]
 
 [[package]]

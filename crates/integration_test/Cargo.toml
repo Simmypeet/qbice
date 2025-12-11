@@ -13,6 +13,9 @@ qbice = { path = "../qbice" }
 qbice_stable_hash = { path = "../stable_hash" }
 qbice_stable_type_id = { path = "../stable_type_id" }
 tokio.workspace = true
+flexstr.workspace = true
+tracing-test.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
@@ -40,3 +43,7 @@ path = "tests/parallel_queries.rs"
 [[test]]
 name = "visualization"
 path = "tests/visualization.rs"
+
+[[test]]
+name = "firewall"
+path = "tests/firewall.rs"
