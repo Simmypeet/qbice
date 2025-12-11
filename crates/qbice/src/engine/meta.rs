@@ -16,11 +16,10 @@ use tokio::sync::Notify;
 use crate::{
     config::Config,
     engine::{
-        Engine, TrackedEngine,
-        database::{
-            Caller, ComputingLockGuard, Database, InitialSeed, Timtestamp,
-        },
-        fingerprint,
+        Engine, InitialSeed, TrackedEngine,
+        database::{Caller, ComputingLockGuard, Database, Timtestamp},
+        fingerprint::{self, Compact128},
+        tfc_archetype::TfcArchetypeID,
     },
     executor::CyclicError,
     query::{
@@ -28,18 +27,6 @@ use crate::{
         QueryID,
     },
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct Compact128(u64, u64);
-
-impl Compact128 {
-    pub const fn from_u128(n: u128) -> Self {
-        let hi: u64 = (n >> 64) as u64; // upper 64 bits
-        let lo: u64 = (n & 0xFFFF_FFFF_FFFF_FFFF) as u64; // lower 64 bits
-
-        Self(hi, lo)
-    }
-}
 
 #[derive(Debug)]
 pub struct Computing {
@@ -67,7 +54,7 @@ impl Computing {
             callee_info: RwLock::new(CalleeInfo {
                 callee_queries: HashMap::new(),
                 callee_order: Vec::new(),
-                transitive_firewall_callees: HashSet::new(),
+                tfc_archetype: None,
             }),
             is_in_scc: AtomicBool::new(false),
         }
@@ -140,7 +127,7 @@ pub type TransitiveFirewallSet = HashSet<QueryID>;
 pub struct CalleeInfo {
     callee_queries: HashMap<QueryID, Option<Observation>>,
     callee_order: Vec<QueryID>,
-    transitive_firewall_callees: TransitiveFirewallSet,
+    tfc_archetype: Option<TfcArchetypeID>,
 }
 
 impl CalleeInfo {
@@ -417,18 +404,21 @@ impl<C: Config> Database<C> {
                 | QueryKind::Execute(
                     ExecutionStyle::Normal | ExecutionStyle::Projection,
                 ) => {
-                    for dep in
-                        &computed_callee.callee_info.transitive_firewall_callees
-                    {
+                    caller_callee_info.tfc_archetype = self.union_tfcs(
                         caller_callee_info
-                            .transitive_firewall_callees
-                            .insert(*dep);
-                    }
+                            .tfc_archetype
+                            .into_iter()
+                            .chain(computed_callee.callee_info.tfc_archetype),
+                    );
                 }
                 QueryKind::Execute(ExecutionStyle::Firewall) => {
-                    caller_callee_info
-                        .transitive_firewall_callees
-                        .insert(*callee_target);
+                    let singleton_tfc = self.new_singleton_tfc(*callee_target);
+                    caller_callee_info.tfc_archetype = self.union_tfcs(
+                        caller_callee_info
+                            .tfc_archetype
+                            .into_iter()
+                            .chain(std::iter::once(singleton_tfc)),
+                    );
                 }
             }
         }
@@ -584,7 +574,7 @@ impl<C: Config> Database<C> {
             calling_query,
             |computing| {
                 let tfc_hash_128 = fingerprint::calculate_fingerprint(
-                    &computing.callee_info.read().transitive_firewall_callees,
+                    &computing.callee_info.read().tfc_archetype,
                     self.initial_seed(),
                 );
 
@@ -785,10 +775,17 @@ impl<C: Config> Engine<C> {
     async fn repair_transitive_firewall_callees(
         self: &Arc<Self>,
         caller_id: &QueryID,
-        computed_callee: &Computed<C>,
+        tfc_achetype_id: Option<TfcArchetypeID>,
     ) {
+        let Some(tfc_achetype_id) = tfc_achetype_id else {
+            // no transitive firewall callees to repair, skip
+            return;
+        };
+
+        let tfc_set = self.database.get_tfc_set_by_id(&tfc_achetype_id);
+
         // OPTIMIZE: this can be parallelized
-        for callee in &computed_callee.callee_info.transitive_firewall_callees {
+        for callee in tfc_set.iter() {
             // has to directly repair since the chain of firewall might happen
             // and the dirty flag might have not yet propagated
             //
@@ -822,28 +819,39 @@ impl<C: Config> Engine<C> {
     pub(super) async fn repair_query<Q: Query>(
         self: &Arc<Self>,
         query_id: &QueryWithID<'_, Q>,
-        mut lock_computing: ComputingLockGuard<'_, C>,
+        lock_computing: ComputingLockGuard<'_, C>,
     ) {
         let caller_id = Caller::new(query_id.id);
 
-        // has already been verified at the current timestamp
-        let computed_callee = lock_computing
-            .get_prior_computed_mut()
-            .expect("should've had prior computed");
+        // we can't hold the read lock on our own computed state while repairing
+        // transitive firewall callees since dirty propagation might happen and
+        // it needs to acquire a write lock on the computed state to mark some
+        // callees as dirty.
+        let tfc_archetype_id = self
+            .database
+            .get_prior_computed(&query_id.id)
+            .callee_info
+            .tfc_archetype;
 
         // repair transitive firewall callees first
         self.repair_transitive_firewall_callees(
             caller_id.query_id(),
-            computed_callee,
+            tfc_archetype_id,
         )
         .await;
+
+        // NOTE: the prior computed must be held here after repairing TFCs since
+        // the transitive firewall callees might need to propagate dirtiness to
+        // the current query and require writing into the computed state.
+        let mut computed_callee =
+            self.database.get_prior_computed_mut(&query_id.id);
 
         if computed_callee.verified_at == self.database.current_timestamp() {
             return;
         }
 
         let recompute =
-            self.should_recompute_query(query_id, computed_callee).await;
+            self.should_recompute_query(query_id, &computed_callee).await;
 
         match recompute {
             RepairDecision::Recompute => {
@@ -855,6 +863,11 @@ impl<C: Config> Engine<C> {
                 repair_transitive_firewall_callees: false,
             } => {
                 computed_callee.verified_at = self.database.current_timestamp();
+
+                // drop the `computed_callee` to release the mutable borrow
+                // that will be used in the next step.
+                drop(computed_callee);
+
                 self.database
                     .set_computed_from_existing_lock_computing_and_defuse(
                         &caller_id,
@@ -868,9 +881,7 @@ impl<C: Config> Engine<C> {
             RepairDecision::Clean {
                 repair_transitive_firewall_callees: true,
             } => {
-                let mut transitive_firewall_callees =
-                    TransitiveFirewallSet::new();
-
+                let mut new_tfc_callees = Vec::new();
                 for callee in &computed_callee.callee_info.callee_order {
                     // SAFETY: the previous call to `should_recompute_query`
                     // has already ensured that all callees are clean
@@ -881,14 +892,18 @@ impl<C: Config> Engine<C> {
                     let callee_meta =
                         self.database.spin_get_computed(callee).await;
 
-                    transitive_firewall_callees.extend(
-                        &callee_meta.callee_info.transitive_firewall_callees,
+                    new_tfc_callees.extend(
+                        callee_meta.callee_info.tfc_archetype.into_iter(),
                     );
                 }
 
-                computed_callee.callee_info.transitive_firewall_callees =
-                    transitive_firewall_callees;
+                computed_callee.callee_info.tfc_archetype =
+                    self.database.union_tfcs(new_tfc_callees.into_iter());
                 computed_callee.verified_at = self.database.current_timestamp();
+
+                // drop the `computed_callee` to release the mutable borrow
+                // that will be used in the next step.
+                drop(computed_callee);
 
                 self.database
                     .set_computed_from_existing_lock_computing_and_defuse(
@@ -923,9 +938,13 @@ impl<C: Config> Engine<C> {
                 .write() = CalleeInfo::default();
         }
 
+        // drop the `computed_callee` to release the mutable borrow for
+        // removing the computed placeholder in the next step.
+        drop(computed_callee);
+
         // take the lock_computing's computed state in case execute_query
         // cancels as we have already unwired the dependencies.
-        assert!(lock_computing.take_prior_computed().is_some());
+        let _ = self.database.take_prior_computed_placeholder(&caller_id);
 
         // now, execute the query again
         self.execute_query(query_id, lock_computing).await;
@@ -1007,7 +1026,7 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         lock_computing: ComputingLockGuard<'_, C>,
     ) {
-        if lock_computing.has_prior_computed() {
+        if self.database.has_prior_computed_placeholder(query.id()) {
             self.repair_query(query, lock_computing).await;
         } else {
             self.execute_query(query, lock_computing).await;

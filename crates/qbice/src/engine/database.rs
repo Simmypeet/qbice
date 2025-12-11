@@ -14,6 +14,7 @@ use crate::{
             self, Computed, Computing, QueryMeta, QueryWithID, SetInputResult,
             State,
         },
+        tfc_archetype::{TfcArchetype, TfcArchetypeID, TfcSet},
     },
     executor::CyclicError,
     query::{DynValue, Query, QueryID},
@@ -28,6 +29,14 @@ impl Timtestamp {
 
 pub struct Database<C: Config> {
     query_metas: DashMap<QueryID, QueryMeta<C>>,
+
+    // when the state of a query transformed from `Computed` to `Computing` due
+    // to the repair process, we move the `Computed` to this separate map for
+    // easier access
+    computed_placeholders: DashMap<QueryID, Computed<C>>,
+
+    tfc_archetype: TfcArchetype,
+
     dirtied_queries: DashSet<QueryID>,
 
     initial_seed: InitialSeed,
@@ -54,6 +63,8 @@ impl<C: Config> Default for Database<C> {
     fn default() -> Self {
         Self {
             query_metas: DashMap::default(),
+            computed_placeholders: DashMap::default(),
+            tfc_archetype: TfcArchetype::new(),
             dirtied_queries: DashSet::default(),
             initial_seed: InitialSeed(0),
             current_timestamp: Timtestamp(0),
@@ -263,10 +274,15 @@ impl<C: Config> Engine<C> {
                             .into_computed()
                             .expect("should've been computed");
 
+                        // store the prior computed placeholder
+                        self.database.store_prior_computed_placeholder(
+                            *query_id.id(),
+                            computed,
+                        );
+
                         Some(ComputingLockGuard {
                             database: &self.database,
                             query_id: *query_id.id(),
-                            existing_computed: Some(computed),
                             defused: false,
                             notification: noti,
                         })
@@ -285,10 +301,11 @@ impl<C: Config> Engine<C> {
 
                 vacant_entry.insert(fresh_query_meta);
 
+                // no prior computed state
+
                 Some(ComputingLockGuard {
                     database: &self.database,
                     query_id: *query_id.id(),
-                    existing_computed: None,
                     defused: false,
                     notification: noti,
                 })
@@ -588,7 +605,6 @@ impl Caller {
 pub struct ComputingLockGuard<'a, C: Config> {
     database: &'a Database<C>,
     query_id: QueryID,
-    existing_computed: Option<Computed<C>>,
     notification: Arc<Notify>,
     defused: bool,
 }
@@ -621,7 +637,10 @@ impl<C: Config> Drop for ComputingLockGuard<'_, C> {
             .get_mut(&self.query_id)
             .expect("query ID should be present");
 
-        if let Some(computed) = self.existing_computed.take() {
+        let existed_computed =
+            self.database.computed_placeholders.remove(&self.query_id);
+
+        if let Some(computed) = existed_computed.map(|x| x.1) {
             // restore to previous computed state
             query_meta.replace_state(State::Computed(computed));
         } else {
@@ -641,18 +660,6 @@ impl<C: Config> ComputingLockGuard<'_, C> {
     fn defuse_and_notify(mut self) {
         self.defused = true;
         self.notification.notify_waiters();
-    }
-
-    pub const fn has_prior_computed(&self) -> bool {
-        self.existing_computed.is_some()
-    }
-
-    pub const fn take_prior_computed(&mut self) -> Option<Computed<C>> {
-        self.existing_computed.take()
-    }
-
-    pub const fn get_prior_computed_mut(&mut self) -> Option<&mut Computed<C>> {
-        self.existing_computed.as_mut()
     }
 }
 
@@ -739,16 +746,14 @@ impl<C: Config> Database<C> {
     pub(super) fn set_computed_from_existing_lock_computing_and_defuse(
         &self,
         query_id: &Caller,
-        mut lock_computing: ComputingLockGuard<'_, C>,
+        lock_computing: ComputingLockGuard<'_, C>,
     ) {
         let mut query_meta = self
             .query_metas
             .get_mut(&query_id.0)
             .expect("query ID should be present");
 
-        let computed = lock_computing
-            .take_prior_computed()
-            .expect("should have prior computing state");
+        let computed = self.take_prior_computed_placeholder(query_id);
 
         query_meta.replace_state(State::Computed(computed));
 
@@ -833,5 +838,68 @@ impl<C: Config> Database<C> {
 
     pub(super) fn insert_dirty_query(&self, query_id: QueryID) -> bool {
         self.dirtied_queries.insert(query_id)
+    }
+
+    pub(super) fn has_prior_computed_placeholder(
+        &self,
+        query_id: &QueryID,
+    ) -> bool {
+        self.computed_placeholders.contains_key(query_id)
+    }
+
+    pub(super) fn take_prior_computed_placeholder(
+        &self,
+        query_id: &Caller,
+    ) -> Computed<C> {
+        self.computed_placeholders
+            .remove(&query_id.0)
+            .expect("should have a prior computed placeholder")
+            .1
+    }
+
+    pub(super) fn store_prior_computed_placeholder(
+        &self,
+        query_id: QueryID,
+        computed: Computed<C>,
+    ) {
+        assert!(
+            self.computed_placeholders.insert(query_id, computed).is_none(),
+            "should have no existing computed placeholder",
+        );
+    }
+
+    pub(super) fn get_prior_computed(
+        &self,
+        query_id: &QueryID,
+    ) -> Ref<'_, QueryID, Computed<C>> {
+        self.computed_placeholders.get(query_id).unwrap()
+    }
+
+    pub(super) fn get_prior_computed_mut(
+        &self,
+        query_id: &QueryID,
+    ) -> RefMut<'_, QueryID, Computed<C>> {
+        self.computed_placeholders.get_mut(query_id).unwrap()
+    }
+
+    pub(super) fn new_singleton_tfc(
+        &self,
+        query_id: QueryID,
+    ) -> TfcArchetypeID {
+        self.tfc_archetype.new_singleton_tfc(query_id, self.initial_seed())
+    }
+
+    pub(super) fn union_tfcs(
+        &self,
+        observees: impl IntoIterator<Item = TfcArchetypeID>,
+    ) -> Option<TfcArchetypeID> {
+        self.tfc_archetype.observes_other_tfc(observees, self.initial_seed)
+    }
+
+    pub(super) fn get_tfc_set_by_id(
+        &self,
+        tfc_id: &TfcArchetypeID,
+    ) -> Arc<TfcSet> {
+        self.tfc_archetype.get_by_id(tfc_id).unwrap()
     }
 }
