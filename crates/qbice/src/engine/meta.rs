@@ -612,6 +612,7 @@ impl<C: Config> Database<C> {
     // this function can't be cancelled
     fn on_firewall_recompute(
         &self,
+        fmt: &dyn std::fmt::Debug,
         query_id: &QueryID,
         prior_computed: &Computed<C>,
     ) {
@@ -630,8 +631,22 @@ impl<C: Config> Database<C> {
 
         // if the fingerprint is different, we need to propagate dirtiness
         if current_computed.value_fingerprint
-            != prior_computed.value_fingerprint
+            == prior_computed.value_fingerprint
         {
+            tracing::info!(
+                "{:?} firewall recompute did not change fingerprint {:?}, not \
+                 propagating dirtiness",
+                fmt,
+                current_computed.value_fingerprint,
+            );
+        } else {
+            tracing::info!(
+                "{:?} firewall recompute changed fingerprint from {:?} to \
+                 {:?}, propagating dirtiness",
+                fmt,
+                prior_computed.value_fingerprint,
+                current_computed.value_fingerprint,
+            );
             self.propagate_dirtiness_from_firewall(query_id);
         }
     }
@@ -641,7 +656,7 @@ impl<C: Config> Database<C> {
         work_queue.push_back(*query_id);
 
         while let Some(current_query_id) = work_queue.pop_front() {
-            if self.insert_dirty_query(current_query_id) {
+            if !self.insert_dirty_query(current_query_id) {
                 // has already dirtied, skip
                 continue;
             }
@@ -1023,7 +1038,11 @@ impl<C: Config> Engine<C> {
 
         // after recomputation, we need to check if the firewall
         // fingerprint has changed to propagate dirtiness
-        self.database.on_firewall_recompute(&query_id.id, &prior_computed_mut);
+        self.database.on_firewall_recompute(
+            &query_id.query,
+            &query_id.id,
+            &prior_computed_mut,
+        );
     }
 
     pub(super) async fn execute_query<Q: Query>(
