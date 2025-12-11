@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use dashmap::{DashMap, DashSet};
+use dashmap::{DashMap, DashSet, mapref::one::RefMut};
 use enum_as_inner::EnumAsInner;
 use parking_lot::{RwLock, RwLockReadGuard};
 use tokio::sync::Notify;
@@ -537,17 +537,16 @@ impl<C: Config> Database<C> {
         &self,
         calling_query: &Caller,
         value: DynValueBox<C>,
+        value_fingerprint: Compact128,
         lock_computing: ComputingLockGuard<'_, C>,
     ) {
-        let value_hash_128 = value.hash_128_value(self.initial_seed());
-
         self.set_computed_from_computing_and_defuse(
             calling_query,
             |computing| Computed {
                 result: value,
                 callee_info: computing.callee_info.into_inner(),
                 verified_at: self.current_timestamp(),
-                value_fingerprint: Compact128::from_u128(value_hash_128),
+                value_fingerprint,
             },
             lock_computing,
         );
@@ -608,48 +607,6 @@ impl<C: Config> Database<C> {
     fn is_query_input(&self, query_id: &QueryID) -> bool {
         let meta = self.get_read_meta(query_id);
         meta.is_input()
-    }
-
-    // this function can't be cancelled
-    fn on_firewall_recompute(
-        &self,
-        fmt: &dyn std::fmt::Debug,
-        query_id: &QueryID,
-        prior_computed: &Computed<C>,
-    ) {
-        let current_meta = self.get_read_meta(query_id);
-
-        // if isn't firewall, quit
-        if current_meta.query_kind
-            != QueryKind::Execute(ExecutionStyle::Firewall)
-        {
-            return;
-        }
-
-        let current_computed = current_meta.state.as_computed().expect(
-            "should've been computed since it was just recomputed earlier",
-        );
-
-        // if the fingerprint is different, we need to propagate dirtiness
-        if current_computed.value_fingerprint
-            == prior_computed.value_fingerprint
-        {
-            tracing::info!(
-                "{:?} firewall recompute did not change fingerprint {:?}, not \
-                 propagating dirtiness",
-                fmt,
-                current_computed.value_fingerprint,
-            );
-        } else {
-            tracing::info!(
-                "{:?} firewall recompute changed fingerprint from {:?} to \
-                 {:?}, propagating dirtiness",
-                fmt,
-                prior_computed.value_fingerprint,
-                current_computed.value_fingerprint,
-            );
-            self.propagate_dirtiness_from_firewall(query_id);
-        }
     }
 
     fn propagate_dirtiness_from_firewall(&self, query_id: &QueryID) {
@@ -737,6 +694,11 @@ impl<C: Config> Database<C> {
 pub enum RepairDecision {
     Recompute,
     Clean { repair_transitive_firewall_callees: bool },
+}
+
+pub enum ExecuteQueryFor<'x, C: Config> {
+    FreshQuery,
+    RecomputeQuery(RefMut<'x, QueryID, Computed<C>>),
 }
 
 impl<C: Config> Engine<C> {
@@ -1030,31 +992,88 @@ impl<C: Config> Engine<C> {
                 .write() = CalleeInfo::default();
         }
 
-        // drop the `computed_callee` to release the mutable borrow for
-        // removing the computed placeholder in the next step.
-        drop(computed_callee);
-
-        // take the lock_computing's computed state in case execute_query
-        // cancels as we have already unwired the dependencies.
-        let prior_computed_mut =
-            self.database.take_prior_computed_placeholder(&caller_id);
-
         // now, execute the query again
-        self.execute_query(query_id, lock_computing).await;
+        self.execute_query(
+            query_id,
+            lock_computing,
+            ExecuteQueryFor::RecomputeQuery(computed_callee),
+        )
+        .await;
+    }
 
-        // after recomputation, we need to check if the firewall
-        // fingerprint has changed to propagate dirtiness
-        self.database.on_firewall_recompute(
-            &query_id.query,
-            &query_id.id,
-            &prior_computed_mut,
-        );
+    // ABOUT CANCELLATIONS:
+    // this function is async, meaning that it can be cancelled at any await
+    // point. However, cancelling this function means that the dirty propagation
+    // might not be fully completed, however, this is not a problem since the
+    // currently repairing node itself will be reverted back as not up-to-date,
+    // and thus will eventually trigger another repairing that will complete the
+    // dirty propagation again.
+    async fn on_firewall_or_projection_recompute(
+        self: &Arc<Self>,
+        fmt: &(dyn std::fmt::Debug + Sync),
+        query_id: &QueryID,
+        prior_computed: &Computed<C>,
+        new_fingerprint: Compact128,
+    ) {
+        let current_meta = self.database.get_read_meta(query_id);
+
+        // if isn't firewall or projection, no-op
+        if !matches!(
+            current_meta.query_kind,
+            QueryKind::Execute(
+                ExecutionStyle::Firewall | ExecutionStyle::Projection
+            )
+        ) {
+            return;
+        }
+
+        // if the fingerprint is different, we need to propagate dirtiness
+        if new_fingerprint == prior_computed.value_fingerprint {
+            tracing::info!(
+                "{:?} firewall recompute did not change fingerprint {:?}, not \
+                 propagating dirtiness",
+                fmt,
+                new_fingerprint
+            );
+        } else {
+            tracing::info!(
+                "{:?} firewall recompute changed fingerprint from {:?} to \
+                 {:?}, propagating dirtiness",
+                fmt,
+                prior_computed.value_fingerprint,
+                new_fingerprint
+            );
+            self.database.propagate_dirtiness_from_firewall(query_id);
+
+            // invoke all backward projections to keep propagation going
+            self.invoke_backward_projections(query_id, &current_meta).await;
+        }
+    }
+
+    async fn invoke_backward_projections(
+        self: &Arc<Self>,
+        source_id: &QueryID,
+        current_meta: &QueryMeta<C>,
+    ) {
+        // OPTIMIZE: this can be parallelized
+        for query_id in current_meta.caller_info.iter() {
+            let caller_meta = self.database.get_read_meta(&query_id);
+
+            // not a projection, skip
+            if !caller_meta.is_projection() {
+                continue;
+            }
+
+            // dynamically invoke the projection query to update its value
+            self.dynamic_repair_query(&query_id, source_id, None::<&()>).await;
+        }
     }
 
     pub(super) async fn execute_query<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         lock_computing: ComputingLockGuard<'_, C>,
+        execut_query_for: ExecuteQueryFor<'_, C>,
     ) {
         // create a new tracked engine
         let cache = Arc::new(DashMap::default());
@@ -1119,7 +1138,47 @@ impl<C: Config> Engine<C> {
             smallbox
         });
 
-        self.database.done_compute(&caller_query, value, lock_computing);
+        let new_fingerprint = Compact128::from_u128(
+            value.hash_128_value(self.database.initial_seed()),
+        );
+
+        match execut_query_for {
+            // recompute case, make sure that if it's a firewall or projection,
+            // propagate dirtiness if needed.
+            //
+            // as well as drop the prior computed placeholder.
+            ExecuteQueryFor::RecomputeQuery(computed_callee) => {
+                // after recomputation, we need to check if the firewall or
+                // projection fingerprint has changed to
+                // propagate dirtiness
+                self.on_firewall_or_projection_recompute(
+                    &query.query,
+                    &query.id,
+                    &computed_callee,
+                    new_fingerprint,
+                )
+                .await;
+                // drop the `computed_callee` to release the mutable borrow for
+                // removing the computed placeholder in the next step.
+                drop(computed_callee);
+
+                // take the lock_computing's computed state in case
+                // execute_query cancels as we have already
+                // unwired the dependencies.
+                let _ = self
+                    .database
+                    .take_prior_computed_placeholder(&caller_query);
+            }
+
+            ExecuteQueryFor::FreshQuery => {}
+        }
+
+        self.database.done_compute(
+            &caller_query,
+            value,
+            new_fingerprint,
+            lock_computing,
+        );
     }
 
     pub(super) async fn continuation<Q: Query>(
@@ -1130,7 +1189,12 @@ impl<C: Config> Engine<C> {
         if self.database.has_prior_computed_placeholder(query.id()) {
             self.repair_query(query, lock_computing).await;
         } else {
-            self.execute_query(query, lock_computing).await;
+            self.execute_query(
+                query,
+                lock_computing,
+                ExecuteQueryFor::FreshQuery,
+            )
+            .await;
         }
     }
 }
