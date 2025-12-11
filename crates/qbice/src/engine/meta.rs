@@ -288,6 +288,10 @@ impl<C: Config> QueryMeta<C> {
         &*self.original_key
     }
 
+    pub fn is_projection(&self) -> bool {
+        self.query_kind == QueryKind::Execute(ExecutionStyle::Projection)
+    }
+
     /// Returns whether this query is an input query.
     pub fn is_input(&self) -> bool { self.query_kind == QueryKind::Input }
 

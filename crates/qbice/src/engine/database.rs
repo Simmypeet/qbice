@@ -1,6 +1,7 @@
 use std::{any::Any, collections::VecDeque, pin::Pin, sync::Arc};
 
 use crate::{
+    ExecutionStyle,
     config::Config,
     engine::{
         Engine, TrackedEngine,
@@ -92,9 +93,30 @@ impl<C: Config> Engine<C> {
         caller.map_or_else(
             || None,
             |caller| {
-                let caller_meta = self.database.get_computing_caller(caller);
+                let caller_meta = self.database.get_read_meta(&caller.0);
 
-                caller_meta.add_callee(calee);
+                // Invariant Check: projection query can only requires
+                // projection or firewall queries.
+                if caller_meta.is_projection() {
+                    // get the kind of query about to be registerd by looking
+                    // up from the executor registry
+                    let entry = self
+                        .executor_registry
+                        .get_executor_entry_by_type_id(&calee.stable_type_id());
+                    let exec_style = entry.obtain_execution_style();
+
+                    if !matches!(
+                        exec_style,
+                        ExecutionStyle::Projection | ExecutionStyle::Firewall
+                    ) {
+                        panic!(
+                            "Projection query can only depend on projection \
+                             or firewall queries"
+                        );
+                    }
+                }
+
+                caller_meta.get_computing().add_callee(calee);
 
                 Some(UndoRegisterCallee::new(
                     &self.database,
