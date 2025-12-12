@@ -401,11 +401,20 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 /// is specific to the `TrackedEngine` instance and its clones (they share the
 /// same cache). The local cache provides fast repeated access to the same
 /// query within a single "session".
-#[derive(Clone)]
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
     caller: Option<Caller>,
+}
+
+impl<C: Config> Clone for TrackedEngine<C> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: Arc::clone(&self.engine),
+            cache: Arc::clone(&self.cache),
+            caller: self.caller,
+        }
+    }
 }
 
 static_assertions::assert_impl_all!(&TrackedEngine<DefaultConfig>: Send, Sync);
