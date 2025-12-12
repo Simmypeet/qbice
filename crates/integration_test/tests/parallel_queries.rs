@@ -113,7 +113,7 @@ impl<C: Config> Executor<ReadVariableMap, C> for ReadVariableMapExecutor {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::cast_possible_wrap)]
 async fn parallel_read_variable_map() {
     let mut engine = Engine::<DefaultConfig>::default();
