@@ -23,11 +23,6 @@ use crate::{
 pub struct Storage<C: Config> {
     query_metas: DashMap<QueryID, QueryMeta<C>>,
 
-    // when the state of a query transformed from `Computed` to `Computing` due
-    // to the repair process, we move the `Computed` to this separate map for
-    // easier access
-    computed_placeholders: DashMap<QueryID, Computed<C>>,
-
     dirtied_queries: DashSet<QueryID>,
 
     initial_seed: InitialSeed,
@@ -38,7 +33,6 @@ impl<C: Config> Default for Storage<C> {
     fn default() -> Self {
         Self {
             query_metas: DashMap::new(),
-            computed_placeholders: DashMap::new(),
             dirtied_queries: DashSet::new(),
             initial_seed: InitialSeed::default(),
             current_timestamp: Timtestamp::default(),
@@ -49,6 +43,7 @@ impl<C: Config> Default for Storage<C> {
 /// A drop guard for the computing lock of a query.
 pub struct ComputingLockGuard<'a, C: Config> {
     database: &'a Database<C>,
+    prior_computed: Option<Computed<C>>,
     query_id: QueryID,
     notification: Arc<Notify>,
     defused: bool,
@@ -84,10 +79,15 @@ impl<C: Config> Drop for ComputingLockGuard<'_, C> {
             .get_mut(&self.query_id)
             .expect("query ID should be present");
 
-        let existed_computed =
-            self.database.storage.computed_placeholders.remove(&self.query_id);
+        let existed_computed_from_computing = query_meta
+            .get_computing_mut()
+            .take_computed_placeholder_for_firewall_dirty_propagation();
+        let prior_existed_computed = self.prior_computed.take();
 
-        if let Some(computed) = existed_computed.map(|x| x.1) {
+        let existed_computed =
+            existed_computed_from_computing.or(prior_existed_computed);
+
+        if let Some(computed) = existed_computed {
             // restore to previous computed state
             query_meta.replace_state(State::Computed(computed));
         } else {
@@ -110,6 +110,32 @@ impl<C: Config> ComputingLockGuard<'_, C> {
     }
 
     pub fn notification(&self) -> &Notify { &self.notification }
+
+    pub const fn take_prior_computed(&mut self) -> Option<Computed<C>> {
+        self.prior_computed.take()
+    }
+
+    pub const fn prior_computed(&self) -> &Computed<C> {
+        self.prior_computed.as_ref().unwrap()
+    }
+
+    pub const fn prior_computed_mut(&mut self) -> &mut Computed<C> {
+        self.prior_computed.as_mut().unwrap()
+    }
+
+    pub fn set_prior_computed(&mut self, computed: Computed<C>) {
+        // shouldn't have prior computed already
+        assert!(
+            self.prior_computed.is_none(),
+            "there's some previous computed"
+        );
+
+        self.prior_computed = Some(computed);
+    }
+
+    pub const fn has_prior_computed_placeholder(&self) -> bool {
+        self.prior_computed.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -151,6 +177,17 @@ impl<C: Config> Database<C> {
             .get(&caller.0)
             .unwrap_or_else(|| panic!("query ID {:?} is not found", caller.0))
             .map(|x| x.get_computing())
+    }
+
+    pub fn get_computing_mut(
+        &self,
+        query_id: &QueryID,
+    ) -> MappedRefMut<'_, QueryID, QueryMeta<C>, Computing<C>> {
+        self.storage
+            .query_metas
+            .get_mut(query_id)
+            .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
+            .map(|x| x.get_computing_mut())
     }
 
     pub fn get_computing_caller_mut(
@@ -256,14 +293,9 @@ impl<C: Config> Database<C> {
                             .into_computed()
                             .expect("should've been computed");
 
-                        // store the prior computed placeholder
-                        self.store_prior_computed_placeholder(
-                            *query_id.id(),
-                            computed,
-                        );
-
                         Some(ComputingLockGuard {
                             database: self,
+                            prior_computed: Some(computed),
                             query_id: *query_id.id(),
                             defused: false,
                             notification: noti,
@@ -290,6 +322,7 @@ impl<C: Config> Database<C> {
 
                 Some(ComputingLockGuard {
                     database: self,
+                    prior_computed: None,
                     query_id: *query_id.id(),
                     defused: false,
                     notification: noti,
@@ -304,53 +337,10 @@ impl<C: Config> Database<C> {
         self.storage.dirtied_queries.insert(query_id)
     }
 
-    pub fn has_prior_computed_placeholder(&self, query_id: &QueryID) -> bool {
-        self.storage.computed_placeholders.contains_key(query_id)
-    }
-
-    pub fn take_prior_computed_placeholder(
-        &self,
-        query_id: &Caller,
-    ) -> Computed<C> {
-        self.storage
-            .computed_placeholders
-            .remove(&query_id.0)
-            .expect("should have a prior computed placeholder")
-            .1
-    }
-
-    pub fn store_prior_computed_placeholder(
-        &self,
-        query_id: QueryID,
-        computed: Computed<C>,
-    ) {
-        assert!(
-            self.storage
-                .computed_placeholders
-                .insert(query_id, computed)
-                .is_none(),
-            "should have no existing computed placeholder",
-        );
-    }
-
-    pub fn get_prior_computed(
-        &self,
-        query_id: &QueryID,
-    ) -> Ref<'_, QueryID, Computed<C>> {
-        self.storage.computed_placeholders.get(query_id).unwrap()
-    }
-
-    pub fn get_prior_computed_mut(
-        &self,
-        query_id: &QueryID,
-    ) -> RefMut<'_, QueryID, Computed<C>> {
-        self.storage.computed_placeholders.get_mut(query_id).unwrap()
-    }
-
     pub fn set_computed_from_existing_lock_computing_and_defuse(
         &self,
         query_id: &Caller,
-        lock_computing: ComputingLockGuard<'_, C>,
+        mut lock_computing: ComputingLockGuard<'_, C>,
     ) {
         let mut query_meta = self
             .storage
@@ -358,9 +348,12 @@ impl<C: Config> Database<C> {
             .get_mut(&query_id.0)
             .expect("query ID should be present");
 
-        let computed = self.take_prior_computed_placeholder(query_id);
-
-        query_meta.replace_state(State::Computed(computed));
+        query_meta.replace_state(State::Computed(
+            lock_computing
+                .prior_computed
+                .take()
+                .expect("prior computed should be present"),
+        ));
 
         // defuse the undoing of computing lock
         lock_computing.defuse_and_notify();

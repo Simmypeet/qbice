@@ -8,10 +8,7 @@ use std::{
     },
 };
 
-use dashmap::{
-    DashMap, DashSet,
-    mapref::one::{Ref, RefMut},
-};
+use dashmap::{DashMap, DashSet, mapref::one::Ref};
 use enum_as_inner::EnumAsInner;
 use parking_lot::{RwLock, RwLockReadGuard};
 use tokio::sync::Notify;
@@ -35,7 +32,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub struct ReadyToComputed<C: Config> {
+pub struct ReadyComputed<C: Config> {
     pub value_fingerprint: Compact128,
     pub tfc_archetype: Option<TfcArchetypeID>,
     pub value: DynValueBox<C>,
@@ -46,7 +43,7 @@ pub struct ReadyToComputed<C: Config> {
 pub enum ComputingState<C: Config> {
     Fresh,
     Repair,
-    ReadyComputed(ReadyToComputed<C>),
+    ReadyComputed(ReadyComputed<C>),
 }
 
 #[derive(Debug)]
@@ -57,6 +54,7 @@ pub struct Computing<C: Config> {
     // when observing callees.
     callee_info: RwLock<CalleeInfo>,
 
+    computed_placeholder_for_firewall_dirty_propagation: Option<Computed<C>>,
     state: ComputingState<C>,
 
     is_in_scc: AtomicBool,
@@ -71,9 +69,16 @@ impl<C: Config> Computing<C> {
         self.callee_info.read()
     }
 
+    pub const fn take_computed_placeholder_for_firewall_dirty_propagation(
+        &mut self,
+    ) -> Option<Computed<C>> {
+        self.computed_placeholder_for_firewall_dirty_propagation.take()
+    }
+
     pub fn new(notification: Arc<Notify>, state: ComputingState<C>) -> Self {
         Self {
             notification,
+            computed_placeholder_for_firewall_dirty_propagation: None,
             state,
             callee_info: RwLock::new(CalleeInfo {
                 callee_queries: HashMap::new(),
@@ -584,7 +589,6 @@ impl<C: Config> Database<C> {
                     // proceed to waiting
                     CheckProjectionQueryGotBackwardPropagate::GoToWait => {}
                     CheckProjectionQueryGotBackwardPropagate::Done(res) => {
-                        eprintln!("Hit Early!");
                         return Ok(FastPathResult::Hit(res));
                     }
                 }
@@ -735,14 +739,16 @@ impl<C: Config> Database<C> {
                 match &caller_meta.state {
                     // if it's computing, it must have been waiting for this
                     // firewall to complete repairation, so we directly access
-                    // the its `prior_computed` and dirty from there. So that
-                    // when it resumes, it can observe the dirty flag.
-                    State::Computing(_) => {
-                        let caller_computed = self.get_prior_computed(&caller);
+                    // the placeholder computed value for dirty propagation.
+                    State::Computing(computing) => {
+                        let caller_computed = computing
+                            .computed_placeholder_for_firewall_dirty_propagation
+                            .as_ref()
+                            .expect("should be present");
 
                         self.propagate_dirty_from_computed_caller(
                             caller,
-                            &caller_computed,
+                            caller_computed,
                             caller_meta.query_kind,
                             &current_query_id,
                             &mut work_queue,
@@ -799,15 +805,62 @@ impl<C: Config> Database<C> {
     }
 }
 
+struct ComputedMeta {
+    pub value_fingerprint: Compact128,
+    pub tfc_archetype: Option<TfcArchetypeID>,
+}
+
+impl<C: Config> Database<C> {
+    fn get_computed_meta(&self, current_id: QueryID) -> ComputedMeta {
+        let meta = self.get_read_meta(&current_id);
+        match &meta.state {
+            State::Computing(computing) => match &computing.state {
+                ComputingState::Fresh | ComputingState::Repair => {
+                    unreachable!("should at least be ready to computed")
+                }
+                ComputingState::ReadyComputed(ready_to_computed) => {
+                    assert!(
+                        matches!(
+                            meta.query_kind,
+                            QueryKind::Execute(
+                                ExecutionStyle::Firewall
+                                    | ExecutionStyle::Projection
+                            )
+                        ),
+                        "only projection and firewall queries are allowed to \
+                         peak into ReadyComputed prematurely"
+                    );
+
+                    ComputedMeta {
+                        value_fingerprint: ready_to_computed.value_fingerprint,
+                        tfc_archetype: Some(self.new_singleton_tfc(current_id)),
+                    }
+                }
+            },
+
+            State::Computed(computed) => ComputedMeta {
+                value_fingerprint: computed.value_fingerprint,
+                tfc_archetype: if meta.query_kind
+                    == QueryKind::Execute(ExecutionStyle::Firewall)
+                {
+                    Some(self.new_singleton_tfc(current_id))
+                } else {
+                    computed.callee_info.tfc_archetype
+                },
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RepairDecision {
     Recompute,
     Clean { repair_transitive_firewall_callees: bool },
 }
 
-pub enum ExecuteQueryFor<'x, C: Config> {
+pub enum ExecuteQueryFor {
     FreshQuery,
-    RecomputeQuery(RefMut<'x, QueryID, Computed<C>>),
+    RecomputeQuery,
 }
 
 impl<C: Config> Engine<C> {
@@ -897,12 +950,7 @@ impl<C: Config> Engine<C> {
                 .await;
             }
 
-            // SAFETY: after the repair, the callee's state should be at
-            // computed at the current timestamp.
-            let callee_meta = self.database.get_read_meta(callee);
-
-            let callee_computed =
-                callee_meta.state.as_computed().expect("should be computed");
+            let callee_computed = self.database.get_computed_meta(*callee);
 
             // depend on whether the observed fingerprint has changed
             {
@@ -915,8 +963,7 @@ impl<C: Config> Engine<C> {
                 let obs = obs.as_ref().expect("should be present");
 
                 let new_fingerprint = callee_computed.value_fingerprint;
-                let new_tfc_fingerprint =
-                    callee_computed.callee_info.tfc_archetype;
+                let new_tfc_fingerprint = callee_computed.tfc_archetype;
 
                 if obs.seen_transitive_firewall_callees_fingerprint
                     != new_tfc_fingerprint
@@ -942,12 +989,35 @@ impl<C: Config> Engine<C> {
     async fn repair_transitive_firewall_callees(
         self: &Arc<Self>,
         caller_id: &QueryID,
-        tfc_achetype_id: Option<TfcArchetypeID>,
+        lock_computing: &mut ComputingLockGuard<'_, C>,
     ) {
-        let Some(tfc_achetype_id) = tfc_achetype_id else {
+        let Some(tfc_achetype_id) =
+            lock_computing.prior_computed().callee_info.tfc_archetype
+        else {
             // no transitive firewall callees to repair, skip
             return;
         };
+
+        // Move the prior computed from the lock computing into the computing
+        // state itself. This is because when repairing the firewalls, the
+        // dirty propagation might need to access the computed state of the
+        // affected queries in order to propagate the dirty flags.
+        {
+            let prior_computed = lock_computing
+                .take_prior_computed()
+                .expect("should've been set");
+            let mut computing_mut = self.database.get_computing_mut(caller_id);
+
+            // should've not set
+            assert!(
+                computing_mut
+                    .computed_placeholder_for_firewall_dirty_propagation
+                    .is_none()
+            );
+
+            computing_mut.computed_placeholder_for_firewall_dirty_propagation =
+                Some(prior_computed);
+        }
 
         let tfc_set = self.database.get_tfc_set_by_id(&tfc_achetype_id);
 
@@ -981,45 +1051,45 @@ impl<C: Config> Engine<C> {
             self.dynamic_repair_query::<()>(callee, Some((caller_id, None)))
                 .await;
         }
+
+        // Finish repairing the transitive firewall callees, move back the
+        // computed placeholder into the lock computing.
+        {
+            let mut computing = self.database.get_computing_mut(caller_id);
+            let placeholder_computed = computing
+                .computed_placeholder_for_firewall_dirty_propagation
+                .take()
+                .expect("should've been set");
+
+            lock_computing.set_prior_computed(placeholder_computed);
+        }
     }
 
     #[tracing::instrument(skip(self, lock_computing), level = "info")]
     pub(super) async fn repair_query<Q: Query>(
         self: &Arc<Self>,
         query_id: &QueryWithID<'_, Q>,
-        lock_computing: ComputingLockGuard<'_, C>,
+        mut lock_computing: ComputingLockGuard<'_, C>,
     ) {
         let caller_id = Caller::new(query_id.id);
 
-        // we can't hold the read lock on our own computed state while repairing
-        // transitive firewall callees since dirty propagation might happen and
-        // it needs to acquire a write lock on the computed state to mark some
-        // callees as dirty.
-        let tfc_archetype_id = self
-            .database
-            .get_prior_computed(&query_id.id)
-            .callee_info
-            .tfc_archetype;
-
-        // repair transitive firewall callees first
+        // repair transitive firewall callees first before deciding whether to
+        // recompute, since the transitive firewall callees might affect the
+        // decision by propagating dirtiness.
         self.repair_transitive_firewall_callees(
             caller_id.query_id(),
-            tfc_archetype_id,
+            &mut lock_computing,
         )
         .await;
 
-        // NOTE: the prior computed must be held here after repairing TFCs since
-        // the transitive firewall callees might need to propagate dirtiness to
-        // the current query and require writing into the computed state.
-        let mut computed_callee =
-            self.database.get_prior_computed_mut(&query_id.id);
+        let computed_callee = lock_computing.prior_computed_mut();
 
         if computed_callee.verified_at == self.database.current_timestamp() {
             return;
         }
 
         let recompute =
-            self.should_recompute_query(query_id, &computed_callee).await;
+            self.should_recompute_query(query_id, computed_callee).await;
 
         match recompute {
             RepairDecision::Recompute => {
@@ -1031,10 +1101,6 @@ impl<C: Config> Engine<C> {
                 repair_transitive_firewall_callees: false,
             } => {
                 computed_callee.verified_at = self.database.current_timestamp();
-
-                // drop the `computed_callee` to release the mutable borrow
-                // that will be used in the next step.
-                drop(computed_callee);
 
                 self.database
                     .set_computed_from_existing_lock_computing_and_defuse(
@@ -1068,10 +1134,6 @@ impl<C: Config> Engine<C> {
                 computed_callee.callee_info.tfc_archetype =
                     self.database.union_tfcs(new_tfc_callees.into_iter());
                 computed_callee.verified_at = self.database.current_timestamp();
-
-                // drop the `computed_callee` to release the mutable borrow
-                // that will be used in the next step.
-                drop(computed_callee);
 
                 self.database
                     .set_computed_from_existing_lock_computing_and_defuse(
@@ -1110,7 +1172,7 @@ impl<C: Config> Engine<C> {
         self.execute_query(
             query_id,
             lock_computing,
-            ExecuteQueryFor::RecomputeQuery(computed_callee),
+            ExecuteQueryFor::RecomputeQuery,
         )
         .await;
     }
@@ -1203,8 +1265,8 @@ impl<C: Config> Engine<C> {
     pub(super) async fn execute_query<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
-        lock_computing: ComputingLockGuard<'_, C>,
-        execut_query_for: ExecuteQueryFor<'_, C>,
+        mut lock_computing: ComputingLockGuard<'_, C>,
+        execut_query_for: ExecuteQueryFor,
     ) {
         // create a new tracked engine
         let cache = Arc::new(DashMap::default());
@@ -1281,7 +1343,7 @@ impl<C: Config> Engine<C> {
             let computing_mut: &mut Computing<_> = &mut *computing_mut;
 
             computing_mut.state =
-                ComputingState::ReadyComputed(ReadyToComputed {
+                ComputingState::ReadyComputed(ReadyComputed {
                     value_fingerprint: new_fingerprint,
                     tfc_archetype: computing_mut
                         .callee_info
@@ -1297,28 +1359,24 @@ impl<C: Config> Engine<C> {
             // propagate dirtiness if needed.
             //
             // as well as drop the prior computed placeholder.
-            ExecuteQueryFor::RecomputeQuery(computed_callee) => {
+            ExecuteQueryFor::RecomputeQuery => {
+                let computed_callee = lock_computing.prior_computed();
+
                 // after recomputation, we need to check if the firewall or
                 // projection fingerprint has changed to
                 // propagate dirtiness
                 self.on_firewall_or_projection_recompute(
                     &query.query,
                     &query.id,
-                    &computed_callee,
+                    computed_callee,
                     new_fingerprint,
                     lock_computing.notification(),
                 )
                 .await;
-                // drop the `computed_callee` to release the mutable borrow for
-                // removing the computed placeholder in the next step.
-                drop(computed_callee);
 
-                // take the lock_computing's computed state in case
-                // execute_query cancels as we have already
-                // unwired the dependencies.
-                let _ = self
-                    .database
-                    .take_prior_computed_placeholder(&caller_query);
+                // remove the prior computed placeholder to prevent it restoring
+                // the old computed state.
+                assert!(lock_computing.take_prior_computed().is_some());
             }
 
             ExecuteQueryFor::FreshQuery => {}
@@ -1332,7 +1390,7 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         lock_computing: ComputingLockGuard<'_, C>,
     ) {
-        if self.database.has_prior_computed_placeholder(query.id()) {
+        if lock_computing.has_prior_computed_placeholder() {
             self.repair_query(query, lock_computing).await;
         } else {
             self.execute_query(
