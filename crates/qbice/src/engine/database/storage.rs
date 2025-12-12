@@ -12,7 +12,9 @@ use crate::{
     engine::{
         InitialSeed,
         database::{Caller, Database, Timtestamp},
-        meta::{Computed, Computing, QueryMeta, QueryWithID, State},
+        meta::{
+            Computed, Computing, ComputingState, QueryMeta, QueryWithID, State,
+        },
     },
     executor::Registry,
     query::QueryID,
@@ -106,6 +108,8 @@ impl<C: Config> ComputingLockGuard<'_, C> {
         self.defused = true;
         self.notification.notify_waiters();
     }
+
+    pub fn notification(&self) -> &Notify { &self.notification }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -141,12 +145,23 @@ impl<C: Config> Database<C> {
     pub fn get_computing_caller(
         &self,
         caller: &Caller,
-    ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computing> {
+    ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computing<C>> {
         self.storage
             .query_metas
             .get(&caller.0)
             .unwrap_or_else(|| panic!("query ID {:?} is not found", caller.0))
             .map(|x| x.get_computing())
+    }
+
+    pub fn get_computing_caller_mut(
+        &self,
+        caller: &Caller,
+    ) -> MappedRefMut<'_, QueryID, QueryMeta<C>, Computing<C>> {
+        self.storage
+            .query_metas
+            .get_mut(&caller.0)
+            .unwrap_or_else(|| panic!("query ID {:?} is not found", caller.0))
+            .map(|x| x.get_computing_mut())
     }
 
     pub fn get_read_meta(
@@ -236,6 +251,7 @@ impl<C: Config> Database<C> {
                             .get_mut()
                             .replace_state(State::Computing(Computing::new(
                                 noti.clone(),
+                                ComputingState::Repair,
                             )))
                             .into_computed()
                             .expect("should've been computed");
@@ -261,7 +277,10 @@ impl<C: Config> Database<C> {
                 let executor = executor_registry.get_executor_entry::<Q>();
                 let fresh_query_meta = QueryMeta::new(
                     query_id.query().clone(),
-                    State::Computing(Computing::new(noti.clone())),
+                    State::Computing(Computing::new(
+                        noti.clone(),
+                        ComputingState::Fresh,
+                    )),
                     executor.obtain_execution_style(),
                 );
 
@@ -350,7 +369,7 @@ impl<C: Config> Database<C> {
     pub fn set_computed_from_computing_and_defuse(
         &self,
         query_id: &Caller,
-        computed: impl FnOnce(Computing) -> Computed<C>,
+        computed: impl FnOnce(Computing<C>) -> Computed<C>,
         lock_computing: ComputingLockGuard<'_, C>,
     ) {
         let mut query_meta = self

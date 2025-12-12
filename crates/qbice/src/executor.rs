@@ -415,7 +415,7 @@ type InvokeExecutorFn<C> = for<'a> fn(
 type RecursivelyRepairQueryFn<C> = for<'a> fn(
     engine: &'a Arc<Engine<C>>,
     key: &'a dyn Any,
-    called_from: &'a QueryID,
+    called_from: Option<&'a QueryID>,
 ) -> Pin<
     Box<dyn std::future::Future<Output = Result<(), CyclicError>> + Send + 'a>,
 >;
@@ -480,7 +480,7 @@ impl<C: Config> Entry<C> {
         &self,
         engine: &Arc<Engine<C>>,
         query_key: &(dyn Any + Send + Sync),
-        called_from: &QueryID,
+        called_from: Option<&QueryID>,
     ) -> Result<(), CyclicError> {
         (self.recursively_repair_query)(engine, query_key, called_from).await
     }

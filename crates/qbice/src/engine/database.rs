@@ -208,7 +208,7 @@ impl<C: Config> Engine<C> {
     pub(crate) fn recursively_repair_query<'a, Q: Query>(
         engine: &'a Arc<Self>,
         key: &'a dyn Any,
-        caller: &'a QueryID,
+        caller: Option<&'a QueryID>,
     ) -> Pin<
         Box<
             dyn std::future::Future<Output = Result<(), CyclicError>>
@@ -223,9 +223,9 @@ impl<C: Config> Engine<C> {
         Box::pin(async move {
             let query_with_id = engine.database.new_query_with_id(key);
 
-            let caller = Caller::new(*caller);
+            let caller = caller.copied().map(Caller::new);
 
-            engine.query_for(&query_with_id, false, Some(&caller)).await?;
+            engine.query_for(&query_with_id, false, caller.as_ref()).await?;
 
             Ok(())
         })
