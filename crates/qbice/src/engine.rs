@@ -109,7 +109,7 @@ use qbice_stable_hash::StableHash;
 
 use crate::{
     config::{Config, DefaultConfig},
-    engine::database::Database,
+    engine::{database::Database, meta::CallerInformation},
     executor::{Executor, Registry},
     query::{DynValueBox, Query, QueryID},
 };
@@ -313,7 +313,7 @@ impl<C: Config> Engine<C> {
         TrackedEngine {
             engine: self,
             cache: Arc::new(DashMap::new()),
-            caller: None,
+            caller: CallerInformation::User,
         }
     }
 }
@@ -405,7 +405,7 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
-    caller: Option<QueryID>,
+    caller: CallerInformation,
 }
 
 impl<C: Config> Clone for TrackedEngine<C> {

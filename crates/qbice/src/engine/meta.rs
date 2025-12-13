@@ -20,7 +20,7 @@ use crate::{
         database::{
             Database, Timtestamp,
             storage::{ComputingLockGuard, SetInputResult},
-            tfc_archetype::TfcArchetypeID,
+            tfc_archetype::{TfcArchetypeID, TfcSet},
         },
         fingerprint::Compact128,
     },
@@ -35,7 +35,23 @@ use crate::{
 pub enum CallerReason {
     RequireValue,
     Repair,
-    RepairFirewall,
+
+    /// This occurs when a projection got invoked with
+    /// `BackwardProjectionPropagation` and now the projection itself has to
+    /// recompute and in the process it has to call another query with this
+    /// flag.
+    ///
+    /// ```txt
+    ///       Firewall1                Firewall2
+    ///          ^                        ^
+    ///          |                        |
+    ///          +------- Projection  ----+
+    ///                    ^^^^^^^
+    ///                    Got backward propagated and now have to recompute
+    ///                    itself and call Firewall1 and Firewall2 with
+    ///                    this flag.
+    /// ```
+    ProjectionRecomputingDueToBackwardPropagation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,42 +60,62 @@ pub struct QueryCaller {
     reason: CallerReason,
 }
 
-impl QueryCaller {
-    pub const fn new_value_requiring(query_id: QueryID) -> Self {
-        Self { query_id, reason: CallerReason::RequireValue }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallerInformation {
     User,
     Query(QueryCaller),
+
+    /// The caller is either a firewall or projection query. The caller calls
+    /// the query when the caller itself has changed its value and has to
+    /// invoke all of its backward projections (projections that use the caller)
+    /// in order to propagate the dirtiness.
+    ///
+    /// ```txt
+    ///         Firewall <-- caller has changed its value
+    ///          ^    ^
+    ///         /      \
+    ///   Projection1  Projection2 <-- both got called with
+    ///                                 `BackwardProjectionPropagation`
+    /// ```
     BackwardProjectionPropagation,
+
+    RepairFirewall,
 }
 
 impl CallerInformation {
     pub const fn get_caller(&self) -> Option<&QueryID> {
         match self {
-            Self::BackwardProjectionPropagation | Self::User => None,
+            Self::RepairFirewall
+            | Self::BackwardProjectionPropagation
+            | Self::User => None,
+
             Self::Query(q) => Some(&q.query_id),
         }
     }
 
-    pub fn require_value(&self) -> bool {
+    pub const fn require_value(&self) -> bool {
         match self {
-            Self::BackwardProjectionPropagation => false,
+            Self::RepairFirewall | Self::BackwardProjectionPropagation => false,
+
             Self::User => true,
-            Self::Query(q) => q.reason == CallerReason::RequireValue,
+            Self::Query(q) => matches!(q.reason, CallerReason::RequireValue
+                | CallerReason::ProjectionRecomputingDueToBackwardPropagation
+            ),
         }
     }
 
     pub fn has_a_caller_requiring_value(&self) -> Option<&QueryID> {
         match self {
             // it does require value, but the caller is not another query
-            Self::User | Self::BackwardProjectionPropagation => None,
+            Self::RepairFirewall
+            | Self::User
+            | Self::BackwardProjectionPropagation => None,
 
             Self::Query(q) => {
-                (q.reason == CallerReason::RequireValue).then_some(&q.query_id)
+                matches!(q.reason,
+                    CallerReason::RequireValue
+                    | CallerReason::ProjectionRecomputingDueToBackwardPropagation
+                ).then_some(&q.query_id)
             }
         }
     }
@@ -593,13 +629,21 @@ impl<C: Config> Database<C> {
         callee_computing: &Computing<C>,
         callee_meta: &QueryMeta<C>,
         callee_target_id: &QueryID,
-        caller: Option<&QueryID>,
+        caller: &CallerInformation,
         required_value: bool,
     ) -> CheckProjectionQueryGotBackwardPropagate<V> {
         // this check only applies to caller being a projection query
-        let Some(caller) = caller else {
+        let CallerInformation::Query(caller_query) = caller else {
             return CheckProjectionQueryGotBackwardPropagate::GoToWait;
         };
+
+        // must be only a projection query that called with backward propagation
+        // flag to be able for accessing the ready computed value.
+        if caller_query.reason
+            != CallerReason::ProjectionRecomputingDueToBackwardPropagation
+        {
+            return CheckProjectionQueryGotBackwardPropagate::GoToWait;
+        }
 
         match &callee_computing.state {
             ComputingState::Fresh | ComputingState::Repair => {
@@ -609,38 +653,28 @@ impl<C: Config> Database<C> {
             // the value is ready for backward propagation, use this query
             // and return right away.
             ComputingState::ReadyComputed(mini_copmuted) => {
-                let caller_meta_source = self.get_read_meta(caller);
+                self.observe_callee_fingerprint(
+                    mini_copmuted.value_fingerprint,
+                    mini_copmuted.tfc_archetype,
+                    callee_meta,
+                    callee_target_id,
+                    &caller_query.query_id,
+                    callee_meta.query_kind,
+                );
 
-                if caller_meta_source.is_projection()
-                    && mini_copmuted.next_version == self.current_timestamp()
-                {
+                CheckProjectionQueryGotBackwardPropagate::Done(
                     if required_value {
-                        self.observe_callee_fingerprint(
-                            mini_copmuted.value_fingerprint,
-                            mini_copmuted.tfc_archetype,
-                            callee_meta,
-                            callee_target_id,
-                            caller,
-                            callee_meta.query_kind,
-                        );
-                    }
-
-                    CheckProjectionQueryGotBackwardPropagate::Done(
-                        if required_value {
-                            QueryResult::Return(
-                                mini_copmuted
-                                    .value
-                                    .downcast_value::<V>()
-                                    .unwrap()
-                                    .clone(),
-                            )
-                        } else {
-                            QueryResult::UpToDate
-                        },
-                    )
-                } else {
-                    CheckProjectionQueryGotBackwardPropagate::GoToWait
-                }
+                        QueryResult::Return(
+                            mini_copmuted
+                                .value
+                                .downcast_value::<V>()
+                                .unwrap()
+                                .clone(),
+                        )
+                    } else {
+                        QueryResult::UpToDate
+                    },
+                )
             }
         }
     }
@@ -667,7 +701,7 @@ impl<C: Config> Database<C> {
                     computing,
                     &callee_target_meta,
                     query_id,
-                    caller.get_caller(),
+                    caller,
                     caller.require_value(),
                 ) {
                     // proceed to waiting
@@ -977,7 +1011,7 @@ impl<C: Config> Engine<C> {
     }
 
     #[tracing::instrument(skip(self, computed_callee), ret, level = "info")]
-    pub(super) async fn should_recompute_query<Q: Query>(
+    pub(super) async fn should_recompute_query_based_on_callee<Q: Query>(
         self: &Arc<Self>,
         query_id: &QueryWithID<'_, Q>,
         computed_callee: &Computed<C>,
@@ -1052,6 +1086,46 @@ impl<C: Config> Engine<C> {
         RepairDecision::Clean { repair_transitive_firewall_callees }
     }
 
+    async fn repair_transitive_firewall_callees_tfc_set(
+        self: &Arc<Self>,
+        tfc_set: &TfcSet,
+    ) {
+        // OPTIMIZE: this can be parallelized
+        for callee in tfc_set {
+            // has to directly repair since the chain of firewall might happen
+            // and the dirty flag might have not yet propagated
+            //
+            //               Input
+            //                 | *
+            //                 V
+            //             Firewall
+            //                 |
+            //                 V
+            //             Firewall2
+            //                 |
+            //                 V
+            //               .....
+            //                 |
+            //                 V
+            //           CurrentQuery
+            //
+            // NOTE: The asterisked on the edge indicates dirty edge.
+            //
+            // Here the `CurrentQuery`` have a transitive dependency on
+            // `Firewall2`. However, due to the `Firewall` node, the dirty
+            // flag doesn't propagate to `Firewall2` and thus the `CurrentQuery`
+            // cannot observe the dirty flag on `Firewall2`. Therefore, we have
+            // to immediately repair the `Firewall2` node to ensure that the
+            // dirty flag from the `Firewall` node is properly propagated.
+            let _ = self
+                .dynamic_repair_query(
+                    callee,
+                    &CallerInformation::RepairFirewall,
+                )
+                .await;
+        }
+    }
+
     /// Repair the transitive firewall callees first in order for the dirty
     /// propagation to be invoked for the firewall callees.
     async fn repair_transitive_firewall_callees(
@@ -1088,44 +1162,7 @@ impl<C: Config> Engine<C> {
         }
 
         let tfc_set = self.database.get_tfc_set_by_id(&tfc_achetype_id);
-
-        // OPTIMIZE: this can be parallelized
-        for callee in tfc_set.iter() {
-            // has to directly repair since the chain of firewall might happen
-            // and the dirty flag might have not yet propagated
-            //
-            //               Input
-            //                 | *
-            //                 V
-            //             Firewall
-            //                 |
-            //                 V
-            //             Firewall2
-            //                 |
-            //                 V
-            //               .....
-            //                 |
-            //                 V
-            //           CurrentQuery
-            //
-            // NOTE: The asterisked on the edge indicates dirty edge.
-            //
-            // Here the `CurrentQuery`` have a transitive dependency on
-            // `Firewall2`. However, due to the `Firewall` node, the dirty
-            // flag doesn't propagate to `Firewall2` and thus the `CurrentQuery`
-            // cannot observe the dirty flag on `Firewall2`. Therefore, we have
-            // to immediately repair the `Firewall2` node to ensure that the
-            // dirty flag from the `Firewall` node is properly propagated.
-            let _ = self
-                .dynamic_repair_query(
-                    callee,
-                    &CallerInformation::Query(QueryCaller {
-                        query_id: *caller_id,
-                        reason: CallerReason::RepairFirewall,
-                    }),
-                )
-                .await;
-        }
+        self.repair_transitive_firewall_callees_tfc_set(&tfc_set).await;
 
         // Finish repairing the transitive firewall callees, move back the
         // computed placeholder into the lock computing.
@@ -1140,12 +1177,23 @@ impl<C: Config> Engine<C> {
         }
     }
 
-    #[tracing::instrument(skip(self, lock_computing), level = "info")]
-    pub(super) async fn repair_query<Q: Query>(
+    async fn should_recompute_query<'x, Q: Query>(
         self: &Arc<Self>,
         query_id: &QueryWithID<'_, Q>,
-        mut lock_computing: ComputingLockGuard<'_, C>,
-    ) {
+        caller_information: &CallerInformation,
+        mut lock_computing: ComputingLockGuard<'x, C>,
+    ) -> Option<ComputingLockGuard<'x, C>> {
+        // if the caller is backward projection propagation, we always
+        // recompute since the projection query have already told us
+        // that the value is required to be recomputed.
+        if *caller_information
+            == CallerInformation::BackwardProjectionPropagation
+        {
+            return Some(lock_computing);
+        }
+
+        // continue normal path ...
+
         // repair transitive firewall callees first before deciding whether to
         // recompute, since the transitive firewall callees might affect the
         // decision by propagating dirtiness.
@@ -1157,16 +1205,14 @@ impl<C: Config> Engine<C> {
 
         let computed_callee = lock_computing.prior_computed_mut();
 
-        if computed_callee.verified_at == self.database.current_timestamp() {
-            return;
-        }
-
-        let recompute =
-            self.should_recompute_query(query_id, computed_callee).await;
+        let recompute = self
+            .should_recompute_query_based_on_callee(query_id, computed_callee)
+            .await;
 
         match recompute {
             RepairDecision::Recompute => {
                 // continue to recompute
+                Some(lock_computing)
             }
 
             // the query is clean, update the verified timestamp
@@ -1180,7 +1226,7 @@ impl<C: Config> Engine<C> {
                         &query_id.id,
                         lock_computing,
                     );
-                return;
+                None
             }
 
             // the query is clean, but need to repair transitive firewall
@@ -1214,9 +1260,31 @@ impl<C: Config> Engine<C> {
                         lock_computing,
                     );
 
-                return;
+                None
             }
         }
+    }
+
+    #[tracing::instrument(skip(self, lock_computing), level = "info")]
+    pub(super) async fn repair_query<Q: Query>(
+        self: &Arc<Self>,
+        query_id: &QueryWithID<'_, Q>,
+        caller_information: &CallerInformation,
+        lock_computing: ComputingLockGuard<'_, C>,
+    ) {
+        // return Some(lock_computing) if should recompute
+        let Some(lock_computing) = self
+            .should_recompute_query(
+                query_id,
+                caller_information,
+                lock_computing,
+            )
+            .await
+        else {
+            return;
+        };
+
+        let computed_callee = lock_computing.prior_computed();
 
         // before recomputing the query, unwire all previous dependencies
         // to avoid dangling dependencies.
@@ -1242,6 +1310,7 @@ impl<C: Config> Engine<C> {
         self.execute_query(
             query_id,
             lock_computing,
+            caller_information,
             ExecuteQueryFor::RecomputeQuery,
         )
         .await;
@@ -1341,15 +1410,27 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         mut lock_computing: ComputingLockGuard<'_, C>,
+        original_caller: &CallerInformation,
         execut_query_for: ExecuteQueryFor,
     ) {
         // create a new tracked engine
         let cache = Arc::new(DashMap::default());
 
+        let reason = if *original_caller
+            == CallerInformation::BackwardProjectionPropagation
+        {
+            CallerReason::ProjectionRecomputingDueToBackwardPropagation
+        } else {
+            CallerReason::RequireValue
+        };
+
         let mut tracked_engine = TrackedEngine {
             engine: self.clone(),
             cache: cache.clone(),
-            caller: Some(query.id),
+            caller: CallerInformation::Query(QueryCaller {
+                query_id: query.id,
+                reason,
+            }),
         };
 
         let entry = self.executor_registry.get_executor_entry::<Q>();
@@ -1461,14 +1542,16 @@ impl<C: Config> Engine<C> {
     pub(super) async fn continuation<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
+        caller_information: &CallerInformation,
         lock_computing: ComputingLockGuard<'_, C>,
     ) {
         if lock_computing.has_prior_computed_placeholder() {
-            self.repair_query(query, lock_computing).await;
+            self.repair_query(query, caller_information, lock_computing).await;
         } else {
             self.execute_query(
                 query,
                 lock_computing,
+                caller_information,
                 ExecuteQueryFor::FreshQuery,
             )
             .await;

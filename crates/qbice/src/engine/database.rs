@@ -11,7 +11,7 @@ use crate::{
             storage::{SetInputResult, Storage},
             tfc_archetype::TfcArchetype,
         },
-        meta::{self, CallerInformation, QueryCaller, QueryWithID},
+        meta::{self, CallerInformation, QueryWithID},
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, Query, QueryID},
@@ -192,7 +192,7 @@ impl<C: Config> Engine<C> {
             };
 
             // retry to the fast path and obtain value.
-            self.continuation(query, lock_computing).await;
+            self.continuation(query, caller, lock_computing).await;
         };
 
         // check before returning the value
@@ -322,17 +322,9 @@ impl<C: Config> TrackedEngine<C> {
                 .clone());
         }
 
-        // if has no caller, it's a query that invoked by user directly
-        let caller_information =
-            self.caller.as_ref().map_or(CallerInformation::User, |caller| {
-                CallerInformation::Query(QueryCaller::new_value_requiring(
-                    *caller,
-                ))
-            });
-
         // run the main process
         self.engine
-            .query_for(&query_with_id, &caller_information)
+            .query_for(&query_with_id, &self.caller)
             .await
             .map(QueryResult::unwrap_return)
     }
