@@ -161,7 +161,7 @@ pub struct ReadyComputed<C: Config> {
 pub enum ComputingState<C: Config> {
     Fresh,
     Repair,
-    ReadyComputed(ReadyComputed<C>),
+    ForBackwardPropagation(ReadyComputed<C>),
 }
 
 #[derive(Debug)]
@@ -652,7 +652,7 @@ impl<C: Config> Database<C> {
 
             // the value is ready for backward propagation, use this query
             // and return right away.
-            ComputingState::ReadyComputed(mini_copmuted) => {
+            ComputingState::ForBackwardPropagation(mini_copmuted) => {
                 self.observe_callee_fingerprint(
                     mini_copmuted.value_fingerprint,
                     mini_copmuted.tfc_archetype,
@@ -763,22 +763,37 @@ impl<C: Config> Database<C> {
     fn done_compute(
         &self,
         calling_query: &QueryID,
+        ready_computed: ReadyComputed<C>,
+        lock_computing: ComputingLockGuard<'_, C>,
+    ) {
+        self.set_computed_from_computing_and_defuse(
+            calling_query,
+            |computing| Computed {
+                result: ready_computed.value,
+                callee_info: computing.callee_info.into_inner(),
+                verified_at: ready_computed.next_version,
+                value_fingerprint: ready_computed.value_fingerprint,
+            },
+            lock_computing,
+        );
+    }
+
+    fn done_compute_from_backward_propagation(
+        &self,
+        calling_query: &QueryID,
         lock_computing: ComputingLockGuard<'_, C>,
     ) {
         self.set_computed_from_computing_and_defuse(
             calling_query,
             |computing| {
-                let ready_to_computed =
-                    computing.state.into_ready_computed().expect(
-                        "calling `done_compute` must have set the Computing \
-                         State as ReadyToCompute",
-                    );
+                let ready_computed =
+                    computing.state.into_for_backward_propagation().unwrap();
 
                 Computed {
-                    result: ready_to_computed.value,
+                    result: ready_computed.value,
                     callee_info: computing.callee_info.into_inner(),
-                    verified_at: ready_to_computed.next_version,
-                    value_fingerprint: ready_to_computed.value_fingerprint,
+                    verified_at: ready_computed.next_version,
+                    value_fingerprint: ready_computed.value_fingerprint,
                 }
             },
             lock_computing,
@@ -938,7 +953,7 @@ impl<C: Config> Database<C> {
                 ComputingState::Fresh | ComputingState::Repair => {
                     unreachable!("should at least be ready to computed")
                 }
-                ComputingState::ReadyComputed(ready_to_computed) => {
+                ComputingState::ForBackwardPropagation(ready_to_computed) => {
                     assert!(
                         matches!(
                             meta.query_kind,
@@ -1333,16 +1348,6 @@ impl<C: Config> Engine<C> {
     ) {
         let current_meta = self.database.get_read_meta(query_id);
 
-        // if isn't firewall or projection, no-op
-        if !matches!(
-            current_meta.query_kind,
-            QueryKind::Execute(
-                ExecutionStyle::Firewall | ExecutionStyle::Projection
-            )
-        ) {
-            return;
-        }
-
         // if the fingerprint is different, we need to propagate dirtiness
         if new_fingerprint == prior_computed.value_fingerprint {
             tracing::info!(
@@ -1409,7 +1414,7 @@ impl<C: Config> Engine<C> {
     pub(super) async fn execute_query<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
-        mut lock_computing: ComputingLockGuard<'_, C>,
+        lock_computing: ComputingLockGuard<'_, C>,
         original_caller: &CallerInformation,
         execut_query_for: ExecuteQueryFor,
     ) {
@@ -1491,52 +1496,103 @@ impl<C: Config> Engine<C> {
         );
 
         // mark the query as ready to change to computed
-        {
+        let ready_computed = {
             let mut computing_mut = self.database.get_computing_mut(&query.id);
 
             let computing_mut: &mut Computing<_> = &mut *computing_mut;
 
-            computing_mut.state =
-                ComputingState::ReadyComputed(ReadyComputed {
-                    value_fingerprint: new_fingerprint,
-                    tfc_archetype: computing_mut
-                        .callee_info
-                        .read()
-                        .tfc_archetype,
-                    value,
-                    next_version: self.database.current_timestamp(),
-                });
-        }
+            ReadyComputed {
+                value_fingerprint: new_fingerprint,
+                tfc_archetype: computing_mut.callee_info.read().tfc_archetype,
+                value,
+                next_version: self.database.current_timestamp(),
+            }
+        };
 
+        self.handle_ready_computed_after_execute_query(
+            query,
+            lock_computing,
+            ready_computed,
+            execut_query_for,
+        )
+        .await;
+    }
+
+    async fn handle_ready_computed_after_execute_query(
+        self: &Arc<Self>,
+        query: &QueryWithID<'_, impl Query>,
+        mut lock_computing: ComputingLockGuard<'_, C>,
+        ready_computed: ReadyComputed<C>,
+        execut_query_for: ExecuteQueryFor,
+    ) {
         match execut_query_for {
             // recompute case, make sure that if it's a firewall or projection,
             // propagate dirtiness if needed.
             //
             // as well as drop the prior computed placeholder.
             ExecuteQueryFor::RecomputeQuery => {
-                let computed_callee = lock_computing.prior_computed();
+                let mut current_meta_mut =
+                    self.database.get_meta_mut(&query.id);
 
-                // after recomputation, we need to check if the firewall or
-                // projection fingerprint has changed to
-                // propagate dirtiness
-                self.on_firewall_or_projection_recompute(
-                    &query.query,
-                    &query.id,
-                    computed_callee,
-                    new_fingerprint,
-                    lock_computing.notification(),
-                )
-                .await;
+                // if isn't firewall or projection, no-op
+                if matches!(
+                    current_meta_mut.query_kind,
+                    QueryKind::Execute(
+                        ExecutionStyle::Firewall | ExecutionStyle::Projection
+                    )
+                ) {
+                    let computed_callee = lock_computing.prior_computed();
+                    let new_fingerprint = ready_computed.value_fingerprint;
+                    current_meta_mut.get_computing_mut().state =
+                        ComputingState::ForBackwardPropagation(ready_computed);
 
-                // remove the prior computed placeholder to prevent it restoring
-                // the old computed state.
-                assert!(lock_computing.take_prior_computed().is_some());
+                    drop(current_meta_mut);
+
+                    // after recomputation, we need to check if the firewall or
+                    // projection fingerprint has changed to
+                    // propagate dirtiness
+                    self.on_firewall_or_projection_recompute(
+                        &query.query,
+                        &query.id,
+                        computed_callee,
+                        new_fingerprint,
+                        lock_computing.notification(),
+                    )
+                    .await;
+
+                    // remove the prior computed placeholder to prevent it
+                    // restoring the old computed state.
+                    assert!(lock_computing.take_prior_computed().is_some());
+
+                    // set the computing state from the Computing::State
+                    self.database.done_compute_from_backward_propagation(
+                        &query.id,
+                        lock_computing,
+                    );
+                } else {
+                    drop(current_meta_mut);
+
+                    // remove the prior computed placeholder to prevent it
+                    // restoring the old computed state.
+                    assert!(lock_computing.take_prior_computed().is_some());
+
+                    // directly set to computed state
+                    self.database.done_compute(
+                        &query.id,
+                        ready_computed,
+                        lock_computing,
+                    );
+                }
             }
 
-            ExecuteQueryFor::FreshQuery => {}
+            ExecuteQueryFor::FreshQuery => {
+                self.database.done_compute(
+                    &query.id,
+                    ready_computed,
+                    lock_computing,
+                );
+            }
         }
-
-        self.database.done_compute(&query.id, lock_computing);
     }
 
     pub(super) async fn continuation<Q: Query>(
