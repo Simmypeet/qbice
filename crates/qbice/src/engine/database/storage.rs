@@ -11,7 +11,7 @@ use crate::{
     config::Config,
     engine::{
         InitialSeed,
-        database::{Caller, Database, Timtestamp},
+        database::{Database, Timtestamp},
         meta::{
             Computed, Computing, ComputingState, QueryMeta, QueryWithID, State,
         },
@@ -164,18 +164,14 @@ impl<C: Config> Database<C> {
         self.storage.query_metas.get(query_id).unwrap().is_running_in_scc()
     }
 
-    /// Gets a mutable reference to the computing state of the running caller.
-    ///
-    /// We assume that the caller token is valid and corresponds to that the
-    /// query is currently in computing state.
-    pub fn get_computing_caller(
+    pub fn get_computing(
         &self,
-        caller: &Caller,
+        query_id: &QueryID,
     ) -> MappedRef<'_, QueryID, QueryMeta<C>, Computing<C>> {
         self.storage
             .query_metas
-            .get(&caller.0)
-            .unwrap_or_else(|| panic!("query ID {:?} is not found", caller.0))
+            .get(query_id)
+            .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
             .map(|x| x.get_computing())
     }
 
@@ -187,17 +183,6 @@ impl<C: Config> Database<C> {
             .query_metas
             .get_mut(query_id)
             .unwrap_or_else(|| panic!("query ID {query_id:?} is not found"))
-            .map(|x| x.get_computing_mut())
-    }
-
-    pub fn get_computing_caller_mut(
-        &self,
-        caller: &Caller,
-    ) -> MappedRefMut<'_, QueryID, QueryMeta<C>, Computing<C>> {
-        self.storage
-            .query_metas
-            .get_mut(&caller.0)
-            .unwrap_or_else(|| panic!("query ID {:?} is not found", caller.0))
             .map(|x| x.get_computing_mut())
     }
 
@@ -339,13 +324,13 @@ impl<C: Config> Database<C> {
 
     pub fn set_computed_from_existing_lock_computing_and_defuse(
         &self,
-        query_id: &Caller,
+        query_id: &QueryID,
         mut lock_computing: ComputingLockGuard<'_, C>,
     ) {
         let mut query_meta = self
             .storage
             .query_metas
-            .get_mut(&query_id.0)
+            .get_mut(query_id)
             .expect("query ID should be present");
 
         query_meta.replace_state(State::Computed(
@@ -361,14 +346,14 @@ impl<C: Config> Database<C> {
 
     pub fn set_computed_from_computing_and_defuse(
         &self,
-        query_id: &Caller,
+        query_id: &QueryID,
         computed: impl FnOnce(Computing<C>) -> Computed<C>,
         lock_computing: ComputingLockGuard<'_, C>,
     ) {
         let mut query_meta = self
             .storage
             .query_metas
-            .get_mut(&query_id.0)
+            .get_mut(query_id)
             .expect("query ID should be present");
 
         query_meta.take_state_mut(|x| {

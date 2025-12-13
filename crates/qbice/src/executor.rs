@@ -119,8 +119,11 @@ use qbice_stable_type_id::StableTypeID;
 
 use crate::{
     config::Config,
-    engine::{Engine, TrackedEngine},
-    query::{DynValueBox, ExecutionStyle, Query, QueryID},
+    engine::{
+        Engine, TrackedEngine,
+        meta::{CallerInformation, QueryResult},
+    },
+    query::{DynValueBox, ExecutionStyle, Query},
 };
 
 /// Error indicating that a cyclic query dependency was detected.
@@ -412,12 +415,17 @@ type InvokeExecutorFn<C> = for<'a> fn(
 ) -> Pin<
     Box<dyn Future<Output = Result<DynValueBox<C>, CyclicError>> + Send + 'a>,
 >;
-type RecursivelyRepairQueryFn<C> = for<'a> fn(
+type InvokeQueryForFn<C> = for<'a> fn(
     engine: &'a Arc<Engine<C>>,
     key: &'a dyn Any,
-    called_from: Option<&'a QueryID>,
+    called_from: &'a CallerInformation,
 ) -> Pin<
-    Box<dyn std::future::Future<Output = Result<(), CyclicError>> + Send + 'a>,
+    Box<
+        dyn std::future::Future<
+                Output = Result<QueryResult<DynValueBox<C>>, CyclicError>,
+            > + Send
+            + 'a,
+    >,
 >;
 type ObtainSccValueFn = for<'a> fn(buffer: &'a mut dyn Any);
 
@@ -450,7 +458,7 @@ fn obtain_execution_style<
 pub(crate) struct Entry<C: Config> {
     executor: Arc<dyn Any + Send + Sync>,
     invoke_executor: InvokeExecutorFn<C>,
-    recursively_repair_query: RecursivelyRepairQueryFn<C>,
+    invoke_query_for: InvokeQueryForFn<C>,
     obtain_scc_value: ObtainSccValueFn,
     obtain_execution_style: ObtainExecutionStyleFn,
 }
@@ -462,7 +470,7 @@ impl<C: Config> Entry<C> {
         Self {
             executor,
             invoke_executor: invoke_executor::<C, E, Q>,
-            recursively_repair_query: Engine::recursively_repair_query::<Q>,
+            invoke_query_for: Engine::<C>::dynamic_query_for::<Q>,
             obtain_scc_value: obtain_scc_value::<C, E, Q>,
             obtain_execution_style: obtain_execution_style::<C, E, Q>,
         }
@@ -476,13 +484,13 @@ impl<C: Config> Entry<C> {
         (self.invoke_executor)(query_key, self.executor.as_ref(), engine).await
     }
 
-    pub async fn recursively_repair_query(
+    pub async fn invoke_query_for(
         &self,
         engine: &Arc<Engine<C>>,
         query_key: &(dyn Any + Send + Sync),
-        called_from: Option<&QueryID>,
-    ) -> Result<(), CyclicError> {
-        (self.recursively_repair_query)(engine, query_key, called_from).await
+        called_from: &CallerInformation,
+    ) -> Result<QueryResult<DynValueBox<C>>, CyclicError> {
+        (self.invoke_query_for)(engine, query_key, called_from).await
     }
 
     pub fn obtain_scc_value<Q: Query>(&self) -> Q::Value {

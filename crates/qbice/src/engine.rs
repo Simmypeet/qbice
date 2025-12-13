@@ -109,15 +109,16 @@ use qbice_stable_hash::StableHash;
 
 use crate::{
     config::{Config, DefaultConfig},
-    engine::database::{Caller, Database},
+    engine::database::Database,
     executor::{Executor, Registry},
     query::{DynValueBox, Query, QueryID},
 };
 
 mod database;
 mod fingerprint;
-mod meta;
 mod visualization;
+
+pub(super) mod meta;
 
 pub use visualization::{
     EdgeInfo, GraphSnapshot, NodeInfo, write_html_visualization,
@@ -404,7 +405,7 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
-    caller: Option<Caller>,
+    caller: Option<QueryID>,
 }
 
 impl<C: Config> Clone for TrackedEngine<C> {

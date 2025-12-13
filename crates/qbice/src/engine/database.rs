@@ -1,5 +1,6 @@
 use std::{any::Any, collections::VecDeque, pin::Pin, sync::Arc};
 
+use super::meta::QueryResult;
 use crate::{
     ExecutionStyle,
     config::Config,
@@ -10,10 +11,10 @@ use crate::{
             storage::{SetInputResult, Storage},
             tfc_archetype::TfcArchetype,
         },
-        meta::{self, QueryWithID},
+        meta::{self, CallerInformation, QueryCaller, QueryWithID},
     },
     executor::CyclicError,
-    query::{DynValue, Query, QueryID},
+    query::{DynValue, DynValueBox, Query, QueryID},
 };
 
 pub mod statistics;
@@ -47,62 +48,63 @@ impl<C: Config> Default for Database<C> {
 ///
 /// This aims to ensure cancelation safety in case of the task being yielded and
 /// canceled mid query.
-pub struct UndoRegisterCallee<'d, 'c, C: Config> {
+pub struct UndoRegisterCallee<'d, C: Config> {
     database: &'d Database<C>,
-    caller: Option<&'c Caller>,
-    callee: QueryID,
+    caller_source: Option<QueryID>,
+    callee_target: QueryID,
     defused: bool,
 }
 
-impl<'d, 'c, C: Config> UndoRegisterCallee<'d, 'c, C> {
+impl<'d, C: Config> UndoRegisterCallee<'d, C> {
     /// Creates a new [`UndoRegisterCallee`] instance.
     pub const fn new(
         database: &'d Database<C>,
-        caller_source: Option<&'c Caller>,
-        callee: QueryID,
+        caller_source: Option<QueryID>,
+        callee_target: QueryID,
     ) -> Self {
-        Self { database, caller: caller_source, callee, defused: false }
+        Self { database, caller_source, callee_target, defused: false }
     }
 
     /// Don't undo the registration when dropped.
     pub fn defuse(mut self) { self.defused = true; }
 }
 
-impl<C: Config> Drop for UndoRegisterCallee<'_, '_, C> {
+impl<C: Config> Drop for UndoRegisterCallee<'_, C> {
     fn drop(&mut self) {
         if self.defused {
             return;
         }
 
-        if let Some(caller) = self.caller {
-            let caller_meta = self.database.get_computing_caller(caller);
+        if let Some(caller) = self.caller_source {
+            let caller_meta = self.database.get_computing_mut(&caller);
 
-            caller_meta.remove_callee(&self.callee);
+            caller_meta.remove_callee(&self.callee_target);
         }
     }
 }
 
 impl<C: Config> Engine<C> {
-    fn register_callee<'c>(
+    fn register_callee(
         &self,
-        caller: Option<&'c Caller>,
-        calee: QueryID,
-    ) -> Option<UndoRegisterCallee<'_, 'c, C>> {
+        caller_source: Option<&QueryID>,
+        calee_target: QueryID,
+    ) -> Option<UndoRegisterCallee<'_, C>> {
         // record the dependency first, don't necessary need to figure out
         // the observed value fingerprint yet
-        caller.map_or_else(
+        caller_source.map_or_else(
             || None,
             |caller| {
-                let caller_meta = self.database.get_read_meta(&caller.0);
+                let caller_meta = self.database.get_read_meta(caller);
 
                 // Invariant Check: projection query can only requires
                 // projection or firewall queries.
                 if caller_meta.is_projection() {
                     // get the kind of query about to be registerd by looking
                     // up from the executor registry
-                    let entry = self
-                        .executor_registry
-                        .get_executor_entry_by_type_id(&calee.stable_type_id());
+                    let entry =
+                        self.executor_registry.get_executor_entry_by_type_id(
+                            &calee_target.stable_type_id(),
+                        );
                     let exec_style = entry.obtain_execution_style();
 
                     if !matches!(
@@ -116,26 +118,23 @@ impl<C: Config> Engine<C> {
                     }
                 }
 
-                caller_meta.get_computing().add_callee(calee);
+                caller_meta.get_computing().add_callee(calee_target);
 
                 Some(UndoRegisterCallee::new(
                     &self.database,
-                    Some(caller),
-                    calee,
+                    Some(*caller),
+                    calee_target,
                 ))
             },
         )
     }
 
-    fn is_in_scc(
-        &self,
-        called_from: Option<&Caller>,
-    ) -> Result<(), CyclicError> {
-        let Some(called_from) = called_from else {
+    fn is_in_scc(&self, caller: Option<&QueryID>) -> Result<(), CyclicError> {
+        let Some(called_from) = caller else {
             return Ok(());
         };
 
-        if self.database.is_query_running_in_scc(&called_from.0) {
+        if self.database.is_query_running_in_scc(called_from) {
             return Err(CyclicError);
         }
 
@@ -145,18 +144,15 @@ impl<C: Config> Engine<C> {
     async fn query_for<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
-        required_value: bool,
-        caller: Option<&Caller>,
-    ) -> Result<Option<Q::Value>, CyclicError> {
+        caller: &CallerInformation,
+    ) -> Result<QueryResult<Q::Value>, CyclicError> {
         // register the dependency for the sake of detecting cycles
-        let undo_register = self.register_callee(caller, *query.id());
+        let undo_register =
+            self.register_callee(caller.get_caller(), *query.id());
 
         // pulling the value
         let value = loop {
-            match self
-                .database
-                .fast_path::<Q::Value>(query.id(), required_value, caller)
-                .await
+            match self.database.fast_path::<Q::Value>(query.id(), caller).await
             {
                 // try again
                 Ok(meta::FastPathResult::TryAgain) => continue,
@@ -200,19 +196,21 @@ impl<C: Config> Engine<C> {
         };
 
         // check before returning the value
-        self.is_in_scc(caller)?;
+        self.is_in_scc(caller.get_caller())?;
 
         Ok(value)
     }
 
-    pub(crate) fn recursively_repair_query<'a, Q: Query>(
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn dynamic_query_for<'a, Q: Query>(
         engine: &'a Arc<Self>,
         key: &'a dyn Any,
-        caller: Option<&'a QueryID>,
+        caller: &'a CallerInformation,
     ) -> Pin<
         Box<
-            dyn std::future::Future<Output = Result<(), CyclicError>>
-                + Send
+            dyn std::future::Future<
+                    Output = Result<QueryResult<DynValueBox<C>>, CyclicError>,
+                > + Send
                 + 'a,
         >,
     > {
@@ -223,11 +221,10 @@ impl<C: Config> Engine<C> {
         Box::pin(async move {
             let query_with_id = engine.database.new_query_with_id(key);
 
-            let caller = caller.copied().map(Caller::new);
-
-            engine.query_for(&query_with_id, false, caller.as_ref()).await?;
-
-            Ok(())
+            engine
+                .query_for(&query_with_id, caller)
+                .await
+                .map(QueryResult::into_dyn_query_result::<C>)
         })
     }
 }
@@ -325,11 +322,19 @@ impl<C: Config> TrackedEngine<C> {
                 .clone());
         }
 
+        // if has no caller, it's a query that invoked by user directly
+        let caller_information =
+            self.caller.as_ref().map_or(CallerInformation::User, |caller| {
+                CallerInformation::Query(QueryCaller::new_value_requiring(
+                    *caller,
+                ))
+            });
+
         // run the main process
         self.engine
-            .query_for(&query_with_id, true, self.caller.as_ref())
+            .query_for(&query_with_id, &caller_information)
             .await
-            .map(|x| x.unwrap())
+            .map(QueryResult::unwrap_return)
     }
 }
 
@@ -505,16 +510,4 @@ impl<C: Config> Drop for InputSession<'_, C> {
             .database
             .dirty_queries(std::mem::take(&mut self.dirty_batch));
     }
-}
-
-/// A type representing the caller of a query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Caller(QueryID);
-
-impl Caller {
-    /// Creates a new [`Caller`] instance.
-    pub const fn new(query_id: QueryID) -> Self { Self(query_id) }
-
-    /// Returns the query ID of the caller.
-    pub const fn query_id(&self) -> &QueryID { &self.0 }
 }
