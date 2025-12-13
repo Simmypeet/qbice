@@ -11,7 +11,7 @@ use crate::{
             storage::{SetInputResult, Storage},
             tfc_archetype::TfcArchetype,
         },
-        meta::{self, CallerInformation, QueryWithID},
+        meta::{self, CallerInformation, QueryRepairation, QueryWithID},
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, Query, QueryID},
@@ -150,6 +150,8 @@ impl<C: Config> Engine<C> {
         let undo_register =
             self.register_callee(caller.get_caller(), *query.id());
 
+        let mut checked = QueryRepairation::UpToDate;
+
         // pulling the value
         let value = loop {
             match self.database.fast_path::<Q::Value>(query.id(), caller).await
@@ -167,7 +169,10 @@ impl<C: Config> Engine<C> {
                         undo_register.defuse();
                     }
 
-                    break value;
+                    break value.map_or_else(
+                        || QueryResult::Checked(checked),
+                        |v| QueryResult::Return(v, checked),
+                    );
                 }
 
                 Err(e) => {
@@ -193,6 +198,8 @@ impl<C: Config> Engine<C> {
 
             // retry to the fast path and obtain value.
             self.continuation(query, caller, lock_computing).await;
+
+            checked = QueryRepairation::Repaired;
         };
 
         // check before returning the value

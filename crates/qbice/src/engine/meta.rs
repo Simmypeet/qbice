@@ -121,17 +121,29 @@ impl CallerInformation {
     }
 }
 
+/// Specifies whether the query is has been repaired or is up-to-date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum QueryRepairation {
+    /// The query verification timestamp was older than the current timestamp.
+    /// The query has been repaired to be up-to-date (this doesn't imply that
+    /// the query has been recomputed)
+    Repaired,
+
+    /// The verification timestamp was already up-to-date.
+    UpToDate,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryResult<V> {
-    Return(V),
-    UpToDate,
+    Return(V, QueryRepairation),
+    Checked(QueryRepairation),
 }
 
 impl<V> QueryResult<V> {
     pub fn unwrap_return(self) -> V {
         match self {
-            Self::Return(v) => v,
-            Self::UpToDate => {
+            Self::Return(v, _) => v,
+            Self::Checked(_) => {
                 panic!("called `unwrap_return` on a `UpToDate` value")
             }
         }
@@ -143,8 +155,10 @@ impl<V> QueryResult<V> {
         V: DynValue<C>,
     {
         match self {
-            Self::Return(v) => QueryResult::Return(smallbox::smallbox!(v)),
-            Self::UpToDate => QueryResult::UpToDate,
+            Self::Return(v, c) => {
+                QueryResult::Return(smallbox::smallbox!(v), c)
+            }
+            Self::Checked(c) => QueryResult::Checked(c),
         }
     }
 }
@@ -493,14 +507,14 @@ impl<C: Config> Database<C> {
 
 enum CheckProjectionQueryGotBackwardPropagate<V> {
     GoToWait,
-    Done(QueryResult<V>),
+    Done(Option<V>),
 }
 
 /// The result of attempting a fast-path query execution.
 pub enum FastPathResult<V> {
     TryAgain,
     ToSlowPath,
-    Hit(QueryResult<V>),
+    Hit(Option<V>),
 }
 
 impl<C: Config> Database<C> {
@@ -664,7 +678,7 @@ impl<C: Config> Database<C> {
 
                 CheckProjectionQueryGotBackwardPropagate::Done(
                     if required_value {
-                        QueryResult::Return(
+                        Some(
                             mini_copmuted
                                 .value
                                 .downcast_value::<V>()
@@ -672,7 +686,7 @@ impl<C: Config> Database<C> {
                                 .clone(),
                         )
                     } else {
-                        QueryResult::UpToDate
+                        None
                     },
                 )
             }
@@ -748,11 +762,9 @@ impl<C: Config> Database<C> {
                 }
 
                 Ok(FastPathResult::Hit(if caller.require_value() {
-                    QueryResult::Return(
-                        computed.result.downcast_value::<V>().unwrap().clone(),
-                    )
+                    Some(computed.result.downcast_value::<V>().unwrap().clone())
                 } else {
-                    QueryResult::UpToDate
+                    None
                 }))
             }
         }
