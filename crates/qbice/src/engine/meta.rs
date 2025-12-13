@@ -693,83 +693,6 @@ impl<C: Config> Database<C> {
         }
     }
 
-    /// Attempt to fast-path the query execution. Should acquire only a read
-    /// lock, no write lock involved.
-    pub(super) async fn fast_path<V: 'static + Send + Sync + Clone>(
-        &self,
-        query_id: &QueryID,
-        caller: &CallerInformation,
-    ) -> Result<FastPathResult<V>, CyclicError> {
-        // checks if the query result is already computed
-        let Some(callee_target_meta) = self.try_get_read_meta(query_id) else {
-            return Ok(FastPathResult::ToSlowPath);
-        };
-
-        match &callee_target_meta.state {
-            State::Computing(computing) => {
-                self.exit_scc(caller.get_caller(), computing)?;
-
-                // Special case handling for projection queries that can be
-                // backward propagated.
-                match self.check_projection_query_got_backward_propagated::<V>(
-                    computing,
-                    &callee_target_meta,
-                    query_id,
-                    caller,
-                    caller.require_value(),
-                ) {
-                    // proceed to waiting
-                    CheckProjectionQueryGotBackwardPropagate::GoToWait => {}
-                    CheckProjectionQueryGotBackwardPropagate::Done(res) => {
-                        return Ok(FastPathResult::Hit(res));
-                    }
-                }
-
-                let notify = computing.notification.clone();
-
-                // IMPORTANT: add the current thread to the waiter list
-                // first before dropping the state read lock to avoid the
-                // notification being sent before the thread is added to the
-                // waiters list.
-                let notified = notify.notified();
-
-                // drop the read lock to allow the thread that is computing
-                // the query to access the state and notify the waiters.
-                drop(callee_target_meta);
-
-                notified.await;
-
-                // try again after being notified
-                Ok(FastPathResult::TryAgain)
-            }
-
-            State::Computed(computed) => {
-                // the query isn't verified at the current timestamp
-                if computed.verified_at != self.current_timestamp() {
-                    return Ok(FastPathResult::ToSlowPath);
-                }
-
-                if let Some(caller) = caller.has_a_caller_requiring_value() {
-                    // register dependency
-                    self.observe_callee_fingerprint(
-                        computed.value_fingerprint,
-                        computed.callee_info.tfc_archetype,
-                        &callee_target_meta,
-                        query_id,
-                        caller,
-                        callee_target_meta.query_kind,
-                    );
-                }
-
-                Ok(FastPathResult::Hit(if caller.require_value() {
-                    Some(computed.result.downcast_value::<V>().unwrap().clone())
-                } else {
-                    None
-                }))
-            }
-        }
-    }
-
     // Done computing the value, defuse the computing lock and set the computed
     // state
     fn done_compute(
@@ -1010,6 +933,11 @@ pub enum ExecuteQueryFor {
     RecomputeQuery,
 }
 
+pub enum PreRepairingDecision {
+    TryAgain,
+    ToSlowPath,
+}
+
 impl<C: Config> Engine<C> {
     async fn dynamic_repair_query(
         self: &Arc<Self>,
@@ -1116,7 +1044,9 @@ impl<C: Config> Engine<C> {
     async fn repair_transitive_firewall_callees_tfc_set(
         self: &Arc<Self>,
         tfc_set: &TfcSet,
-    ) {
+    ) -> bool {
+        let mut clean = true;
+
         // OPTIMIZE: this can be parallelized
         for callee in tfc_set {
             // has to directly repair since the chain of firewall might happen
@@ -1144,13 +1074,20 @@ impl<C: Config> Engine<C> {
             // cannot observe the dirty flag on `Firewall2`. Therefore, we have
             // to immediately repair the `Firewall2` node to ensure that the
             // dirty flag from the `Firewall` node is properly propagated.
-            let _ = self
+            let result = self
                 .dynamic_repair_query(
                     callee,
                     &CallerInformation::RepairFirewall,
                 )
                 .await;
+
+            clean &= matches!(
+                result,
+                Ok(QueryResult::Checked(QueryRepairation::UpToDate))
+            );
         }
+
+        clean
     }
 
     /// Repair the transitive firewall callees first in order for the dirty
@@ -1623,6 +1560,149 @@ impl<C: Config> Engine<C> {
                 ExecuteQueryFor::FreshQuery,
             )
             .await;
+        }
+    }
+
+    /// due to when the firewall repairing happens, when the firewall has
+    /// changed its value, it might need to re-execute all of the projection
+    /// callers that depend on it to propagate the dirtiness. if we directly
+    /// acquire computing lock now and later down the line, it tries to
+    /// repairing the firewall again, which will try to invoke this query
+    /// again, causing a deadlock.
+    pub(super) async fn pre_repairing_firewall_for_normal_projection(
+        self: &Arc<Self>,
+        read_meta: Ref<'_, QueryID, QueryMeta<C>>,
+        caller: &CallerInformation,
+    ) -> PreRepairingDecision {
+        if read_meta.query_kind
+            != QueryKind::Execute(ExecutionStyle::Projection)
+        {
+            return PreRepairingDecision::ToSlowPath;
+        }
+
+        let is_backward_projection_propagation =
+            matches!(caller, CallerInformation::BackwardProjectionPropagation);
+
+        if is_backward_projection_propagation {
+            return PreRepairingDecision::ToSlowPath;
+        }
+
+        let computed = read_meta.get_computed();
+        let tfc_set = computed
+            .callee_info()
+            .tfc_archetype
+            .expect("projection should eventually depends on some firewall");
+
+        let tfc_set = self.database.get_tfc_set_by_id(&tfc_set);
+
+        // drop this lock since during repairing firewall might actually need
+        // to invoke this query
+        drop(read_meta);
+
+        // if the firewall was not cleaned, it means that this projection itself
+        // could've been invoked earlier during dirtiness propagation and
+        // backward projection calls, so we must try again in case of
+        // backward projection calls updating this query.
+        if self.repair_transitive_firewall_callees_tfc_set(&tfc_set).await {
+            PreRepairingDecision::ToSlowPath
+        } else {
+            PreRepairingDecision::TryAgain
+        }
+    }
+
+    /// Attempt to fast-path the query execution. Should acquire only a read
+    /// lock, no write lock involved.
+    pub(super) async fn fast_path<V: 'static + Send + Sync + Clone>(
+        self: &Arc<Self>,
+        query_id: &QueryID,
+        caller: &CallerInformation,
+    ) -> Result<FastPathResult<V>, CyclicError> {
+        // checks if the query result is already computed
+        let Some(callee_target_meta) =
+            self.database.try_get_read_meta(query_id)
+        else {
+            return Ok(FastPathResult::ToSlowPath);
+        };
+
+        match &callee_target_meta.state {
+            State::Computing(computing) => {
+                self.database.exit_scc(caller.get_caller(), computing)?;
+
+                // Special case handling for projection queries that can be
+                // backward propagated.
+                match self
+                    .database
+                    .check_projection_query_got_backward_propagated::<V>(
+                        computing,
+                        &callee_target_meta,
+                        query_id,
+                        caller,
+                        caller.require_value(),
+                    ) {
+                    // proceed to waiting
+                    CheckProjectionQueryGotBackwardPropagate::GoToWait => {}
+                    CheckProjectionQueryGotBackwardPropagate::Done(res) => {
+                        return Ok(FastPathResult::Hit(res));
+                    }
+                }
+
+                let notify = computing.notification.clone();
+
+                // IMPORTANT: add the current thread to the waiter list
+                // first before dropping the state read lock to avoid the
+                // notification being sent before the thread is added to the
+                // waiters list.
+                let notified = notify.notified();
+
+                // drop the read lock to allow the thread that is computing
+                // the query to access the state and notify the waiters.
+                drop(callee_target_meta);
+
+                notified.await;
+
+                // try again after being notified
+                Ok(FastPathResult::TryAgain)
+            }
+
+            State::Computed(computed) => {
+                // the query isn't verified at the current timestamp
+                if computed.verified_at != self.database.current_timestamp() {
+                    return Ok(
+                        match self
+                            .pre_repairing_firewall_for_normal_projection(
+                                callee_target_meta,
+                                caller,
+                            )
+                            .await
+                        {
+                            PreRepairingDecision::TryAgain => {
+                                FastPathResult::TryAgain
+                            }
+                            PreRepairingDecision::ToSlowPath => {
+                                FastPathResult::ToSlowPath
+                            }
+                        },
+                    );
+                }
+
+                if let Some(caller) = caller.has_a_caller_requiring_value() {
+                    // register dependency
+                    self.database.observe_callee_fingerprint(
+                        computed.value_fingerprint,
+                        computed.callee_info.tfc_archetype,
+                        &callee_target_meta,
+                        query_id,
+                        caller,
+                        callee_target_meta.query_kind,
+                    );
+                }
+
+                Ok(FastPathResult::Hit(if caller.require_value() {
+                    Some(computed.result.downcast_value::<V>().unwrap().clone())
+                } else {
+                    None
+                }))
+            }
         }
     }
 }

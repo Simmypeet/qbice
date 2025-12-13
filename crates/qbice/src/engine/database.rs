@@ -154,8 +154,7 @@ impl<C: Config> Engine<C> {
 
         // pulling the value
         let value = loop {
-            match self.database.fast_path::<Q::Value>(query.id(), caller).await
-            {
+            match self.fast_path::<Q::Value>(query.id(), caller).await {
                 // try again
                 Ok(meta::FastPathResult::TryAgain) => continue,
 
