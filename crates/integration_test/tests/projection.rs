@@ -1338,3 +1338,345 @@ async fn nested_firewall_with_projection() {
          boundaries, got {dirtied}"
     );
 }
+
+// ============================================================================
+// Test: Projection Depending on Two Firewalls
+// ============================================================================
+//
+// Graph structure:
+//   Variable(0) -> FirewallA (doubles value)
+//                      \
+//                       \
+//   Variable(1) -> FirewallB (triples value)
+//                       /
+//                      /
+//              DualFirewallProjection (sums both firewall outputs)
+//                      |
+//                      v
+//               DualFirewallConsumer
+//
+// This tests that a projection can correctly depend on multiple firewalls
+// and that dirty propagation works correctly when either or both firewalls
+// change.
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+)]
+pub struct FirewallA;
+
+impl Query for FirewallA {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct FirewallAExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<FirewallA, C> for FirewallAExecutor {
+    async fn execute(
+        &self,
+        _query: &FirewallA,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i64, qbice::executor::CyclicError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&Variable(0)).await?;
+        Ok(val * 2) // doubles
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Firewall
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+)]
+pub struct FirewallB;
+
+impl Query for FirewallB {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct FirewallBExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<FirewallB, C> for FirewallBExecutor {
+    async fn execute(
+        &self,
+        _query: &FirewallB,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i64, qbice::executor::CyclicError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&Variable(1)).await?;
+        Ok(val * 3) // triples
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Firewall
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+)]
+pub struct DualFirewallProjection;
+
+impl Query for DualFirewallProjection {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DualFirewallProjectionExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DualFirewallProjection, C>
+    for DualFirewallProjectionExecutor
+{
+    async fn execute(
+        &self,
+        _query: &DualFirewallProjection,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i64, qbice::executor::CyclicError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let a = engine.query(&FirewallA).await?;
+        let b = engine.query(&FirewallB).await?;
+
+        Ok(a + b)
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+)]
+pub struct DualFirewallConsumer;
+
+impl Query for DualFirewallConsumer {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DualFirewallConsumerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DualFirewallConsumer, C>
+    for DualFirewallConsumerExecutor
+{
+    async fn execute(
+        &self,
+        _query: &DualFirewallConsumer,
+        engine: &TrackedEngine<C>,
+    ) -> Result<i64, qbice::executor::CyclicError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let proj = engine.query(&DualFirewallProjection).await?;
+        Ok(proj * 10)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::similar_names)]
+async fn projection_with_two_firewalls() {
+    let mut engine = Engine::<DefaultConfig>::new();
+
+    let firewall_a_ex = Arc::new(FirewallAExecutor::default());
+    let firewall_b_ex = Arc::new(FirewallBExecutor::default());
+    let proj_ex = Arc::new(DualFirewallProjectionExecutor::default());
+    let consumer_ex = Arc::new(DualFirewallConsumerExecutor::default());
+
+    engine.register_executor(firewall_a_ex.clone());
+    engine.register_executor(firewall_b_ex.clone());
+    engine.register_executor(proj_ex.clone());
+    engine.register_executor(consumer_ex.clone());
+
+    // Initialize: Variable(0)=5, Variable(1)=10
+    {
+        let mut input_session = engine.input_session();
+        input_session.set_input(Variable(0), 5_i64);
+        input_session.set_input(Variable(1), 10_i64);
+    }
+
+    let mut engine = Arc::new(engine);
+
+    // Initial query
+    // FirewallA: 5*2=10, FirewallB: 10*3=30, Proj: 10+30=40, Consumer:
+    // 40*10=400
+    {
+        let tracked = engine.clone().tracked();
+        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        assert_eq!(result, 400);
+    }
+
+    assert_eq!(firewall_a_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(proj_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
+
+    // =========================================================================
+    // Test Case 1: Change only Variable(0) - only FirewallA should recompute
+    // =========================================================================
+    {
+        let input_session =
+            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        input_session.set_input(Variable(0), 10_i64);
+    }
+
+    // Only 1 dirtied edge: FirewallA -> Variable(0)
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    drop(tracked);
+
+    // Re-query
+    // FirewallA: 10*2=20, FirewallB: 10*3=30 (unchanged), Proj: 20+30=50,
+    // Consumer: 50*10=500
+    {
+        let tracked = engine.clone().tracked();
+        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        assert_eq!(result, 500);
+    }
+
+    // FirewallA recomputed, FirewallB should NOT recompute (not dirty)
+    assert_eq!(firewall_a_ex.0.load(Ordering::SeqCst), 2); // +1
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 1); // unchanged
+    // Projection invoked via backward prop from FirewallA
+    assert_eq!(proj_ex.0.load(Ordering::SeqCst), 2); // +1
+    // Consumer recomputed since projection changed
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // +1
+
+    // =========================================================================
+    // Test Case 2: Change only Variable(1) - only FirewallB should recompute
+    // =========================================================================
+    {
+        let input_session =
+            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        input_session.set_input(Variable(1), 20_i64);
+    }
+
+    // Only 1 dirtied edge: FirewallB -> Variable(1)
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    drop(tracked);
+
+    // Re-query
+    // FirewallA: 10*2=20 (unchanged), FirewallB: 20*3=60, Proj: 20+60=80,
+    // Consumer: 80*10=800
+    {
+        let tracked = engine.clone().tracked();
+        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        assert_eq!(result, 800);
+    }
+
+    // FirewallA should NOT recompute (not dirty)
+    assert_eq!(firewall_a_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    // FirewallB recomputed
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2); // +1
+    // Projection invoked via backward prop from FirewallB
+    assert_eq!(proj_ex.0.load(Ordering::SeqCst), 3); // +1
+    // Consumer recomputed since projection changed
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // +1
+
+    // =========================================================================
+    // Test Case 3: Change BOTH Variable(0) and Variable(1)
+    // =========================================================================
+    {
+        let input_session =
+            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        input_session.set_input(Variable(0), 15_i64);
+        input_session.set_input(Variable(1), 25_i64);
+    }
+
+    // 2 dirtied edges: FirewallA -> Variable(0), FirewallB -> Variable(1)
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 2);
+    drop(tracked);
+
+    // Re-query
+    // FirewallA: 15*2=30, FirewallB: 25*3=75, Proj: 30+75=105,
+    // Consumer: 105*10=1050
+    {
+        let tracked = engine.clone().tracked();
+        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        assert_eq!(result, 1050);
+    }
+
+    // Both firewalls recomputed
+    assert_eq!(firewall_a_ex.0.load(Ordering::SeqCst), 3); // +1
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 3); // +1
+    // Projection invoked via backward prop (from whichever firewall completes
+    // first, but only once since it's already computing when the second
+    // tries to invoke it)
+    assert_eq!(proj_ex.0.load(Ordering::SeqCst), 4); // +1
+    // Consumer recomputed since projection changed
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 4); // +1
+
+    // =========================================================================
+    // Test Case 4: Change Variable(0) but result in same FirewallA output
+    // FirewallA doubles, so 15*2=30 and 30/2*2=30 would be same
+    // Let's change to value that produces same output: not possible with
+    // doubling Let's instead verify that if we change to same value, no
+    // recomputation
+    // =========================================================================
+    {
+        let input_session =
+            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        // Set to same value - should not trigger any recomputation
+        input_session.set_input(Variable(0), 15_i64);
+    }
+
+    // 0 dirtied edges since value didn't change
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 0);
+    drop(tracked);
+
+    // Re-query - everything should be cached
+    {
+        let tracked = engine.clone().tracked();
+        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        assert_eq!(result, 1050); // Same as before
+    }
+
+    // No executors should have run
+    assert_eq!(firewall_a_ex.0.load(Ordering::SeqCst), 3); // unchanged
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 3); // unchanged
+    assert_eq!(proj_ex.0.load(Ordering::SeqCst), 4); // unchanged
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 4); // unchanged
+}
