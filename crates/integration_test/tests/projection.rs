@@ -422,6 +422,13 @@ async fn multiple_projections_single_firewall() {
     // 1 + 2 = 6
     assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 6); // +3
 
+    // in total there should be 5 dirtied edges now:
+    // - Original 2 from previous assertion
+    // - Each of the 3 DoubleSquare -> CollectDoubledSquareVariables edges
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 5);
+    drop(tracked);
+
     // Query the changed projection
     {
         let tracked = engine.clone().tracked();
@@ -695,6 +702,16 @@ async fn chained_projections() {
     // the Variable(1) path so consumer(1) doesn't recompute
     assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged - proj2(1) unchanged
 
+    // intotal there should be 5 dirtied edges now:
+    // - Original 1 from previous assertion
+    // - ProjectionLevel1(0) -> SimpleFirewall
+    // - ProjectionLevel1(1) -> SimpleFirewall
+    // - ProjectionLevel2(0) -> ProjectionLevel1(0)
+    // - ConsumeProjectionChain(0) -> ProjectionLevel2(0)
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 5);
+    drop(tracked);
+
     // Query the changed path
     {
         let tracked = engine.clone().tracked();
@@ -712,14 +729,13 @@ async fn chained_projections() {
     // - Backward prop from Proj1(0): Proj2(0) -> Proj1(0)
     // - Backward prop from Proj2(0): Consumer(0) -> Proj2(0)
     let tracked = engine.clone().tracked();
-    // The exact count depends on implementation details but should be small
-    // compared to if all paths were dirtied
+
     let dirtied = tracked.get_dirtied_edges_count();
-    assert!(
-        dirtied <= 6,
-        "Dirtied edges should be minimal due to projection filtering, got \
-         {dirtied}"
-    );
+
+    // there should be at 6 dirtied edges
+    // 4 from above +
+    // Consumer(1) -> Proj2(1) which was not dirtied before but is now
+    assert_eq!(dirtied, 5);
 }
 
 // ============================================================================
@@ -838,12 +854,25 @@ async fn diamond_projection_pattern() {
     // Variable(2) changed but proj1(0) and proj1(1) don't depend on it!
     assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 1); // unchanged - filtered!
 
+    // Check dirtied edges - should be 3 now:
+    // - Original 1 from previous assertion
+    // - ProjectionLevel1(0) -> SimpleFirewall
+    // - ProjectionLevel1(1) -> SimpleFirewall
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 3);
+    drop(tracked);
+
     // Now change Variable(0) which DOES affect proj1(0)
     {
         let input_session =
             &mut Arc::get_mut(&mut engine).unwrap().input_session();
         input_session.set_input(Variable(0), 50);
     }
+
+    // Only 1 dirtied edge: Firewall -> Variable(0)
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    drop(tracked);
 
     // Re-query combiner
     {
@@ -856,6 +885,15 @@ async fn diamond_projection_pattern() {
     assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 3); // +1
     assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 6); // +2 (backward prop)
     assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 2); // +1 (value changed)
+
+    // Check dirtied edges - should be 4 now:
+    // - Original 1 from previous assertion
+    // - ProjectionLevel1(0) -> SimpleFirewall
+    // - ProjectionLevel1(1) -> SimpleFirewall
+    // - DiamondCombiner -> ProjectionLevel1(0)
+    let tracked = engine.clone().tracked();
+    assert_eq!(tracked.get_dirtied_edges_count(), 4);
+    drop(tracked);
 }
 
 // ============================================================================
