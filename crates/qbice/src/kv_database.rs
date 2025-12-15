@@ -20,14 +20,23 @@ pub trait Decodable {} // placeholder we'll fill in later
 
 /// Represents a column (or table) in the key-value database.
 ///
-/// Each column defines a mapping from keys of the implementing type to values
-/// of the associated [`Column::Value`] type. Both the key and value must be
-/// encodable and decodable for storage and retrieval.
-pub trait Column:
-    Hash + Eq + Clone + Encodable + Decodable + 'static + Send
-{
+/// Each column has associated key and value types, which must implement the
+/// `Encodable` and `Decodable` traits for serialization and deserialization.
+pub trait Column: 'static + Send + Sync {
+    /// The type of keys used in this column.
+    type Key: Encodable + Decodable + Hash + Eq + Clone + 'static + Send + Sync;
+
     /// The type of values stored in this column.
-    type Value: Encodable + Decodable + 'static + Send;
+    type Value: Encodable + Decodable + 'static + Send + Sync;
+}
+
+impl<
+    K: Encodable + Decodable + Hash + Eq + Clone + 'static + Send + Sync,
+    V: Encodable + Decodable + 'static + Send + Sync,
+> Column for (K, V)
+{
+    type Key = K;
+    type Value = V;
 }
 
 /// A write transaction that allows batching multiple write operations.
@@ -77,7 +86,7 @@ pub trait KvDatabase: 'static + Send + Sync {
     /// Returns `None` if the key does not exist in the database.
     fn get<'s, C: Column>(
         &'s self,
-        key: &'s C,
+        key: &'s C::Key,
     ) -> impl std::future::Future<Output = Option<<C as Column>::Value>>
     + Send
     + use<'s, Self, C>;

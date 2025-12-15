@@ -27,7 +27,7 @@ type Shards<T, S> = Arc<[CachePadded<Mutex<LruShard<T, S>>>]>;
 /// and next nodes in the list. The head of the list represents the most
 /// recently used entry, while the tail represents the least recently used.
 struct Node<T: Column> {
-    key: T,
+    key: T::Key,
     value: T::Value,
     prev: Option<Index>,
     next: Option<Index>,
@@ -56,7 +56,7 @@ type Index = usize;
 /// ordering. By distributing entries across multiple shards, concurrent
 /// access to different keys can proceed in parallel without contention.
 struct LruShard<T: Column, S: BuildHasher> {
-    map: HashMap<T, Entry, S>,
+    map: HashMap<T::Key, Entry, S>,
 
     nodes: Vec<Option<Node<T>>>,
     free_list: Vec<Index>,
@@ -147,7 +147,7 @@ impl<T: Column, S: BuildHasher> LruShard<T, S> {
         self.length -= 1;
     }
 
-    pub fn allocate_node(&mut self, key: T, value: T::Value) -> Index {
+    pub fn allocate_node(&mut self, key: T::Key, value: T::Value) -> Index {
         let index = if let Some(free_index) = self.free_list.pop() {
             self.nodes[free_index] =
                 Some(Node { key, value, prev: None, next: None });
@@ -265,7 +265,7 @@ fn default_shard_amount() -> usize {
 /// This pattern ensures the cache never gets stuck with a `Working` entry
 /// that will never complete.
 struct FetchDbGuard<'k, 's, T: Column, S: BuildHasher + Send + 'static> {
-    key: &'k T,
+    key: &'k T::Key,
     shard_index: usize,
     shards: &'s Shards<T, S>,
     defused: bool,
@@ -386,14 +386,11 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
     /// Uses the hash of the key and a bitmask (since shard count is a power
     /// of two) for efficient shard selection.
     #[allow(clippy::cast_possible_truncation)]
-    fn determine_shard_index(&self, key: &T) -> usize
-    where
-        T: Hash,
-    {
+    fn determine_shard_index(&self, key: &T::Key) -> usize {
         (self.hasher_builder.hash_one(key) as usize) & self.shard_mask
     }
 
-    async fn lock_shard(&self, key: &T) -> MutexGuard<'_, LruShard<T, S>> {
+    async fn lock_shard(&self, key: &T::Key) -> MutexGuard<'_, LruShard<T, S>> {
         let shard_index = self.determine_shard_index(key);
         self.shards[shard_index].lock().await
     }
@@ -406,7 +403,7 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
     /// to retry.
     ///
     /// Returns a [`FastPathDecision`] indicating the result.
-    async fn fast_path(&self, key: &T) -> FastPathDecision<'_, T, S> {
+    async fn fast_path(&self, key: &T::Key) -> FastPathDecision<'_, T, S> {
         let shard = self.lock_shard(key).await;
 
         match shard.map.get(key) {
@@ -455,10 +452,10 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
     /// # Deadlocks
     ///
     /// This method might **deadlock** if an existing shard lock is held.
-    pub async fn get(&self, key: &T) -> Option<MappedMutexGuard<'_, T::Value>>
-    where
-        T: Hash + Eq,
-    {
+    pub async fn get(
+        &self,
+        key: &T::Key,
+    ) -> Option<MappedMutexGuard<'_, T::Value>> {
         loop {
             match self.fast_path(key).await {
                 FastPathDecision::Hit(opt_index, mut shard) => {
@@ -540,7 +537,7 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
     ///   should retry
     async fn acquire_fetch_db_guard<'s>(
         &self,
-        key: &'s T,
+        key: &'s T::Key,
     ) -> Option<FetchDbGuard<'s, '_, T, S>> {
         let shard_index = self.determine_shard_index(key);
         let mut shard_lock = self.shards[shard_index].lock().await;
@@ -562,3 +559,6 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
         }
     }
 }
+
+#[cfg(test)]
+mod test;
