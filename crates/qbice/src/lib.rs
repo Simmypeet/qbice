@@ -259,6 +259,7 @@
 pub mod config;
 pub mod engine;
 pub mod executor;
+pub mod kv_database;
 pub mod query;
 
 pub use engine::{Engine, TrackedEngine};
