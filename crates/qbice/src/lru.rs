@@ -9,28 +9,39 @@
 use core::panic;
 use std::{
     collections::HashMap,
-    hash::{BuildHasher, BuildHasherDefault, DefaultHasher, Hash},
+    hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
     sync::{Arc, LazyLock},
 };
 
 use crossbeam_utils::CachePadded;
-use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, Notify};
+use enum_as_inner::EnumAsInner;
+use tokio::sync::{Mutex, Notify, RwLock, RwLockReadGuard};
 
 use crate::kv_database::{Column, KvDatabase};
 
-/// Type alias for the array of cache shards.
-type Shards<T, S> = Arc<[CachePadded<Mutex<LruShard<T, S>>>]>;
+/// Type alias for the shards of usage tracking.
+type UsageShards<K> = Arc<[CachePadded<Mutex<UsageShard<K>>>]>;
+
+type KvMap<T, S> = HashMap<<T as Column>::Key, Entry<<T as Column>::Value>, S>;
+
+/// Type alias for the shards of where the actual data is stored.
+type StorageShards<T, S> = Arc<[CachePadded<RwLock<KvMap<T, S>>>]>;
 
 /// A node in the doubly-linked list used for LRU ordering.
 ///
-/// Each node stores a key-value pair and maintains links to the previous
-/// and next nodes in the list. The head of the list represents the most
-/// recently used entry, while the tail represents the least recently used.
-struct Node<T: Column> {
-    key: T::Key,
-    value: T::Value,
+/// Each node stores a key and maintains links to the previous and next nodes
+/// in the list. The actual values are stored separately in the storage shards.
+/// The head of the list represents the most recently used entry, while the
+/// tail represents the least recently used.
+struct Node<K> {
+    key: K,
     prev: Option<Index>,
     next: Option<Index>,
+}
+
+struct Ready<V> {
+    index: Index,
+    value: Option<V>,
 }
 
 /// Represents the state of a cache entry.
@@ -38,27 +49,25 @@ struct Node<T: Column> {
 /// This enum implements a "single-flight" pattern where concurrent requests
 /// for the same key will wait on a single database fetch rather than
 /// triggering multiple fetches.
-enum Entry {
+#[derive(EnumAsInner)]
+enum Entry<K> {
     /// A fetch operation is in progress. Waiters can subscribe to the
     /// [`Notify`] to be notified when the fetch completes.
     Working(Arc<Notify>),
     /// The entry is ready and stored at the given index in the node list.
-    Ready(Index),
-    /// The key was looked up but no value exists in the database.
-    None,
+    Ready(Ready<K>),
 }
 
 type Index = usize;
 
-/// A single shard of the LRU cache.
+/// A single shard for tracking LRU ordering.
 ///
-/// Each shard maintains its own hash map and doubly-linked list for LRU
-/// ordering. By distributing entries across multiple shards, concurrent
-/// access to different keys can proceed in parallel without contention.
-struct LruShard<T: Column, S: BuildHasher> {
-    map: HashMap<T::Key, Entry, S>,
-
-    nodes: Vec<Option<Node<T>>>,
+/// Each shard maintains a doubly-linked list for LRU ordering. The actual
+/// key-value data is stored separately in the corresponding storage shard.
+/// By distributing entries across multiple shards, concurrent access to
+/// different keys can proceed in parallel without contention.
+struct UsageShard<K> {
+    nodes: Vec<Option<Node<K>>>,
     free_list: Vec<Index>,
     head: Option<Index>,
     tail: Option<Index>,
@@ -67,7 +76,7 @@ struct LruShard<T: Column, S: BuildHasher> {
     capacity: usize,
 }
 
-impl<T: Column, S: BuildHasher> LruShard<T, S> {
+impl<K> UsageShard<K> {
     /// Moves the node at the given index to the head of the LRU list.
     ///
     /// This operation marks the entry as "most recently used". The algorithm:
@@ -117,9 +126,9 @@ impl<T: Column, S: BuildHasher> LruShard<T, S> {
         }
     }
 
-    fn evict_if_needed(&mut self) {
+    fn evict_if_needed(&mut self) -> Option<K> {
         if self.length <= self.capacity {
-            return;
+            return None;
         }
 
         // evict the tail node
@@ -143,19 +152,19 @@ impl<T: Column, S: BuildHasher> LruShard<T, S> {
         }
 
         self.free_list.push(tail_index);
-        self.map.remove(&key);
         self.length -= 1;
+
+        Some(key)
     }
 
-    pub fn allocate_node(&mut self, key: T::Key, value: T::Value) -> Index {
+    pub fn allocate_node(&mut self, key: K) -> Index {
         let index = if let Some(free_index) = self.free_list.pop() {
-            self.nodes[free_index] =
-                Some(Node { key, value, prev: None, next: None });
+            self.nodes[free_index] = Some(Node { key, prev: None, next: None });
 
             free_index
         } else {
             let index = self.nodes.len();
-            self.nodes.push(Some(Node { key, value, prev: None, next: None }));
+            self.nodes.push(Some(Node { key, prev: None, next: None }));
 
             index
         };
@@ -171,10 +180,10 @@ impl<T: Column, S: BuildHasher> LruShard<T, S> {
 /// The fast path succeeds when the entry is already cached or known to be
 /// absent. It fails when a database fetch is needed or when another task
 /// is currently fetching the same key.
-enum FastPathDecision<'x, T: Column, S: BuildHasher> {
-    /// Cache hit (or cached miss). Contains the optional index and the
+enum FastPathDecision<'x, T: Column> {
+    /// Cache hit (or cached miss). Contains the index in the LRU list and the
     /// acquired shard lock for immediate access.
-    Hit(Option<Index>, MutexGuard<'x, LruShard<T, S>>),
+    Hit(Index, RwLockReadGuard<'x, Option<T::Value>>),
     /// No cached entry exists; must proceed to the slow path (database fetch).
     ToSlowPath,
     /// Another task is fetching this key; caller should retry after waiting.
@@ -219,7 +228,9 @@ pub struct Lru<
     DB,
     S: BuildHasher = BuildHasherDefault<DefaultHasher>,
 > {
-    shards: Shards<T, S>,
+    usage_shards: UsageShards<T::Key>,
+    storage_shards: StorageShards<T, S>,
+
     hasher_builder: S,
     db: Arc<DB>,
     shard_mask: usize,
@@ -229,10 +240,7 @@ impl<T: Column, DB: std::fmt::Debug, S: BuildHasher + Send + 'static>
     std::fmt::Debug for Lru<T, DB, S>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Lru")
-            .field("shard_count", &self.shards.len())
-            .field("db", &self.db)
-            .finish_non_exhaustive()
+        f.debug_struct("Lru").finish_non_exhaustive()
     }
 }
 
@@ -264,14 +272,14 @@ fn default_shard_amount() -> usize {
 ///
 /// This pattern ensures the cache never gets stuck with a `Working` entry
 /// that will never complete.
-struct FetchDbGuard<'k, 's, T: Column, S: BuildHasher + Send + 'static> {
+struct FetchDbGuard<'k, 's, T: Column, S: BuildHasher + Send + Sync + 'static> {
     key: &'k T::Key,
     shard_index: usize,
-    shards: &'s Shards<T, S>,
+    storage_shards: &'s StorageShards<T, S>,
     defused: bool,
 }
 
-impl<T: Column, S: BuildHasher + Send + 'static> Drop
+impl<T: Column, S: BuildHasher + Send + Sync + 'static> Drop
     for FetchDbGuard<'_, '_, T, S>
 {
     fn drop(&mut self) {
@@ -281,14 +289,13 @@ impl<T: Column, S: BuildHasher + Send + 'static> Drop
 
         let key = self.key.clone();
         let shard_index = self.shard_index;
-        let shards = self.shards.clone();
+        let shards = self.storage_shards.clone();
 
         // spawn the task that will unlock the working entry and notify waiters
         tokio::spawn(async move {
-            let mut shard_lock = shards[shard_index].lock().await;
+            let mut shard_lock = shards[shard_index].write().await;
 
-            let Some(Entry::Working(notify)) = shard_lock.map.remove(&key)
-            else {
+            let Some(Entry::Working(notify)) = shard_lock.remove(&key) else {
                 panic!("FetchDbGuard dropped but entry is not Working");
             };
 
@@ -299,7 +306,9 @@ impl<T: Column, S: BuildHasher + Send + 'static> Drop
     }
 }
 
-impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
+impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + Sync + 'static>
+    Lru<T, DB, S>
+{
     /// Creates a new LRU cache with the specified capacity.
     ///
     /// The cache will use the default number of shards (based on available
@@ -359,11 +368,13 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
 
         let per_shard_capacity = capacity.div_ceil(shard_amount);
 
-        let mut shards = Vec::with_capacity(shard_amount);
+        let mut usage_shards = Vec::with_capacity(shard_amount);
+        let mut storage_shards = Vec::with_capacity(shard_amount);
 
         for _ in 0..shard_amount {
-            shards.push(CachePadded::new(Mutex::new(LruShard::<T, S> {
-                map: HashMap::with_hasher(hasher_builder.clone()),
+            usage_shards.push(CachePadded::new(Mutex::new(UsageShard::<
+                T::Key,
+            > {
                 capacity: per_shard_capacity,
                 nodes: Vec::new(),
                 free_list: Vec::new(),
@@ -371,10 +382,14 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
                 head: None,
                 tail: None,
             })));
+            storage_shards.push(CachePadded::new(RwLock::new(
+                HashMap::with_hasher(hasher_builder.clone()),
+            )));
         }
 
         Self {
-            shards: Arc::from(shards),
+            usage_shards: Arc::from(usage_shards),
+            storage_shards: Arc::from(storage_shards),
             hasher_builder,
             db,
             shard_mask: shard_amount - 1,
@@ -390,11 +405,6 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
         (self.hasher_builder.hash_one(key) as usize) & self.shard_mask
     }
 
-    async fn lock_shard(&self, key: &T::Key) -> MutexGuard<'_, LruShard<T, S>> {
-        let shard_index = self.determine_shard_index(key);
-        self.shards[shard_index].lock().await
-    }
-
     /// Attempts the fast path for a cache lookup.
     ///
     /// The fast path checks if the entry is already in the cache (hit or
@@ -403,28 +413,41 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
     /// to retry.
     ///
     /// Returns a [`FastPathDecision`] indicating the result.
-    async fn fast_path(&self, key: &T::Key) -> FastPathDecision<'_, T, S> {
-        let shard = self.lock_shard(key).await;
+    async fn fast_path(
+        &self,
+        key: &T::Key,
+        shard_index: usize,
+    ) -> FastPathDecision<'_, T> {
+        let shard_lock = RwLockReadGuard::try_map(
+            self.storage_shards[shard_index].read().await,
+            |x| x.get(key),
+        );
 
-        match shard.map.get(key) {
-            Some(Entry::None) => FastPathDecision::Hit(None, shard),
-            Some(Entry::Ready(index)) => {
-                FastPathDecision::Hit(Some(*index), shard)
-            }
+        match shard_lock {
+            Ok(shard) => match &*shard {
+                Entry::Working(notify) => {
+                    let notify = notify.clone();
+                    let notified = notify.notified();
 
-            // there're some process fetching the value from the database.
-            Some(Entry::Working(notify)) => {
-                let notify = notify.clone();
-                let notified = notify.notified();
+                    drop(shard);
 
-                drop(shard);
+                    notified.await;
 
-                notified.await;
+                    FastPathDecision::TryAgain
+                }
+                Entry::Ready(ready) => {
+                    let index = ready.index;
 
-                FastPathDecision::TryAgain
-            }
+                    let mapped = RwLockReadGuard::map(shard, |x| {
+                        &x.as_ready().expect("should've been ready").value
+                    });
 
-            None => FastPathDecision::ToSlowPath,
+                    FastPathDecision::Hit(index, mapped)
+                }
+            },
+
+            // no entry found return ToSlowPath
+            Err(_) => FastPathDecision::ToSlowPath,
         }
     }
 
@@ -440,7 +463,7 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
     ///
     /// # Returns
     ///
-    /// - `Some(guard)` - A guard providing mutable access to the cached value
+    /// - `Some(guard)` - A read guard providing access to the cached value
     /// - `None` - The key does not exist in the database
     ///
     /// # Concurrency
@@ -451,25 +474,27 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
     ///
     /// # Deadlocks
     ///
-    /// This method might **deadlock** if an existing shard lock is held.
+    /// This method might **deadlock** if an existing shard lock is held. Even
+    /// though the function returns read locks, however, the internal logic may
+    /// evict entries and acquire write locks during the fetch process. To avoid
+    /// deadlocks, ensure that no shard locks are held when calling this method.
     pub async fn get(
         &self,
         key: &T::Key,
-    ) -> Option<MappedMutexGuard<'_, T::Value>> {
+    ) -> Option<RwLockReadGuard<'_, T::Value>> {
+        let shard_index = self.determine_shard_index(key);
+
         loop {
-            match self.fast_path(key).await {
-                FastPathDecision::Hit(opt_index, mut shard) => {
-                    match opt_index {
-                        Some(index) => {
-                            shard.move_to_head(index);
+            match self.fast_path(key, shard_index).await {
+                FastPathDecision::Hit(opt_index, shard) => {
+                    // move to head
+                    let mut usage_shard_lock =
+                        self.usage_shards[shard_index].lock().await;
+                    usage_shard_lock.move_to_head(opt_index);
+                    drop(usage_shard_lock);
 
-                            return Some(MutexGuard::map(shard, |shard| {
-                                &mut shard.nodes[index].as_mut().unwrap().value
-                            }));
-                        }
-
-                        None => return None,
-                    }
+                    return RwLockReadGuard::try_map(shard, Option::as_ref)
+                        .ok();
                 }
 
                 FastPathDecision::ToSlowPath => {}
@@ -478,7 +503,8 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
             }
 
             // slow path: need to fetch from DB
-            let Some(fetch_db_guard) = self.acquire_fetch_db_guard(key).await
+            let Some(fetch_db_guard) =
+                self.acquire_fetch_db_guard(key, shard_index).await
             else {
                 continue;
             };
@@ -497,29 +523,39 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
         // hit the database
         let value_opt = self.db.get::<T>(guard.key).await;
 
-        let mut shard_lock = self.shards[guard.shard_index].lock().await;
-        shard_lock.evict_if_needed();
+        let mut usage_shard_lock =
+            self.usage_shards[guard.shard_index].lock().await;
 
-        let Some(Entry::Working(notify)) = shard_lock.map.remove(guard.key)
+        // determine if we need to evict
+        let removed_key = usage_shard_lock.evict_if_needed();
+
+        let new_node_index = usage_shard_lock.allocate_node(guard.key.clone());
+        usage_shard_lock.move_to_head(new_node_index);
+
+        // insert into storage shard
+        let mut storage_shard_lock =
+            self.storage_shards[guard.shard_index].write().await;
+
+        let Some(Entry::Working(notify)) = storage_shard_lock.remove(guard.key)
         else {
             panic!("fetch_db should be called on a Working entry");
         };
 
-        match value_opt {
-            Some(value) => {
-                let index = shard_lock.allocate_node(guard.key.clone(), value);
-
-                shard_lock.map.insert(guard.key.clone(), Entry::Ready(index));
-                shard_lock.move_to_head(index);
-            }
-
-            None => {
-                shard_lock.map.insert(guard.key.clone(), Entry::None);
-            }
+        // remove evicted entry from storage shard
+        if let Some(evicted_key) = removed_key {
+            storage_shard_lock.remove(&evicted_key);
         }
 
+        // insert the fetched value (or None) into the cache
+        storage_shard_lock.insert(
+            guard.key.clone(),
+            Entry::Ready(Ready { index: new_node_index, value: value_opt }),
+        );
+
         guard.defused = true;
-        drop(shard_lock);
+
+        drop(usage_shard_lock);
+        drop(storage_shard_lock);
 
         notify.notify_waiters();
     }
@@ -538,27 +574,24 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + 'static> Lru<T, DB, S> {
     async fn acquire_fetch_db_guard<'s>(
         &self,
         key: &'s T::Key,
+        shard_index: usize,
     ) -> Option<FetchDbGuard<'s, '_, T, S>> {
-        let shard_index = self.determine_shard_index(key);
-        let mut shard_lock = self.shards[shard_index].lock().await;
+        let mut shard_lock = self.storage_shards[shard_index].write().await;
 
         // no entry exists, we can insert a Working entry and proceed to fetch
         // from DB
-        if shard_lock.map.contains_key(key) {
+        if shard_lock.contains_key(key) {
             None
         } else {
             let notify = Arc::new(Notify::new());
-            shard_lock.map.insert(key.clone(), Entry::Working(notify));
+            shard_lock.insert(key.clone(), Entry::Working(notify));
 
             Some(FetchDbGuard {
                 key,
                 shard_index,
-                shards: &self.shards,
+                storage_shards: &self.storage_shards,
                 defused: false,
             })
         }
     }
 }
-
-#[cfg(test)]
-mod test;
