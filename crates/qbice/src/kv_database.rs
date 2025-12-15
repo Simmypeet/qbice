@@ -2,6 +2,8 @@
 //!
 //! This module provides traits for interacting with key-value databases.
 
+use std::hash::Hash;
+
 /// A trait for types that can be encoded into a binary format for storage in
 /// the key-value database.
 ///
@@ -21,9 +23,11 @@ pub trait Decodable {} // placeholder we'll fill in later
 /// Each column defines a mapping from keys of the implementing type to values
 /// of the associated [`Column::Value`] type. Both the key and value must be
 /// encodable and decodable for storage and retrieval.
-pub trait Column: Encodable + Decodable {
+pub trait Column:
+    Hash + Eq + Clone + Encodable + Decodable + 'static + Send
+{
     /// The type of values stored in this column.
-    type Value: Encodable + Decodable;
+    type Value: Encodable + Decodable + 'static + Send;
 }
 
 /// A write transaction that allows batching multiple write operations.
@@ -34,7 +38,11 @@ pub trait WriteTransaction {
     /// Inserts or updates a key-value pair in the specified column.
     ///
     /// If the key already exists, its value will be overwritten.
-    fn put<C: Column>(&self, key: &C, value: &<C as Column>::Value);
+    fn put<'s, C: Column>(
+        &'s self,
+        key: &'s C,
+        value: &'s <C as Column>::Value,
+    ) -> impl std::future::Future<Output = ()> + Send + use<'s, Self, C>;
 
     /// Commits all pending write operations to the database.
     ///
@@ -42,7 +50,11 @@ pub trait WriteTransaction {
     ///
     /// Returns an error if the transaction could not be committed (e.g., due to
     /// I/O failures or database corruption).
-    fn commit(self) -> Result<(), std::io::Error>;
+    fn commit(
+        self,
+    ) -> impl std::future::Future<Output = Result<(), std::io::Error>>
+    + Send
+    + use<Self>;
 }
 
 /// The main interface for a key-value database backend.
@@ -53,7 +65,7 @@ pub trait WriteTransaction {
 ///
 /// All operations are async to allow for non-blocking I/O with the underlying
 /// storage.
-pub trait KvDatabase: Send + Sync {
+pub trait KvDatabase: 'static + Send + Sync {
     /// The type of write transaction provided by this database implementation.
     type WriteTransaction<'a>: WriteTransaction + Send
     where
@@ -63,10 +75,12 @@ pub trait KvDatabase: Send + Sync {
     /// column.
     ///
     /// Returns `None` if the key does not exist in the database.
-    fn get<C: Column>(
-        &self,
-        key: &C,
-    ) -> impl std::future::Future<Output = Option<<C as Column>::Value>> + Send;
+    fn get<'s, C: Column>(
+        &'s self,
+        key: &'s C,
+    ) -> impl std::future::Future<Output = Option<<C as Column>::Value>>
+    + Send
+    + use<'s, Self, C>;
 
     /// Creates a new write transaction for batching multiple write operations.
     ///
@@ -74,5 +88,7 @@ pub trait KvDatabase: Send + Sync {
     /// [`WriteTransaction::commit`] for changes to be persisted.
     fn write_transaction(
         &self,
-    ) -> impl std::future::Future<Output = Self::WriteTransaction<'_>> + Send;
+    ) -> impl std::future::Future<Output = Self::WriteTransaction<'_>>
+    + Send
+    + use<'_, Self>;
 }
