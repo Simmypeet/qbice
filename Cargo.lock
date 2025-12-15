@@ -199,6 +199,7 @@ name = "qbice"
 version = "0.1.2"
 dependencies = [
  "bimap",
+ "crossbeam-utils",
  "dashmap",
  "enum-as-inner",
  "parking_lot",
