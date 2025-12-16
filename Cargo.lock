@@ -247,6 +247,18 @@ dependencies = [
 [[package]]
 name = "qbice_serialize"
 version = "0.1.0"
+dependencies = [
+ "qbice_serialize_derive",
+]
+
+[[package]]
+name = "qbice_serialize_derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "qbice_stable_hash"

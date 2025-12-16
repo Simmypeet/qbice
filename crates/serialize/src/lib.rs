@@ -17,6 +17,47 @@
 //! operations, enabling custom serialization strategies without modifying the
 //! core traits.
 //!
+//! # Derive Macros
+//!
+//! This crate re-exports derive macros for automatically implementing
+//! `Encode` and `Decode`:
+//!
+//! ```ignore
+//! use qbice_serialize::{Encode, Decode};
+//!
+//! #[derive(Encode, Decode)]
+//! struct Point { x: i32, y: i32 }
+//!
+//! #[derive(Encode, Decode)]
+//! struct Id(u64);
+//!
+//! #[derive(Encode, Decode)]
+//! struct Marker;
+//!
+//! #[derive(Encode, Decode)]
+//! enum Message {
+//!     Quit,
+//!     Move { x: i32, y: i32 },
+//!     Write(String),
+//! }
+//! ```
+//!
+//! ## Field Attributes
+//!
+//! Use `#[serialize(skip)]` to skip a field during serialization. The field
+//! must implement `Default` for deserialization:
+//!
+//! ```ignore
+//! use qbice_serialize::{Encode, Decode};
+//!
+//! #[derive(Encode, Decode)]
+//! struct Config {
+//!     name: String,
+//!     #[serialize(skip)]
+//!     cache: Vec<u8>, // Uses Default::default() when decoding
+//! }
+//! ```
+//!
 //! # Example
 //!
 //! ```ignore
@@ -50,6 +91,9 @@
 //! }
 //! ```
 
+// Allow derive macros to reference this crate as `qbice_serialize` internally
+extern crate self as qbice_serialize;
+
 pub mod decode;
 pub mod encode;
 pub mod plugin;
@@ -60,3 +104,5 @@ pub use decode::{Decode, Decoder};
 pub use encode::{Encode, Encoder};
 pub use plugin::Plugin;
 pub use postcard::{PostcardDecoder, PostcardEncoder};
+// Re-export derive macros
+pub use qbice_serialize_derive::{Decode, Encode};

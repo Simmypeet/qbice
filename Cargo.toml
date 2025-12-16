@@ -8,6 +8,7 @@ members = [
     "crates/identifiable_derive_lib",
     "crates/identifiable_derive",
     "crates/serialize",
+    "crates/serialize_derive",
 ]
 resolver = "2"
 

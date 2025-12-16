@@ -1,0 +1,19 @@
+[lib]
+proc-macro = true
+
+[package]
+name = "qbice_serialize_derive"
+version = "0.1.0"
+authors.workspace = true
+description = "Derive macros for qbice_serialize Encode and Decode traits"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+syn = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

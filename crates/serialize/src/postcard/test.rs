@@ -69,3 +69,196 @@ fn float_roundtrip() {
     let decoded: f64 = decode(&bytes, &plugin).unwrap();
     assert_eq!(f64_value, decoded);
 }
+
+// =============================================================================
+// Derive macro tests
+// =============================================================================
+
+use crate::{Decode, Encode};
+
+// Unit struct
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+struct UnitStruct;
+
+// Tuple struct
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+struct TupleStruct(u64, String);
+
+// Named fields struct
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+struct NamedStruct {
+    x: i32,
+    y: i32,
+    name: String,
+}
+
+// Struct with skip
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+struct StructWithSkip {
+    value: u32,
+    #[serialize(skip)]
+    skipped: Vec<u8>,
+}
+
+// Generic struct
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+struct GenericStruct<T> {
+    inner: T,
+}
+
+// Enum with all variant types
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+enum TestEnum {
+    Unit,
+    Tuple(u32, String),
+    Named { a: i32, b: bool },
+}
+
+// Enum with skip on field
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+enum EnumWithSkip {
+    Variant {
+        value: u32,
+        #[serialize(skip)]
+        skipped: String,
+    },
+}
+
+// Generic enum
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+enum GenericEnum<T> {
+    None,
+    Some(T),
+}
+
+#[test]
+fn derive_unit_struct_roundtrip() {
+    let plugin = Plugin::new();
+    let value = UnitStruct;
+
+    let bytes = encode(&value, &plugin).unwrap();
+    assert!(bytes.is_empty()); // Unit struct should produce no bytes
+    let decoded: UnitStruct = decode(&bytes, &plugin).unwrap();
+    assert_eq!(value, decoded);
+}
+
+#[test]
+fn derive_tuple_struct_roundtrip() {
+    let plugin = Plugin::new();
+    let value = TupleStruct(42, "hello".to_string());
+
+    let bytes = encode(&value, &plugin).unwrap();
+    let decoded: TupleStruct = decode(&bytes, &plugin).unwrap();
+    assert_eq!(value, decoded);
+}
+
+#[test]
+fn derive_named_struct_roundtrip() {
+    let plugin = Plugin::new();
+    let value = NamedStruct { x: -10, y: 20, name: "test".to_string() };
+
+    let bytes = encode(&value, &plugin).unwrap();
+    let decoded: NamedStruct = decode(&bytes, &plugin).unwrap();
+    assert_eq!(value, decoded);
+}
+
+#[test]
+fn derive_struct_with_skip() {
+    let plugin = Plugin::new();
+    let value = StructWithSkip { value: 123, skipped: vec![1, 2, 3] };
+
+    let bytes = encode(&value, &plugin).unwrap();
+    let decoded: StructWithSkip = decode(&bytes, &plugin).unwrap();
+
+    assert_eq!(decoded.value, 123);
+    assert!(decoded.skipped.is_empty()); // Should be Default::default()
+}
+
+#[test]
+fn derive_generic_struct_roundtrip() {
+    let plugin = Plugin::new();
+    let value = GenericStruct { inner: "generic".to_string() };
+
+    let bytes = encode(&value, &plugin).unwrap();
+    let decoded: GenericStruct<String> = decode(&bytes, &plugin).unwrap();
+    assert_eq!(value, decoded);
+}
+
+#[test]
+fn derive_enum_unit_variant() {
+    let plugin = Plugin::new();
+    let value = TestEnum::Unit;
+
+    let bytes = encode(&value, &plugin).unwrap();
+    let decoded: TestEnum = decode(&bytes, &plugin).unwrap();
+    assert_eq!(value, decoded);
+}
+
+#[test]
+fn derive_enum_tuple_variant() {
+    let plugin = Plugin::new();
+    let value = TestEnum::Tuple(42, "world".to_string());
+
+    let bytes = encode(&value, &plugin).unwrap();
+    let decoded: TestEnum = decode(&bytes, &plugin).unwrap();
+    assert_eq!(value, decoded);
+}
+
+#[test]
+fn derive_enum_named_variant() {
+    let plugin = Plugin::new();
+    let value = TestEnum::Named { a: -5, b: true };
+
+    let bytes = encode(&value, &plugin).unwrap();
+    let decoded: TestEnum = decode(&bytes, &plugin).unwrap();
+    assert_eq!(value, decoded);
+}
+
+#[test]
+fn derive_enum_with_skip() {
+    let plugin = Plugin::new();
+    let value = EnumWithSkip::Variant {
+        value: 999,
+        skipped: "should be skipped".to_string(),
+    };
+
+    let bytes = encode(&value, &plugin).unwrap();
+    let decoded: EnumWithSkip = decode(&bytes, &plugin).unwrap();
+
+    match decoded {
+        EnumWithSkip::Variant { value, skipped } => {
+            assert_eq!(value, 999);
+            assert!(skipped.is_empty()); // Should be Default::default()
+        }
+    }
+}
+
+#[test]
+fn derive_generic_enum_roundtrip() {
+    let plugin = Plugin::new();
+
+    let none_value: GenericEnum<i32> = GenericEnum::None;
+    let bytes = encode(&none_value, &plugin).unwrap();
+    let decoded: GenericEnum<i32> = decode(&bytes, &plugin).unwrap();
+    assert_eq!(none_value, decoded);
+
+    let some_value = GenericEnum::Some(42);
+    let bytes = encode(&some_value, &plugin).unwrap();
+    let decoded: GenericEnum<i32> = decode(&bytes, &plugin).unwrap();
+    assert_eq!(some_value, decoded);
+}
+
+#[test]
+fn derive_invalid_variant_index() {
+    let plugin = Plugin::new();
+
+    // Manually create invalid data (variant index 99 doesn't exist)
+    let invalid_bytes = encode(&99usize, &plugin).unwrap();
+
+    let result: std::io::Result<TestEnum> = decode(&invalid_bytes, &plugin);
+    assert!(result.is_err());
+
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("invalid variant index"));
+}
