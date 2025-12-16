@@ -48,14 +48,14 @@ use crate::plugin::Plugin;
 ///         Ok(byte)
 ///     }
 ///
-///     fn read_raw_bytes(&mut self, len: usize) -> io::Result<&[u8]> {
+///     fn read_raw_bytes(&mut self, len: usize) -> io::Result<Vec<u8>> {
 ///         if self.position + len > self.data.len() {
 ///             return Err(io::Error::new(
 ///                 io::ErrorKind::UnexpectedEof,
 ///                 "unexpected end of data",
 ///             ));
 ///         }
-///         let bytes = &self.data[self.position..self.position + len];
+///         let bytes = self.data[self.position..self.position + len].to_vec();
 ///         self.position += len;
 ///         Ok(bytes)
 ///     }
@@ -110,10 +110,8 @@ pub trait Decoder {
 
     /// Reads raw bytes directly from the input.
     ///
-    /// The returned slice is valid for the lifetime of this decoder call.
-    /// Implementations may return a slice into the underlying buffer, or
-    /// allocate and return an owned buffer cast as a slice.
-    fn read_raw_bytes(&mut self, len: usize) -> io::Result<&[u8]>;
+    /// Returns an owned vector containing the read bytes.
+    fn read_raw_bytes(&mut self, len: usize) -> io::Result<Vec<u8>>;
 
     // =========================================================================
     // Default implementations - can be overridden for optimization
@@ -164,10 +162,10 @@ pub trait Decoder {
     /// # Errors
     ///
     /// Returns an error if the bytes are not valid UTF-8.
-    fn read_str(&mut self) -> io::Result<&str> {
+    fn read_str(&mut self) -> io::Result<String> {
         let len = self.read_usize()?;
         let bytes = self.read_raw_bytes(len)?;
-        std::str::from_utf8(bytes).map_err(|e| {
+        String::from_utf8(bytes).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("invalid UTF-8: {e}"),
@@ -175,11 +173,11 @@ pub trait Decoder {
         })
     }
 
-    /// Reads a byte slice.
+    /// Reads a byte vector.
     ///
     /// Default implementation reads the length as `usize` followed by raw
     /// bytes.
-    fn read_bytes(&mut self) -> io::Result<&[u8]> {
+    fn read_bytes(&mut self) -> io::Result<Vec<u8>> {
         let len = self.read_usize()?;
         self.read_raw_bytes(len)
     }
@@ -384,7 +382,7 @@ impl Decode for String {
         decoder: &mut D,
         _plugin: &Plugin,
     ) -> io::Result<Self> {
-        decoder.read_str().map(Self::from)
+        decoder.read_str()
     }
 }
 

@@ -26,18 +26,18 @@
 //!
 //! let plugin = Plugin::new();
 //!
-//! // Encoding
-//! let mut encoder = PostcardEncoder::new();
+//! // Encoding to a Vec<u8>
+//! let mut encoder = PostcardEncoder::new(Vec::new());
 //! 42u32.encode(&mut encoder, &plugin).unwrap();
-//! let bytes = encoder.into_bytes();
+//! let bytes = encoder.into_inner();
 //!
-//! // Decoding
-//! let mut decoder = PostcardDecoder::new(&bytes);
+//! // Decoding from a slice
+//! let mut decoder = PostcardDecoder::new(&bytes[..]);
 //! let value = u32::decode(&mut decoder, &plugin).unwrap();
 //! assert_eq!(value, 42);
 //! ```
 
-use std::io;
+use std::io::{self, Read, Write};
 
 use crate::{Decoder, Encoder};
 
@@ -183,81 +183,84 @@ const fn zigzag_decode_i128(value: u128) -> i128 {
 // PostcardEncoder
 // =============================================================================
 
-/// A postcard-style encoder that writes to an internal buffer.
+/// A postcard-style encoder that writes to any [`Write`] implementation.
 ///
 /// Uses varint encoding for integers to achieve compact output.
-/// The encoded data can be retrieved via [`into_bytes`](Self::into_bytes) or
-/// [`as_bytes`](Self::as_bytes).
-#[derive(Debug, Clone, Default)]
-pub struct PostcardEncoder {
-    buffer: Vec<u8>,
+/// The encoder is generic over the writer type, allowing it to write to
+/// files, network streams, or in-memory buffers.
+///
+/// # Type Parameters
+///
+/// * `W` - The writer type that implements [`std::io::Write`].
+///
+/// # Example
+///
+/// ```ignore
+/// use qbice_serialize::postcard::PostcardEncoder;
+/// use std::io::Cursor;
+///
+/// // Write to a Vec<u8>
+/// let encoder = PostcardEncoder::new(Vec::new());
+///
+/// // Write to a file
+/// let file = std::fs::File::create("output.bin").unwrap();
+/// let encoder = PostcardEncoder::new(file);
+///
+/// // Write to a cursor
+/// let cursor = Cursor::new(Vec::new());
+/// let encoder = PostcardEncoder::new(cursor);
+/// ```
+#[derive(Debug)]
+pub struct PostcardEncoder<W> {
+    writer: W,
 }
 
-impl PostcardEncoder {
-    /// Creates a new encoder with an empty buffer.
+impl<W> PostcardEncoder<W> {
+    /// Creates a new encoder wrapping the given writer.
     #[must_use]
-    pub const fn new() -> Self { Self { buffer: Vec::new() } }
+    pub const fn new(writer: W) -> Self { Self { writer } }
 
-    /// Creates a new encoder with pre-allocated capacity.
+    /// Returns a reference to the underlying writer.
     #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self { buffer: Vec::with_capacity(capacity) }
-    }
+    pub const fn get_ref(&self) -> &W { &self.writer }
 
-    /// Returns the encoded bytes as a slice.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] { &self.buffer }
-
-    /// Consumes the encoder and returns the encoded bytes.
-    #[must_use]
-    pub fn into_bytes(self) -> Vec<u8> { self.buffer }
-
-    /// Returns the current length of the encoded data.
+    /// Returns a mutable reference to the underlying writer.
     #[must_use]
     #[allow(clippy::missing_const_for_fn)]
-    pub fn len(&self) -> usize { self.buffer.len() }
+    pub fn get_mut(&mut self) -> &mut W { &mut self.writer }
 
-    /// Returns `true` if no data has been encoded yet.
+    /// Consumes the encoder and returns the underlying writer.
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn is_empty(&self) -> bool { self.buffer.is_empty() }
-
-    /// Clears the buffer, allowing the encoder to be reused.
-    pub fn clear(&mut self) { self.buffer.clear(); }
+    pub fn into_inner(self) -> W { self.writer }
 }
 
-impl Encoder for PostcardEncoder {
+impl<W: Write> Encoder for PostcardEncoder<W> {
     fn emit_u8(&mut self, v: u8) -> io::Result<()> {
-        self.buffer.push(v);
-        Ok(())
+        self.writer.write_all(&[v])
     }
 
     fn emit_u16(&mut self, v: u16) -> io::Result<()> {
         let mut buf = [0u8; MAX_VARINT_U16_BYTES];
         let len = encode_varint_u16(v, &mut buf);
-        self.buffer.extend_from_slice(&buf[..len]);
-        Ok(())
+        self.writer.write_all(&buf[..len])
     }
 
     fn emit_u32(&mut self, v: u32) -> io::Result<()> {
         let mut buf = [0u8; MAX_VARINT_U32_BYTES];
         let len = encode_varint_u32(v, &mut buf);
-        self.buffer.extend_from_slice(&buf[..len]);
-        Ok(())
+        self.writer.write_all(&buf[..len])
     }
 
     fn emit_u64(&mut self, v: u64) -> io::Result<()> {
         let mut buf = [0u8; MAX_VARINT_U64_BYTES];
         let len = encode_varint_u64(v, &mut buf);
-        self.buffer.extend_from_slice(&buf[..len]);
-        Ok(())
+        self.writer.write_all(&buf[..len])
     }
 
     fn emit_u128(&mut self, v: u128) -> io::Result<()> {
         let mut buf = [0u8; MAX_VARINT_U128_BYTES];
         let len = encode_varint_u128(v, &mut buf);
-        self.buffer.extend_from_slice(&buf[..len]);
-        Ok(())
+        self.writer.write_all(&buf[..len])
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -268,8 +271,7 @@ impl Encoder for PostcardEncoder {
 
     #[allow(clippy::cast_sign_loss)]
     fn emit_i8(&mut self, v: i8) -> io::Result<()> {
-        self.buffer.push(v as u8);
-        Ok(())
+        self.writer.write_all(&[v as u8])
     }
 
     fn emit_i16(&mut self, v: i16) -> io::Result<()> {
@@ -294,8 +296,7 @@ impl Encoder for PostcardEncoder {
     }
 
     fn emit_raw_bytes(&mut self, s: &[u8]) -> io::Result<()> {
-        self.buffer.extend_from_slice(s);
-        Ok(())
+        self.writer.write_all(s)
     }
 
     // Override for efficiency - use varint for char
@@ -305,13 +306,11 @@ impl Encoder for PostcardEncoder {
 
     // Override to use fixed little-endian for floats
     fn emit_f32(&mut self, v: f32) -> io::Result<()> {
-        self.buffer.extend_from_slice(&v.to_le_bytes());
-        Ok(())
+        self.writer.write_all(&v.to_le_bytes())
     }
 
     fn emit_f64(&mut self, v: f64) -> io::Result<()> {
-        self.buffer.extend_from_slice(&v.to_le_bytes());
-        Ok(())
+        self.writer.write_all(&v.to_le_bytes())
     }
 }
 
@@ -319,42 +318,64 @@ impl Encoder for PostcardEncoder {
 // PostcardDecoder
 // =============================================================================
 
-/// A postcard-style decoder that reads from a byte slice.
+/// A postcard-style decoder that reads from any [`Read`] implementation.
 ///
-/// Uses varint decoding for integers. The decoder maintains an internal
-/// position and advances through the slice as data is read.
-#[derive(Debug, Clone)]
-pub struct PostcardDecoder<'a> {
-    data: &'a [u8],
-    position: usize,
+/// Uses varint decoding for integers. The decoder is generic over the reader
+/// type, allowing it to read from files, network streams, or in-memory buffers.
+///
+/// # Type Parameters
+///
+/// * `R` - The reader type that implements [`std::io::Read`].
+///
+/// # Example
+///
+/// ```ignore
+/// use qbice_serialize::postcard::PostcardDecoder;
+/// use std::io::Cursor;
+///
+/// // Read from a slice
+/// let data = [42u8];
+/// let decoder = PostcardDecoder::new(&data[..]);
+///
+/// // Read from a file
+/// let file = std::fs::File::open("input.bin").unwrap();
+/// let decoder = PostcardDecoder::new(file);
+///
+/// // Read from a cursor
+/// let cursor = Cursor::new(vec![42u8]);
+/// let decoder = PostcardDecoder::new(cursor);
+/// ```
+#[derive(Debug)]
+pub struct PostcardDecoder<R> {
+    reader: R,
 }
 
-impl<'a> PostcardDecoder<'a> {
-    /// Creates a new decoder from a byte slice.
+impl<R> PostcardDecoder<R> {
+    /// Creates a new decoder wrapping the given reader.
     #[must_use]
-    pub const fn new(data: &'a [u8]) -> Self { Self { data, position: 0 } }
+    pub const fn new(reader: R) -> Self { Self { reader } }
 
-    /// Returns the current position in the data.
+    /// Returns a reference to the underlying reader.
     #[must_use]
-    pub const fn position(&self) -> usize { self.position }
+    pub const fn get_ref(&self) -> &R { &self.reader }
 
-    /// Returns the remaining bytes that haven't been read yet.
+    /// Returns a mutable reference to the underlying reader.
     #[must_use]
-    pub fn remaining(&self) -> &'a [u8] { &self.data[self.position..] }
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn get_mut(&mut self) -> &mut R { &mut self.reader }
 
-    /// Returns the number of bytes remaining.
+    /// Consumes the decoder and returns the underlying reader.
     #[must_use]
-    pub const fn remaining_len(&self) -> usize {
-        self.data.len() - self.position
+    pub fn into_inner(self) -> R { self.reader }
+}
+
+impl<R: Read> PostcardDecoder<R> {
+    /// Reads a single byte from the reader.
+    fn read_byte(&mut self) -> io::Result<u8> {
+        let mut buf = [0u8; 1];
+        self.reader.read_exact(&mut buf)?;
+        Ok(buf[0])
     }
-
-    /// Returns `true` if all data has been consumed.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool { self.position >= self.data.len() }
-
-    /// Peeks at the next byte without consuming it.
-    #[must_use]
-    pub fn peek(&self) -> Option<u8> { self.data.get(self.position).copied() }
 
     /// Reads a varint-encoded u16.
     fn read_varint_u16(&mut self) -> io::Result<u16> {
@@ -362,15 +383,7 @@ impl<'a> PostcardDecoder<'a> {
         let mut shift = 0;
 
         loop {
-            if self.position >= self.data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "unexpected end of varint",
-                ));
-            }
-
-            let byte = self.data[self.position];
-            self.position += 1;
+            let byte = self.read_byte()?;
 
             if shift >= 16 {
                 return Err(io::Error::new(
@@ -395,15 +408,7 @@ impl<'a> PostcardDecoder<'a> {
         let mut shift = 0;
 
         loop {
-            if self.position >= self.data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "unexpected end of varint",
-                ));
-            }
-
-            let byte = self.data[self.position];
-            self.position += 1;
+            let byte = self.read_byte()?;
 
             if shift >= 32 {
                 return Err(io::Error::new(
@@ -428,15 +433,7 @@ impl<'a> PostcardDecoder<'a> {
         let mut shift = 0;
 
         loop {
-            if self.position >= self.data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "unexpected end of varint",
-                ));
-            }
-
-            let byte = self.data[self.position];
-            self.position += 1;
+            let byte = self.read_byte()?;
 
             if shift >= 64 {
                 return Err(io::Error::new(
@@ -461,15 +458,7 @@ impl<'a> PostcardDecoder<'a> {
         let mut shift = 0;
 
         loop {
-            if self.position >= self.data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "unexpected end of varint",
-                ));
-            }
-
-            let byte = self.data[self.position];
-            self.position += 1;
+            let byte = self.read_byte()?;
 
             if shift >= 128 {
                 return Err(io::Error::new(
@@ -489,18 +478,8 @@ impl<'a> PostcardDecoder<'a> {
     }
 }
 
-impl Decoder for PostcardDecoder<'_> {
-    fn read_u8(&mut self) -> io::Result<u8> {
-        if self.position >= self.data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "unexpected end of data",
-            ));
-        }
-        let byte = self.data[self.position];
-        self.position += 1;
-        Ok(byte)
-    }
+impl<R: Read> Decoder for PostcardDecoder<R> {
+    fn read_u8(&mut self) -> io::Result<u8> { self.read_byte() }
 
     fn read_u16(&mut self) -> io::Result<u16> { self.read_varint_u16() }
 
@@ -551,16 +530,10 @@ impl Decoder for PostcardDecoder<'_> {
         })
     }
 
-    fn read_raw_bytes(&mut self, len: usize) -> io::Result<&[u8]> {
-        if self.position + len > self.data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "unexpected end of data",
-            ));
-        }
-        let bytes = &self.data[self.position..self.position + len];
-        self.position += len;
-        Ok(bytes)
+    fn read_raw_bytes(&mut self, len: usize) -> io::Result<Vec<u8>> {
+        let mut buf = vec![0u8; len];
+        self.reader.read_exact(&mut buf)?;
+        Ok(buf)
     }
 
     // Override for efficiency - use varint for char
@@ -576,16 +549,15 @@ impl Decoder for PostcardDecoder<'_> {
 
     // Override to use fixed little-endian for floats
     fn read_f32(&mut self) -> io::Result<f32> {
-        let bytes = self.read_raw_bytes(4)?;
-        Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        let mut buf = [0u8; 4];
+        self.reader.read_exact(&mut buf)?;
+        Ok(f32::from_le_bytes(buf))
     }
 
     fn read_f64(&mut self) -> io::Result<f64> {
-        let bytes = self.read_raw_bytes(8)?;
-        Ok(f64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-            bytes[6], bytes[7],
-        ]))
+        let mut buf = [0u8; 8];
+        self.reader.read_exact(&mut buf)?;
+        Ok(f64::from_le_bytes(buf))
     }
 }
 
@@ -611,9 +583,9 @@ pub fn encode<T: crate::Encode>(
     value: &T,
     plugin: &crate::Plugin,
 ) -> io::Result<Vec<u8>> {
-    let mut encoder = PostcardEncoder::new();
+    let mut encoder = PostcardEncoder::new(Vec::new());
     value.encode(&mut encoder, plugin)?;
-    Ok(encoder.into_bytes())
+    Ok(encoder.into_inner())
 }
 
 /// Decodes a value from bytes using the postcard format.
