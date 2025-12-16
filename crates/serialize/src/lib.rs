@@ -53,8 +53,10 @@
 pub mod decode;
 pub mod encode;
 pub mod plugin;
+pub mod postcard;
 
 // Re-export main traits and types at the crate root for convenience
 pub use decode::{Decode, Decoder};
 pub use encode::{Encode, Encoder};
 pub use plugin::Plugin;
+pub use postcard::{PostcardDecoder, PostcardEncoder};
