@@ -1,7 +1,7 @@
 //! Procedural macros for the `qbice_stable_type_id` crate.
 //!
 //! This crate provides the `#[derive(Identifiable)]` macro that automatically
-//! implements the [`qbice_stable_type_id::Identifiable`] trait for types.
+//! implements the `Identifiable` trait for types.
 //!
 //! # Overview
 //!
@@ -113,8 +113,7 @@
 
 use proc_macro::TokenStream;
 
-/// Derives the [`Identifiable`](qbice_stable_type_id::Identifiable) trait for
-/// a type.
+/// Derives the Identifiable trait for a type.
 ///
 /// This proc macro automatically implements the `Identifiable` trait, providing
 /// a stable, collision-resistant type identifier that remains consistent across
