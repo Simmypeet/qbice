@@ -127,7 +127,7 @@ impl<K> UsageShard<K> {
     }
 
     fn evict_if_needed(&mut self) -> Option<K> {
-        if self.length <= self.capacity {
+        if self.length < self.capacity {
             return None;
         }
 
@@ -595,3 +595,6 @@ impl<T: Column, DB: KvDatabase, S: BuildHasher + Send + Sync + 'static>
         }
     }
 }
+
+#[cfg(test)]
+mod test;
