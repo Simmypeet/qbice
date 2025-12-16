@@ -245,6 +245,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qbice_serialize"
+version = "0.1.0"
+
+[[package]]
 name = "qbice_stable_hash"
 version = "0.1.0"
 dependencies = [
