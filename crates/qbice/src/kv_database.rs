@@ -27,12 +27,12 @@ pub trait Column: 'static + Send + Sync {
     type Key: Encodable + Decodable + Hash + Eq + Clone + 'static + Send + Sync;
 
     /// The type of values stored in this column.
-    type Value: Encodable + Decodable + 'static + Send + Sync;
+    type Value: Encodable + Decodable + Clone + 'static + Send + Sync;
 }
 
 impl<
     K: Encodable + Decodable + Hash + Eq + Clone + 'static + Send + Sync,
-    V: Encodable + Decodable + 'static + Send + Sync,
+    V: Encodable + Decodable + Clone + 'static + Send + Sync,
 > Column for (K, V)
 {
     type Key = K;
