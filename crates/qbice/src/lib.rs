@@ -265,6 +265,7 @@ pub mod query;
 
 pub use engine::{Engine, TrackedEngine};
 pub use executor::Executor;
+pub use qbice_serialize::{Decode, Encode};
 pub use qbice_stable_hash::StableHash;
 pub use qbice_stable_type_id::Identifiable;
 pub use query::{ExecutionStyle, Query};

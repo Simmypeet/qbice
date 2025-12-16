@@ -4,19 +4,7 @@
 
 use std::hash::Hash;
 
-/// A trait for types that can be encoded into a binary format for storage in
-/// the key-value database.
-///
-/// Implementations should define how to serialize the type into bytes that can
-/// be stored as keys or values in the database.
-pub trait Encodable {} // placeholder we'll fill in later
-
-/// A trait for types that can be decoded from a binary format retrieved from
-/// the key-value database.
-///
-/// Implementations should define how to deserialize bytes back into the
-/// original type.
-pub trait Decodable {} // placeholder we'll fill in later
+use qbice_serialize::{Decode, Encode};
 
 /// Represents a column (or table) in the key-value database.
 ///
@@ -24,15 +12,15 @@ pub trait Decodable {} // placeholder we'll fill in later
 /// `Encodable` and `Decodable` traits for serialization and deserialization.
 pub trait Column: 'static + Send + Sync {
     /// The type of keys used in this column.
-    type Key: Encodable + Decodable + Hash + Eq + Clone + 'static + Send + Sync;
+    type Key: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;
 
     /// The type of values stored in this column.
-    type Value: Encodable + Decodable + Clone + 'static + Send + Sync;
+    type Value: Encode + Decode + Clone + 'static + Send + Sync;
 }
 
 impl<
-    K: Encodable + Decodable + Hash + Eq + Clone + 'static + Send + Sync,
-    V: Encodable + Decodable + Clone + 'static + Send + Sync,
+    K: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync,
+    V: Encode + Decode + Clone + 'static + Send + Sync,
 > Column for (K, V)
 {
     type Key = K;

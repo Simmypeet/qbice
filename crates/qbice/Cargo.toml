@@ -15,6 +15,7 @@ categories = ["caching", "concurrency", "asynchronous"]
 [dependencies]
 qbice_stable_hash = { version = "0.1.0", path = "../stable_hash" }
 qbice_stable_type_id = { version = "0.1.0", path = "../stable_type_id" }
+qbice_serialize = { version = "0.1.0", path = "../serialize" }
 tokio.workspace = true
 dashmap.workspace = true
 smallbox.workspace = true

@@ -203,6 +203,7 @@ dependencies = [
  "dashmap",
  "enum-as-inner",
  "parking_lot",
+ "qbice_serialize",
  "qbice_stable_hash",
  "qbice_stable_type_id",
  "smallbox",

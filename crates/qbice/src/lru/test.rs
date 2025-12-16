@@ -11,17 +11,9 @@ use std::{
 use tokio::sync::RwLock;
 
 use crate::{
-    kv_database::{Column, Decodable, Encodable, KvDatabase, WriteTransaction},
+    kv_database::{Column, KvDatabase, WriteTransaction},
     lru::Lru,
 };
-
-// Make primitive types implement Encodable and Decodable for testing
-impl Encodable for i32 {}
-impl Decodable for i32 {}
-impl Encodable for u64 {}
-impl Decodable for u64 {}
-impl Encodable for String {}
-impl Decodable for String {}
 
 /// Test column type: i32 keys to String values
 struct TestColumn;
