@@ -32,11 +32,13 @@ impl Column for TestColumn {
 }
 
 /// A mock key-value database using type-erased storage.
-/// Keys are stored as Box<dyn Any + Send + Sync> for type-erased comparison.
+///
+/// Each column type `C: Column` gets its own `HashMap<C::Key, C::Value>` stored
+/// as a type-erased `Box<dyn Any + Send + Sync>` keyed by `TypeId::of::<C>()`.
 #[derive(Default)]
 struct MockDatabase {
-    /// The actual data store: maps (column `TypeId`, key bytes) -> value
-    data: RwLock<HashMap<(TypeId, i64), Box<dyn Any + Send + Sync>>>,
+    /// Maps `TypeId` of column -> `HashMap<C::Key, C::Value>` (type-erased)
+    data: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
     get_count: AtomicUsize,
 }
 
@@ -54,13 +56,24 @@ impl MockDatabase {
         }
     }
 
-    /// Insert a value for `TestColumn`
-    async fn insert(&self, key: i32, value: String) {
+    /// Insert a value for a specific column type
+    async fn insert<C: Column>(&self, key: C::Key, value: C::Value)
+    where
+        C::Key: Send + Sync + 'static,
+        C::Value: Send + Sync + 'static,
+    {
+        let type_id = TypeId::of::<C>();
         let mut data = self.data.write().await;
-        data.insert(
-            (TypeId::of::<TestColumn>(), i64::from(key)),
-            Box::new(value),
-        );
+
+        let column_map = data
+            .entry(type_id)
+            .or_insert_with(|| Box::new(HashMap::<C::Key, C::Value>::new()));
+
+        // Downcast to the actual HashMap type and insert
+        column_map
+            .downcast_mut::<HashMap<C::Key, C::Value>>()
+            .expect("Type mismatch in MockDatabase")
+            .insert(key, value);
     }
 
     fn get_count(&self) -> usize { self.get_count.load(Ordering::SeqCst) }
@@ -91,27 +104,12 @@ impl KvDatabase for MockDatabase {
         self.get_count.fetch_add(1, Ordering::SeqCst);
 
         let type_id = TypeId::of::<C>();
+        let data = self.data.read().await;
 
-        // We only support TestColumn in this mock
-        // Convert the key to i64 for lookup (works for i32 keys)
-        if type_id == TypeId::of::<TestColumn>() {
-            // SAFETY: We know C::Key is i32 when type_id matches TestColumn
-            let key_any: &dyn Any = key;
-            let key_i32 = key_any.downcast_ref::<i32>()?;
+        let column_map = data.get(&type_id)?;
+        let map = column_map.downcast_ref::<HashMap<C::Key, C::Value>>()?;
 
-            let data = self.data.read().await;
-            let value_boxed = data.get(&(type_id, i64::from(*key_i32)))?;
-
-            // SAFETY: We know the value is String when type_id matches
-            // TestColumn
-            let value_str = value_boxed.downcast_ref::<String>()?.clone();
-
-            // Convert String back to C::Value using Any
-            let value_any: Box<dyn Any> = Box::new(value_str);
-            value_any.downcast::<C::Value>().ok().map(|b| *b)
-        } else {
-            None
-        }
+        map.get(key).cloned()
     }
 
     async fn write_transaction(&self) -> Self::WriteTransaction<'_> {
@@ -145,7 +143,7 @@ async fn cache_miss_returns_none() {
 #[tokio::test]
 async fn cache_hit_returns_value() {
     let db = Arc::new(MockDatabase::new());
-    db.insert(1, "one".to_string()).await;
+    db.insert::<TestColumn>(1, "one".to_string()).await;
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
         db,
@@ -161,8 +159,8 @@ async fn cache_hit_returns_value() {
 #[tokio::test]
 async fn cache_hit_after_first_get() {
     let db = Arc::new(MockDatabase::new());
-    db.insert(1, "one".to_string()).await;
-    db.insert(2, "two".to_string()).await;
+    db.insert::<TestColumn>(1, "one".to_string()).await;
+    db.insert::<TestColumn>(2, "two".to_string()).await;
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
         db.clone(),
@@ -223,12 +221,12 @@ async fn eviction_removes_least_recently_used() {
     // Test eviction behavior by observing DB access counts
     // We use a small capacity to trigger evictions
     let db = Arc::new(MockDatabase::new());
-    db.insert(1, "one".to_string()).await;
-    db.insert(2, "two".to_string()).await;
-    db.insert(3, "three".to_string()).await;
-    db.insert(4, "four".to_string()).await;
-    db.insert(5, "five".to_string()).await;
-    db.insert(6, "six".to_string()).await;
+    db.insert::<TestColumn>(1, "one".to_string()).await;
+    db.insert::<TestColumn>(2, "two".to_string()).await;
+    db.insert::<TestColumn>(3, "three".to_string()).await;
+    db.insert::<TestColumn>(4, "four".to_string()).await;
+    db.insert::<TestColumn>(5, "five".to_string()).await;
+    db.insert::<TestColumn>(6, "six".to_string()).await;
 
     // Capacity 2, 1 shard: per_shard_capacity = 2
     // Eviction triggers when length >= 2, i.e., when adding 3rd entry
@@ -281,10 +279,10 @@ async fn eviction_removes_least_recently_used() {
 async fn access_updates_lru_order() {
     // With capacity 3, can hold exactly 3 entries
     let db = Arc::new(MockDatabase::new());
-    db.insert(1, "one".to_string()).await;
-    db.insert(2, "two".to_string()).await;
-    db.insert(3, "three".to_string()).await;
-    db.insert(4, "four".to_string()).await;
+    db.insert::<TestColumn>(1, "one".to_string()).await;
+    db.insert::<TestColumn>(2, "two".to_string()).await;
+    db.insert::<TestColumn>(3, "three".to_string()).await;
+    db.insert::<TestColumn>(4, "four".to_string()).await;
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
         db.clone(),
@@ -326,9 +324,9 @@ async fn access_updates_lru_order() {
 async fn capacity_one() {
     // With capacity 1, can hold exactly 1 entry
     let db = Arc::new(MockDatabase::new());
-    db.insert(1, "one".to_string()).await;
-    db.insert(2, "two".to_string()).await;
-    db.insert(3, "three".to_string()).await;
+    db.insert::<TestColumn>(1, "one".to_string()).await;
+    db.insert::<TestColumn>(2, "two".to_string()).await;
+    db.insert::<TestColumn>(3, "three".to_string()).await;
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
         db.clone(),
@@ -363,7 +361,7 @@ async fn eviction_with_negative_cache() {
     // Test that negative cache entries (None values) are also subject to
     // eviction
     let db = Arc::new(MockDatabase::new());
-    db.insert(3, "three".to_string()).await;
+    db.insert::<TestColumn>(3, "three".to_string()).await;
 
     // With capacity 2: eviction happens when length >= 2
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
@@ -401,7 +399,7 @@ async fn concurrent_access_same_key() {
     // Test single-flight behavior: multiple concurrent requests for the same
     // key should result in only one DB fetch
     let db = Arc::new(MockDatabase::new());
-    db.insert(1, "one".to_string()).await;
+    db.insert::<TestColumn>(1, "one".to_string()).await;
 
     let cache = Arc::new(Lru::<TestColumn, _, _>::new_with_shard_amount(
         db.clone(),
@@ -438,7 +436,7 @@ async fn concurrent_access_same_key() {
 async fn concurrent_access_different_keys() {
     let db = Arc::new(MockDatabase::new());
     for i in 1..=5 {
-        db.insert(i, format!("value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("value_{i}")).await;
     }
 
     // Use multiple shards to test concurrent access
@@ -475,7 +473,7 @@ async fn many_inserts_and_evictions() {
     let db = Arc::new(MockDatabase::new());
     // Insert 15 keys
     for i in 0..15 {
-        db.insert(i, format!("value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("value_{i}")).await;
     }
 
     // With capacity 10, eviction happens when length >= 10
@@ -519,7 +517,7 @@ async fn repeated_access_pattern() {
     // Test working set that fits in cache
     let db = Arc::new(MockDatabase::new());
     for i in 0..5 {
-        db.insert(i, format!("value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("value_{i}")).await;
     }
 
     // With capacity 5, can hold exactly 5 entries
@@ -576,7 +574,7 @@ async fn non_power_of_two_shards_panics() {
 #[tokio::test]
 async fn large_capacity_single_shard() {
     let db = Arc::new(MockDatabase::new());
-    db.insert(1, "one".to_string()).await;
+    db.insert::<TestColumn>(1, "one".to_string()).await;
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
         db.clone(),
@@ -598,7 +596,7 @@ async fn multi_shard_distribution() {
     // Test that entries are distributed across shards and caching works
     let db = Arc::new(MockDatabase::new());
     for i in 0..100 {
-        db.insert(i, format!("value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("value_{i}")).await;
     }
 
     // Use 4 shards with total capacity 100
@@ -651,7 +649,7 @@ async fn per_shard_eviction() {
     // Per-shard capacity = 1 (exactly 1 entry per shard)
     let db = Arc::new(MockDatabase::new());
     for i in 0..10i32 {
-        db.insert(i, format!("value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("value_{i}")).await;
     }
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
@@ -680,7 +678,7 @@ async fn sequential_eviction_order() {
     // Test eviction order step by step
     let db = Arc::new(MockDatabase::new());
     for i in 1..=7 {
-        db.insert(i, format!("value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("value_{i}")).await;
     }
 
     // With capacity 3: eviction happens when length >= 3
@@ -720,7 +718,7 @@ async fn sequential_eviction_order() {
 async fn values_remain_correct_after_eviction_and_reload() {
     let db = Arc::new(MockDatabase::new());
     for i in 1..=10 {
-        db.insert(i, format!("original_value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("original_value_{i}")).await;
     }
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
@@ -753,7 +751,7 @@ async fn exact_capacity() {
     // With capacity N, we can hold exactly N entries
     let db = Arc::new(MockDatabase::new());
     for i in 1..=5 {
-        db.insert(i, format!("value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("value_{i}")).await;
     }
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
@@ -789,7 +787,7 @@ async fn lru_refresh_on_hit() {
     // Verify that accessing a cached item moves it to head (most recently used)
     let db = Arc::new(MockDatabase::new());
     for i in 1..=5 {
-        db.insert(i, format!("value_{i}")).await;
+        db.insert::<TestColumn>(i, format!("value_{i}")).await;
     }
 
     let cache = Lru::<TestColumn, _, _>::new_with_shard_amount(
