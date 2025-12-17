@@ -10,14 +10,17 @@ use core::panic;
 use std::{
     collections::HashMap,
     hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
-    sync::{Arc, LazyLock},
+    sync::Arc,
 };
 
 use crossbeam_utils::CachePadded;
 use enum_as_inner::EnumAsInner;
 use tokio::sync::{Mutex, Notify, RwLock, RwLockReadGuard};
 
-use crate::kv_database::{Column, KvDatabase};
+use crate::{
+    concurrent_data_structure::default_shard_amount,
+    kv_database::{Column, KvDatabase},
+};
 
 /// Type alias for the shards of usage tracking.
 type UsageShards<K> = Arc<[CachePadded<Mutex<UsageShard<K>>>]>;
@@ -242,20 +245,6 @@ impl<T: Column, DB: std::fmt::Debug, S: BuildHasher + Send + 'static>
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Lru").finish_non_exhaustive()
     }
-}
-
-/// Returns the default number of shards to use.
-///
-/// The default is calculated as `4 * available_parallelism`, rounded up to
-/// the next power of two. This provides good concurrency while keeping memory
-/// overhead reasonable. The value is computed once and cached.
-fn default_shard_amount() -> usize {
-    static DEFAULT_SHARD_AMOUNT: LazyLock<usize> = LazyLock::new(|| {
-        (std::thread::available_parallelism().map_or(1, usize::from) * 4)
-            .next_power_of_two()
-    });
-
-    *DEFAULT_SHARD_AMOUNT
 }
 
 /// A RAII guard that ensures proper cleanup when fetching from the database.
