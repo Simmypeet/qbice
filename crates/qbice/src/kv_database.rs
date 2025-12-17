@@ -37,7 +37,7 @@ pub trait WriteTransaction {
     /// If the key already exists, its value will be overwritten.
     fn put<'s, C: Column>(
         &'s self,
-        key: &'s C,
+        key: &'s <C as Column>::Key,
         value: &'s <C as Column>::Value,
     ) -> impl std::future::Future<Output = ()> + Send + use<'s, Self, C>;
 

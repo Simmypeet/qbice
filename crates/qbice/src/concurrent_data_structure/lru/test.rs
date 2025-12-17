@@ -77,7 +77,7 @@ struct MockWriteTransaction;
 impl WriteTransaction for MockWriteTransaction {
     async fn put<'s, C: Column>(
         &'s self,
-        _key: &'s C,
+        _key: &'s <C as Column>::Key,
         _value: &'s <C as Column>::Value,
     ) {
         // no-op
