@@ -11,8 +11,8 @@ use std::{
 use tokio::sync::RwLock;
 
 use crate::{
+    concurrent_data_structure::lru::Lru,
     kv_database::{Column, KvDatabase, WriteTransaction},
-    lru::Lru,
 };
 
 /// Test column type: i32 keys to String values
