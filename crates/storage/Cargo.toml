@@ -1,0 +1,17 @@
+[package]
+name = "storage"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+qbice_serialize = { version = "0.1.0", path = "../serialize" }
+tokio.workspace = true
+parking_lot.workspace = true
+fxhash.workspace = true
+
+[lints]
+workspace = true

@@ -8,7 +8,7 @@ members = [
     "crates/identifiable_derive_lib",
     "crates/identifiable_derive",
     "crates/serialize",
-    "crates/serialize_derive",
+    "crates/serialize_derive", "crates/storage",
 ]
 resolver = "2"
 
@@ -38,6 +38,8 @@ tracing = "0.1.43"
 tracing-test = "0.2.5"
 crossbeam-utils = "0.8.21"
 bimap = "0.6.3"
+fxhash = "0.2.1"
+rocksdb = "0.20.0"
 
 [workspace.lints.rust]
 missing_docs = "deny"
