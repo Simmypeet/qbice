@@ -6,6 +6,7 @@ use std::hash::Hash;
 
 use futures::Stream;
 use qbice_serialize::{Decode, Encode};
+use qbice_stable_type_id::Identifiable;
 
 /// A trait representing what logical data structure a column is storing.
 ///
@@ -83,6 +84,19 @@ impl StorageMode for Normal {}
 pub struct KeyOfSet;
 
 impl StorageMode for KeyOfSet {}
+
+/// A marker type indicating that this column family is used to represent
+/// a set of values.
+///
+/// This is logically equivalent to the `HashMap<K, ()>` or more simply a
+/// `HashSet<K>`, where only the keys are significant and the values are
+/// ignored.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
+)]
+pub struct Set;
+
+impl StorageMode for Set {}
 
 /// Represents a column (or table) in the key-value database.
 ///
