@@ -494,3 +494,46 @@ impl<T: Identifiable> Identifiable for [T] {
         base.combine(T::STABLE_TYPE_ID)
     };
 }
+
+macro_rules! identifiable_tuple {
+    ($($name:ident)+) => {
+        impl<$($name: Identifiable),+> Identifiable for ($($name,)+) {
+            const STABLE_TYPE_ID: StableTypeID = {
+                let base = StableTypeID::from_unique_type_name("std::tuple::Tuple");
+                $(
+                    let base = base.combine($name::STABLE_TYPE_ID);
+                )+
+                base
+            };
+        }
+    };
+}
+
+impl Identifiable for () {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::tuple::Unit");
+}
+
+identifiable_tuple! { A }
+identifiable_tuple! { A B }
+identifiable_tuple! { A B C }
+identifiable_tuple! { A B C D }
+identifiable_tuple! { A B C D E }
+identifiable_tuple! { A B C D E F }
+identifiable_tuple! { A B C D E F G }
+identifiable_tuple! { A B C D E F G H }
+identifiable_tuple! { A B C D E F G H I }
+identifiable_tuple! { A B C D E F G H I J }
+identifiable_tuple! { A B C D E F G H I J K }
+identifiable_tuple! { A B C D E F G H I J K L }
+identifiable_tuple! { A B C D E F G H I J K L M }
+identifiable_tuple! { A B C D E F G H I J K L M N }
+identifiable_tuple! { A B C D E F G H I J K L M N O }
+identifiable_tuple! { A B C D E F G H I J K L M N O P }
+
+impl<T: Identifiable> Identifiable for Vec<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("std::vec::Vec");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
