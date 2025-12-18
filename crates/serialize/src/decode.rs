@@ -417,6 +417,34 @@ impl<T: Decode> Decode for Arc<T> {
     }
 }
 
+impl<T: Decode> Decode for Box<[T]> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+    ) -> io::Result<Self> {
+        let len = decoder.read_usize()?;
+        let mut vec = Vec::with_capacity(len);
+        for _ in 0..len {
+            vec.push(T::decode(decoder, plugin)?);
+        }
+        Ok(vec.into_boxed_slice())
+    }
+}
+
+impl<T: Decode> Decode for Arc<[T]> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+    ) -> io::Result<Self> {
+        let len = decoder.read_usize()?;
+        let mut vec = Vec::with_capacity(len);
+        for _ in 0..len {
+            vec.push(T::decode(decoder, plugin)?);
+        }
+        Ok(Self::from(vec))
+    }
+}
+
 impl<T: ToOwned + ?Sized> Decode for Cow<'_, T>
 where
     T::Owned: Decode,
