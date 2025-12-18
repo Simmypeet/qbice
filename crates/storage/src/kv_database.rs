@@ -6,6 +6,83 @@ use std::hash::Hash;
 
 use qbice_serialize::{Decode, Encode};
 
+/// A trait representing what logical data structure a column is storing.
+///
+/// KV-databases can efficiently represent different logical data structures
+/// using different physical representations. This trait is used to indicate
+/// which logical structure is being represented.
+///
+/// - Representing normal `HashMap<K, V>` key-value pairs: [`Normal`].
+/// - Representing `HashMap<K, HashSet<V>>` keys mapping to sets of values :
+///   [`KeyOfSet`].
+pub trait StorageMode {}
+
+/// A marker type indicating that this column family is used to represent
+/// normal key-value pairs.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
+)]
+pub struct Normal;
+
+impl StorageMode for Normal {}
+
+/// A marker type indicating that this column family is used to represent
+/// a key mapping to a set of values
+/// (something equivalent to `HashMap<K  HashSet<V>>`).
+///
+/// ## Motivation
+///
+/// When inserting a value into a set associated with a key, in naive
+/// implementation, we need to deserialize the entire set, modify it in memory,
+/// and then serialize it back to the database. This can be inefficient for
+/// large sets. To optimize this, we store the data in physical representation
+/// in different way that allows us to add or remove individual values from the
+/// set without needing to read or write the entire set.
+///
+/// ## Physical Representation
+///
+/// The physical representation in the database will be different from a
+/// normal key-value pair. This is how it's represented at the physical level.
+///
+/// ```json
+/// {
+///     "keyA": ["value1", "value2", "value3"],
+///     "keyB": ["value4", "value5"]
+/// }
+/// ```
+///
+/// Internally, this will be represented as:
+///
+/// ```txt
+/// - '<keyA>|<value1>' -> (empty)
+/// - '<keyA>|<value2>' -> (empty)
+/// - '<keyA>|<value3>' -> (empty)
+/// - '<keyB>|<value4>' -> (empty)
+/// - '<keyB>|<value5>' -> (empty)
+/// ```
+///
+/// We use the `KeyOfSet` marker type to indicate that the value type is not
+/// actually stored, and the presence of the key-value pair indicates membership
+/// in the set.
+///
+/// **NOTE**: Additionally, it should append a length-prefixed encoding to the
+/// key to avoid prefix collisions. For example, keys "user" and "username"
+/// share the same prefix "user", which could lead to incorrect set
+///
+/// # Iterating Over Sets
+///
+/// To iterate over all values in the set of a given key, use the `prefix_scan`
+/// functionality of the underlying `KvDatabase`. For example, to get all values
+/// in the set for `keyA`, you would perform a prefix scan with the prefix
+/// `"<keyA>|"`. This will return all entries that belong to the set associated
+/// with `keyA`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
+)]
+pub struct KeyOfSet;
+
+impl StorageMode for KeyOfSet {}
+
 /// Represents a column (or table) in the key-value database.
 ///
 /// Each column has associated key and value types, which must implement the
@@ -16,6 +93,9 @@ pub trait Column: 'static + Send + Sync {
 
     /// The type of values stored in this column.
     type Value: Encode + Decode + Clone + 'static + Send + Sync;
+
+    /// The tag type representing the storage mode for this column.
+    type Mode: StorageMode;
 }
 
 impl<
@@ -25,6 +105,7 @@ impl<
 {
     type Key = K;
     type Value = V;
+    type Mode = Normal;
 }
 
 /// A write transaction that allows batching multiple write operations.
@@ -38,7 +119,7 @@ pub trait WriteTransaction {
     /// Inserts or updates a key-value pair in the specified column.
     ///
     /// If the key already exists, its value will be overwritten.
-    fn put<C: Column>(
+    fn put<C: Column<Mode = Normal>>(
         &self,
         key: &<C as Column>::Key,
         value: &<C as Column>::Value,
@@ -69,7 +150,7 @@ pub trait KvDatabase: 'static + Send + Sync {
     /// column.
     ///
     /// Returns `None` if the key does not exist in the database.
-    fn get<'s, C: Column>(
+    fn get<'s, C: Column<Mode = Normal>>(
         &'s self,
         key: &'s C::Key,
     ) -> impl std::future::Future<Output = Option<<C as Column>::Value>>

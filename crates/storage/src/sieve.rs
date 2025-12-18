@@ -1,3 +1,5 @@
+//! A sharded cache implementation using the SIEVE eviction algorithm.
+
 use core::fmt;
 use std::{
     collections::HashMap,
@@ -10,7 +12,7 @@ use std::{
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard};
 use tokio::sync::Notify;
 
-use crate::kv_database::{Column, KvDatabase};
+use crate::kv_database::{Column, KvDatabase, Normal};
 
 /// A sharded cache implementation using the SIEVE eviction algorithm.
 ///
@@ -186,7 +188,10 @@ impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S> {
     pub async fn get(
         &self,
         key: &C::Key,
-    ) -> Option<MappedRwLockReadGuard<'_, C::Value>> {
+    ) -> Option<MappedRwLockReadGuard<'_, C::Value>>
+    where
+        C: Column<Mode = Normal>,
+    {
         let shard_index = self.shard_index(key) as usize;
 
         loop {
