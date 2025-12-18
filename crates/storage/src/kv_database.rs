@@ -102,7 +102,7 @@ impl StorageMode for Set {}
 ///
 /// Each column has associated key and value types, which must implement the
 /// `Encodable` and `Decodable` traits for serialization and deserialization.
-pub trait Column: 'static + Send + Sync {
+pub trait Column: 'static + Send + Sync + Identifiable {
     /// The type of keys used in this column.
     type Key: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;
 
@@ -114,8 +114,8 @@ pub trait Column: 'static + Send + Sync {
 }
 
 impl<
-    K: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync,
-    V: Encode + Decode + Clone + 'static + Send + Sync,
+    K: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync + Identifiable,
+    V: Encode + Decode + Clone + 'static + Send + Sync + Identifiable,
 > Column for (K, V)
 {
     type Key = K;
