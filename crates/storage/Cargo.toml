@@ -12,6 +12,7 @@ qbice_serialize = { version = "0.1.0", path = "../serialize" }
 tokio.workspace = true
 parking_lot.workspace = true
 fxhash.workspace = true
+futures.workspace = true
 
 [lints]
 workspace = true

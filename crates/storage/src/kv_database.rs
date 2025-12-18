@@ -4,6 +4,7 @@
 
 use std::hash::Hash;
 
+use futures::Stream;
 use qbice_serialize::{Decode, Encode};
 
 /// A trait representing what logical data structure a column is storing.
@@ -125,6 +126,14 @@ pub trait WriteTransaction {
         value: &<C as Column>::Value,
     );
 
+    /// Inserts a member into the set associated with the given key in the
+    /// specified column.
+    fn insert_member<C: Column<Mode = KeyOfSet>>(
+        &self,
+        key: &<C as Column>::Key,
+        value: &<C as Column>::Value,
+    );
+
     /// Commits all pending write operations to the database.
     ///
     /// We assume that commit always succeeds as it's very difficult to restore
@@ -156,6 +165,15 @@ pub trait KvDatabase: 'static + Send + Sync {
     ) -> impl std::future::Future<Output = Option<<C as Column>::Value>>
     + Send
     + use<'s, Self, C>;
+
+    /// Scans all members of the set associated with the given key in the
+    /// specified column.
+    ///
+    /// Returns a stream of values in the set.
+    fn scan_members<'s, C: Column<Mode = KeyOfSet>>(
+        &'s self,
+        key: &'s C::Key,
+    ) -> impl Stream<Item = <C as Column>::Value> + Send + use<'s, Self, C>;
 
     /// Creates a new write transaction for batching multiple write operations.
     ///
