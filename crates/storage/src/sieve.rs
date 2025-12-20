@@ -9,10 +9,13 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard};
+use parking_lot::{MappedRwLockReadGuard, Mutex, RwLockReadGuard};
 use tokio::sync::Notify;
 
-use crate::kv_database::{Column, KvDatabase, Normal};
+use crate::{
+    kv_database::{Column, KvDatabase, Normal},
+    sharded::Sharded,
+};
 
 /// A sharded cache implementation using the SIEVE eviction algorithm.
 ///
@@ -33,10 +36,11 @@ use crate::kv_database::{Column, KvDatabase, Normal};
 /// The cache is divided into multiple shards to reduce lock contention during
 /// concurrent access. Each shard maintains its own SIEVE state and can be
 /// accessed independently.
+#[allow(clippy::type_complexity)] // shards field
 pub struct Sieve<C: Column, DB, S = BuildHasherDefault<fxhash::FxHasher>> {
-    shards: Box<[RwLock<SieveShard<C, S>>]>,
-    mask: usize,
+    shards: Sharded<SieveShard<C, S>>,
     hasher_builder: S,
+
     backing_db: Arc<DB>,
 
     in_flight: Mutex<HashMap<C::Key, Arc<Notify>>>,
@@ -50,12 +54,10 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut map = f.debug_map();
 
-        for shard in &self.shards {
-            let lock = shard.read();
-
-            for (key, &index) in &lock.map {
+        for shard in self.shards.iter_read_shards() {
+            for (key, &index) in &shard.map {
                 let Some(value) =
-                    lock.nodes[index].as_ref().unwrap().value.as_ref()
+                    shard.nodes[index].as_ref().unwrap().value.as_ref()
                 else {
                     continue;
                 };
@@ -123,17 +125,11 @@ impl<C: Column, DB, S: Clone> Sieve<C, DB, S> {
         hasher_builder: S,
     ) -> Self {
         let per_shard = total_capacity.div_ceil(shard_amount);
-        let mut shards = Vec::with_capacity(shard_amount);
-        for _ in 0..shard_amount {
-            shards.push(RwLock::new(SieveShard::new(
-                per_shard,
-                hasher_builder.clone(),
-            )));
-        }
 
         Self {
-            shards: shards.into_boxed_slice(),
-            mask: shard_amount - 1,
+            shards: Sharded::new(shard_amount, |_| {
+                SieveShard::new(per_shard, hasher_builder.clone())
+            }),
             hasher_builder,
             backing_db,
 
@@ -143,8 +139,8 @@ impl<C: Column, DB, S: Clone> Sieve<C, DB, S> {
 }
 
 impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S> {
-    fn shard_index(&self, key: &C::Key) -> u64 {
-        self.hasher_builder.hash_one(key) & self.mask as u64
+    fn shard_index(&self, key: &C::Key) -> usize {
+        self.shards.shard_index(self.hasher_builder.hash_one(key))
     }
 
     /// Retrieves a value from the cache, fetching from the backing database if
@@ -192,10 +188,10 @@ impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S> {
     where
         C: Column<Mode = Normal>,
     {
-        let shard_index = self.shard_index(key) as usize;
+        let shard_index = self.shard_index(key);
 
         loop {
-            let lock = self.shards[shard_index].read();
+            let lock = self.shards.read_shard(shard_index);
 
             if let Ok(lock) =
                 RwLockReadGuard::try_map(lock, |x| match x.get(key) {
@@ -215,7 +211,7 @@ impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S> {
             let value = self.backing_db.get::<C>(key).await;
 
             {
-                let mut lock = self.shards[shard_index].write();
+                let mut lock = self.shards.write_shard(shard_index);
                 lock.insert(key.clone(), value.clone());
             }
 
