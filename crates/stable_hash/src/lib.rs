@@ -25,6 +25,7 @@
 
 use std::{
     hash::{BuildHasher, Hash},
+    marker::PhantomData,
     mem::Discriminant,
 };
 
@@ -1007,4 +1008,29 @@ impl Compact128 {
     /// Returns the higher 64 bits of the `Compact128` value.
     #[must_use]
     pub const fn high(&self) -> u64 { self.1 }
+}
+
+/// A trait for building stable hashers.
+///
+/// This trait defines a factory for creating instances of stable hashers.
+pub trait BuildStableHasher {
+    /// The type of stable hasher produced by this builder.
+    type Hasher: StableHasher;
+
+    /// Creates a new instance of the stable hasher.
+    fn build_stable_hasher(&self) -> Self::Hasher;
+}
+
+/// A default implementation of `BuildStableHasher` for a given hasher type.
+///
+/// This struct uses `H: Default` to create new hasher instances.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuildStableHasherDefault<H>(PhantomData<fn() -> H>);
+
+impl<H: StableHasher + Default> BuildStableHasher
+    for BuildStableHasherDefault<H>
+{
+    type Hasher = H;
+
+    fn build_stable_hasher(&self) -> Self::Hasher { H::default() }
 }
