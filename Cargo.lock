@@ -559,10 +559,11 @@ dependencies = [
 
 [[package]]
 name = "qbice_stable_hash"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dashmap",
  "flexstr",
+ "qbice_serialize",
  "qbice_stable_hash_derive",
  "siphasher",
  "static_assertions",

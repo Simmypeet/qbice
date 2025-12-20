@@ -28,6 +28,7 @@ use std::{
     mem::Discriminant,
 };
 
+use qbice_serialize::{Decode, Encode};
 pub use siphasher::sip128::SipHasher as Sip128Hasher;
 
 extern crate self as qbice_stable_hash;
@@ -964,4 +965,46 @@ impl StableHasher for siphasher::sip128::SipHasher {
         f(&mut sub_hasher);
         sub_hasher.finish128().into()
     }
+}
+
+/// A less-aligned version of a 128-bit compact hash value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    StableHash,
+    Encode,
+    Decode,
+)]
+pub struct Compact128(u64, u64);
+
+impl From<u128> for Compact128 {
+    #[allow(clippy::cast_possible_truncation)]
+    fn from(value: u128) -> Self { Self(value as u64, (value >> 64) as u64) }
+}
+
+impl Compact128 {
+    /// Converts the `Compact128` back into a standard `u128`.
+    ///
+    /// # Returns
+    ///
+    /// The `u128` representation of the `Compact128` value.
+    #[must_use]
+    pub fn to_u128(&self) -> u128 {
+        u128::from(self.0) | (u128::from(self.1) << 64)
+    }
+
+    /// Returns the lower 64 bits of the `Compact128` value.
+    #[must_use]
+    pub const fn low(&self) -> u64 { self.0 }
+
+    /// Returns the higher 64 bits of the `Compact128` value.
+    #[must_use]
+    pub const fn high(&self) -> u64 { self.1 }
 }
