@@ -176,6 +176,7 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
                 &self,
                 encoder: &mut __E,
                 plugin: &::qbice_serialize::Plugin,
+                session: &mut ::qbice_serialize::session::Session,
             ) -> ::std::io::Result<()> {
                 #encode_impl
             }
@@ -195,7 +196,7 @@ fn impl_encode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
                 .map(|field| {
                     let field_name = &field.ident;
                     quote! {
-                        ::qbice_serialize::Encode::encode(&self.#field_name, encoder, plugin)?;
+                        ::qbice_serialize::Encode::encode(&self.#field_name, encoder, plugin, session)?;
                     }
                 });
 
@@ -213,7 +214,7 @@ fn impl_encode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
                 .map(|(i, _)| {
                     let index = Index::from(i);
                     quote! {
-                        ::qbice_serialize::Encode::encode(&self.#index, encoder, plugin)?;
+                        ::qbice_serialize::Encode::encode(&self.#index, encoder, plugin, session)?;
                     }
                 });
 
@@ -256,7 +257,7 @@ fn impl_encode_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
                         field_names.iter().filter(|(_, skip)| !skip).map(
                             |(field_name, _)| {
                                 quote! {
-                                    ::qbice_serialize::Encode::encode(#field_name, encoder, plugin)?;
+                                    ::qbice_serialize::Encode::encode(#field_name, encoder, plugin, session)?;
                                 }
                             },
                         );
@@ -294,7 +295,7 @@ fn impl_encode_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
                         field_data.iter().filter(|(_, skip)| !skip).map(
                             |(binding, _)| {
                                 quote! {
-                                    ::qbice_serialize::Encode::encode(#binding, encoder, plugin)?;
+                                    ::qbice_serialize::Encode::encode(#binding, encoder, plugin, session)?;
                                 }
                             },
                         );
@@ -402,6 +403,7 @@ pub fn derive_decode(input: TokenStream) -> TokenStream {
             fn decode<__D: ::qbice_serialize::Decoder + ?Sized>(
                 decoder: &mut __D,
                 plugin: &::qbice_serialize::Plugin,
+                session: &mut ::qbice_serialize::session::Session,
             ) -> ::std::io::Result<Self> {
                 #decode_impl
             }
@@ -424,7 +426,7 @@ fn impl_decode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
                     }
                 } else {
                     quote! {
-                        #field_name: <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin)?,
+                        #field_name: <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin, session)?,
                     }
                 }
             });
@@ -445,7 +447,7 @@ fn impl_decode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
                     }
                 } else {
                     quote! {
-                        <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin)?,
+                        <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin, session)?,
                     }
                 }
             });
@@ -483,7 +485,7 @@ fn impl_decode_enum(
                             }
                         } else {
                             quote! {
-                                #field_name: <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin)?,
+                                #field_name: <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin, session)?,
                             }
                         }
                     });
@@ -502,7 +504,7 @@ fn impl_decode_enum(
                             }
                         } else {
                             quote! {
-                                <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin)?,
+                                <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin, session)?,
                             }
                         }
                     });

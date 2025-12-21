@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::plugin::Plugin;
+use crate::{plugin::Plugin, session::Session};
 
 /// A trait for types that can serialize primitive values to a binary format.
 ///
@@ -145,6 +145,46 @@ pub trait Encoder {
         self.emit_usize(v.len())?;
         self.emit_raw_bytes(v)
     }
+
+    /// Encodes a value of type `E` using this encoder.
+    ///
+    /// This is the primary entry point for encoding values. It creates a new
+    /// [`Session`] and invokes [`Encode::encode`] on the provided value,
+    /// managing session state automatically.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `E`: The type to encode. Must implement [`Encode`].
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to encode.
+    /// * `plugin` - Plugin context for custom serialization strategies.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an I/O error if encoding fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use qbice_serialize::{encode::Encoder, plugin::Plugin};
+    ///
+    /// fn encode_point<E: Encoder>(encoder: &mut E, plugin: &Plugin, x: i32, y: i32) -> std::io::Result<()> {
+    ///     encoder.encode(&x, plugin)?;
+    ///     encoder.encode(&y, plugin)?;
+    ///     Ok(())
+    /// }
+    /// ```
+    fn encode<E: Encode>(
+        &mut self,
+        value: &E,
+        plugin: &Plugin,
+    ) -> io::Result<()> {
+        let mut session = Session::new();
+
+        value.encode(self, plugin, &mut session)
+    }
 }
 
 /// A trait for types that can be serialized.
@@ -191,6 +231,7 @@ pub trait Encode {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()>;
 }
 
@@ -203,6 +244,7 @@ impl Encode for u8 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_u8(*self)
     }
@@ -213,6 +255,7 @@ impl Encode for u16 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_u16(*self)
     }
@@ -223,6 +266,7 @@ impl Encode for u32 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_u32(*self)
     }
@@ -233,6 +277,7 @@ impl Encode for u64 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_u64(*self)
     }
@@ -243,6 +288,7 @@ impl Encode for u128 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_u128(*self)
     }
@@ -253,6 +299,7 @@ impl Encode for usize {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(*self)
     }
@@ -263,6 +310,7 @@ impl Encode for i8 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_i8(*self)
     }
@@ -273,6 +321,7 @@ impl Encode for i16 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_i16(*self)
     }
@@ -283,6 +332,7 @@ impl Encode for i32 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_i32(*self)
     }
@@ -293,6 +343,7 @@ impl Encode for i64 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_i64(*self)
     }
@@ -303,6 +354,7 @@ impl Encode for i128 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_i128(*self)
     }
@@ -313,6 +365,7 @@ impl Encode for isize {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_isize(*self)
     }
@@ -323,6 +376,7 @@ impl Encode for bool {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_bool(*self)
     }
@@ -333,6 +387,7 @@ impl Encode for char {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_char(*self)
     }
@@ -343,6 +398,7 @@ impl Encode for f32 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_f32(*self)
     }
@@ -353,6 +409,7 @@ impl Encode for f64 {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_f64(*self)
     }
@@ -363,6 +420,7 @@ impl Encode for str {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_str(self)
     }
@@ -373,6 +431,7 @@ impl Encode for String {
         &self,
         encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_str(self)
     }
@@ -387,8 +446,9 @@ impl<T: Encode + ?Sized> Encode for &T {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        (**self).encode(encoder, plugin)
+        (**self).encode(encoder, plugin, session)
     }
 }
 
@@ -397,8 +457,9 @@ impl<T: Encode + ?Sized> Encode for &mut T {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        (**self).encode(encoder, plugin)
+        (**self).encode(encoder, plugin, session)
     }
 }
 
@@ -407,8 +468,9 @@ impl<T: Encode + ?Sized> Encode for Box<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        (**self).encode(encoder, plugin)
+        (**self).encode(encoder, plugin, session)
     }
 }
 
@@ -417,8 +479,9 @@ impl<T: Encode + ?Sized> Encode for Rc<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        (**self).encode(encoder, plugin)
+        (**self).encode(encoder, plugin, session)
     }
 }
 
@@ -427,8 +490,9 @@ impl<T: Encode + ?Sized> Encode for Arc<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        (**self).encode(encoder, plugin)
+        (**self).encode(encoder, plugin, session)
     }
 }
 
@@ -437,8 +501,9 @@ impl<T: Encode + ToOwned + ?Sized> Encode for Cow<'_, T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        (**self).encode(encoder, plugin)
+        (**self).encode(encoder, plugin, session)
     }
 }
 
@@ -451,11 +516,12 @@ impl<T: Encode> Encode for Option<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         match self {
             Some(v) => {
                 encoder.emit_bool(true)?;
-                v.encode(encoder, plugin)
+                v.encode(encoder, plugin, session)
             }
             None => encoder.emit_bool(false),
         }
@@ -467,15 +533,16 @@ impl<T: Encode, U: Encode> Encode for Result<T, U> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         match self {
             Ok(v) => {
                 encoder.emit_bool(true)?;
-                v.encode(encoder, plugin)
+                v.encode(encoder, plugin, session)
             }
             Err(e) => {
                 encoder.emit_bool(false)?;
-                e.encode(encoder, plugin)
+                e.encode(encoder, plugin, session)
             }
         }
     }
@@ -490,10 +557,11 @@ impl<T: Encode> Encode for Vec<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for item in self {
-            item.encode(encoder, plugin)?;
+            item.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -504,10 +572,11 @@ impl<T: Encode> Encode for VecDeque<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for item in self {
-            item.encode(encoder, plugin)?;
+            item.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -518,10 +587,11 @@ impl<T: Encode> Encode for LinkedList<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for item in self {
-            item.encode(encoder, plugin)?;
+            item.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -532,9 +602,10 @@ impl<T: Encode, const N: usize> Encode for [T; N] {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         for item in self {
-            item.encode(encoder, plugin)?;
+            item.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -545,10 +616,11 @@ impl<T: Encode> Encode for [T] {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for item in self {
-            item.encode(encoder, plugin)?;
+            item.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -559,11 +631,12 @@ impl<K: Encode, V: Encode, S: BuildHasher> Encode for HashMap<K, V, S> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for (key, value) in self {
-            key.encode(encoder, plugin)?;
-            value.encode(encoder, plugin)?;
+            key.encode(encoder, plugin, session)?;
+            value.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -574,10 +647,11 @@ impl<T: Encode, S: BuildHasher> Encode for HashSet<T, S> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for item in self {
-            item.encode(encoder, plugin)?;
+            item.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -588,11 +662,12 @@ impl<K: Encode, V: Encode> Encode for BTreeMap<K, V> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for (key, value) in self {
-            key.encode(encoder, plugin)?;
-            value.encode(encoder, plugin)?;
+            key.encode(encoder, plugin, session)?;
+            value.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -603,10 +678,11 @@ impl<T: Encode> Encode for BTreeSet<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for item in self {
-            item.encode(encoder, plugin)?;
+            item.encode(encoder, plugin, session)?;
         }
         Ok(())
     }
@@ -621,6 +697,7 @@ impl Encode for () {
         &self,
         _encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -634,10 +711,11 @@ macro_rules! impl_encode_tuple {
                 &self,
                 encoder: &mut E,
                 plugin: &Plugin,
+                session: &mut Session,
             ) -> io::Result<()> {
                 let ($($name,)+) = self;
                 $(
-                    $name.encode(encoder, plugin)?;
+                    $name.encode(encoder, plugin, session)?;
                 )+
                 Ok(())
             }
@@ -667,6 +745,7 @@ impl<T: Encode> Encode for std::marker::PhantomData<T> {
         &self,
         _encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -677,9 +756,10 @@ impl Encode for std::time::Duration {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.as_secs().encode(encoder, plugin)?;
-        self.subsec_nanos().encode(encoder, plugin)?;
+        self.as_secs().encode(encoder, plugin, session)?;
+        self.subsec_nanos().encode(encoder, plugin, session)?;
         Ok(())
     }
 }
@@ -689,8 +769,9 @@ impl<T: Encode + Copy> Encode for std::cell::Cell<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.get().encode(encoder, plugin)
+        self.get().encode(encoder, plugin, session)
     }
 }
 
@@ -699,8 +780,9 @@ impl<T: Encode + ?Sized> Encode for std::cell::RefCell<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.borrow().encode(encoder, plugin)
+        self.borrow().encode(encoder, plugin, session)
     }
 }
 
@@ -709,8 +791,9 @@ impl<T: Encode> Encode for std::num::Wrapping<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.0.encode(encoder, plugin)
+        self.0.encode(encoder, plugin, session)
     }
 }
 
@@ -719,8 +802,9 @@ impl<T: Encode> Encode for std::cmp::Reverse<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.0.encode(encoder, plugin)
+        self.0.encode(encoder, plugin, session)
     }
 }
 
@@ -733,8 +817,9 @@ macro_rules! impl_encode_nonzero {
                     &self,
                     encoder: &mut E,
                     plugin: &Plugin,
+                    session: &mut Session,
                 ) -> io::Result<()> {
-                    self.get().encode(encoder, plugin)
+                    self.get().encode(encoder, plugin, session)
                 }
             }
         )+
@@ -764,9 +849,10 @@ macro_rules! impl_encode_atomic {
                 &self,
                 encoder: &mut E,
                 plugin: &Plugin,
+                session: &mut Session,
             ) -> io::Result<()> {
                 self.load(std::sync::atomic::Ordering::Relaxed)
-                    .encode(encoder, plugin)
+                    .encode(encoder, plugin, session)
             }
         }
     };
@@ -790,9 +876,10 @@ impl<T: Encode> Encode for std::ops::Range<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.start.encode(encoder, plugin)?;
-        self.end.encode(encoder, plugin)?;
+        self.start.encode(encoder, plugin, session)?;
+        self.end.encode(encoder, plugin, session)?;
         Ok(())
     }
 }
@@ -802,9 +889,10 @@ impl<T: Encode> Encode for std::ops::RangeInclusive<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.start().encode(encoder, plugin)?;
-        self.end().encode(encoder, plugin)?;
+        self.start().encode(encoder, plugin, session)?;
+        self.end().encode(encoder, plugin, session)?;
         Ok(())
     }
 }
@@ -814,8 +902,9 @@ impl<T: Encode> Encode for std::ops::RangeFrom<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.start.encode(encoder, plugin)
+        self.start.encode(encoder, plugin, session)
     }
 }
 
@@ -824,8 +913,9 @@ impl<T: Encode> Encode for std::ops::RangeTo<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.end.encode(encoder, plugin)
+        self.end.encode(encoder, plugin, session)
     }
 }
 
@@ -834,8 +924,9 @@ impl<T: Encode> Encode for std::ops::RangeToInclusive<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
-        self.end.encode(encoder, plugin)
+        self.end.encode(encoder, plugin, session)
     }
 }
 
@@ -844,6 +935,7 @@ impl Encode for std::ops::RangeFull {
         &self,
         _encoder: &mut E,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -854,16 +946,17 @@ impl<T: Encode> Encode for std::ops::Bound<T> {
         &self,
         encoder: &mut E,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<()> {
         match self {
             Self::Unbounded => encoder.emit_u8(0),
             Self::Included(v) => {
                 encoder.emit_u8(1)?;
-                v.encode(encoder, plugin)
+                v.encode(encoder, plugin, session)
             }
             Self::Excluded(v) => {
                 encoder.emit_u8(2)?;
-                v.encode(encoder, plugin)
+                v.encode(encoder, plugin, session)
             }
         }
     }

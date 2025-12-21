@@ -584,7 +584,7 @@ pub fn encode<T: crate::Encode>(
     plugin: &crate::Plugin,
 ) -> io::Result<Vec<u8>> {
     let mut encoder = PostcardEncoder::new(Vec::new());
-    value.encode(&mut encoder, plugin)?;
+    encoder.encode(value, plugin)?;
     Ok(encoder.into_inner())
 }
 
@@ -608,7 +608,7 @@ pub fn decode<T: crate::Decode>(
     plugin: &crate::Plugin,
 ) -> io::Result<T> {
     let mut decoder = PostcardDecoder::new(bytes);
-    T::decode(&mut decoder, plugin)
+    decoder.decode(plugin)
 }
 
 #[cfg(test)]

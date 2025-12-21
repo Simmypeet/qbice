@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::plugin::Plugin;
+use crate::{plugin::Plugin, session::Session};
 
 /// A trait for types that can deserialize primitive values from a binary
 /// format.
@@ -181,6 +181,41 @@ pub trait Decoder {
         let len = self.read_usize()?;
         self.read_raw_bytes(len)
     }
+
+    /// Decodes a value of type `D` from this decoder.
+    ///
+    /// This is the primary entry point for decoding values. It creates a new
+    /// [`Session`] and invokes [`Decode::decode`] on the target type, managing
+    /// session state automatically.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `D`: The type to decode. Must implement [`Decode`].
+    ///
+    /// # Arguments
+    ///
+    /// * `plugin` - Plugin context for custom deserialization strategies.
+    ///
+    /// # Returns
+    ///
+    /// The decoded value of type `D`, or an I/O error if decoding fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use qbice_serialize::{decode::Decoder, plugin::Plugin};
+    ///
+    /// fn decode_point<D: Decoder>(decoder: &mut D, plugin: &Plugin) -> std::io::Result<(i32, i32)> {
+    ///     let x: i32 = decoder.decode(plugin)?;
+    ///     let y: i32 = decoder.decode(plugin)?;
+    ///     Ok((x, y))
+    /// }
+    /// ```
+    fn decode<D: Decode>(&mut self, plugin: &Plugin) -> io::Result<D> {
+        let mut session = Session::new();
+
+        D::decode(self, plugin, &mut session)
+    }
 }
 
 /// A trait for types that can be deserialized.
@@ -226,6 +261,7 @@ pub trait Decode: Sized {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self>;
 }
 
@@ -237,6 +273,7 @@ impl Decode for u8 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_u8()
     }
@@ -246,6 +283,7 @@ impl Decode for u16 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_u16()
     }
@@ -255,6 +293,7 @@ impl Decode for u32 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_u32()
     }
@@ -264,6 +303,7 @@ impl Decode for u64 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_u64()
     }
@@ -273,6 +313,7 @@ impl Decode for u128 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_u128()
     }
@@ -282,6 +323,7 @@ impl Decode for usize {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_usize()
     }
@@ -291,6 +333,7 @@ impl Decode for i8 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_i8()
     }
@@ -300,6 +343,7 @@ impl Decode for i16 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_i16()
     }
@@ -309,6 +353,7 @@ impl Decode for i32 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_i32()
     }
@@ -318,6 +363,7 @@ impl Decode for i64 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_i64()
     }
@@ -327,6 +373,7 @@ impl Decode for i128 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_i128()
     }
@@ -336,6 +383,7 @@ impl Decode for isize {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_isize()
     }
@@ -345,6 +393,7 @@ impl Decode for bool {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_bool()
     }
@@ -354,6 +403,7 @@ impl Decode for char {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_char()
     }
@@ -363,6 +413,7 @@ impl Decode for f32 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_f32()
     }
@@ -372,6 +423,7 @@ impl Decode for f64 {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_f64()
     }
@@ -381,6 +433,7 @@ impl Decode for String {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         decoder.read_str()
     }
@@ -394,8 +447,9 @@ impl<T: Decode> Decode for Box<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(Self::new(T::decode(decoder, plugin)?))
+        Ok(Self::new(T::decode(decoder, plugin, session)?))
     }
 }
 
@@ -403,8 +457,9 @@ impl<T: Decode> Decode for Rc<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(Self::new(T::decode(decoder, plugin)?))
+        Ok(Self::new(T::decode(decoder, plugin, session)?))
     }
 }
 
@@ -412,8 +467,9 @@ impl<T: Decode> Decode for Arc<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(Self::new(T::decode(decoder, plugin)?))
+        Ok(Self::new(T::decode(decoder, plugin, session)?))
     }
 }
 
@@ -421,11 +477,12 @@ impl<T: Decode> Decode for Box<[T]> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
-            vec.push(T::decode(decoder, plugin)?);
+            vec.push(T::decode(decoder, plugin, session)?);
         }
         Ok(vec.into_boxed_slice())
     }
@@ -435,11 +492,12 @@ impl<T: Decode> Decode for Arc<[T]> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
-            vec.push(T::decode(decoder, plugin)?);
+            vec.push(T::decode(decoder, plugin, session)?);
         }
         Ok(Self::from(vec))
     }
@@ -452,8 +510,9 @@ where
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(Cow::Owned(T::Owned::decode(decoder, plugin)?))
+        Ok(Cow::Owned(T::Owned::decode(decoder, plugin, session)?))
     }
 }
 
@@ -465,9 +524,14 @@ impl<T: Decode> Decode for Option<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let is_some = decoder.read_bool()?;
-        if is_some { Ok(Some(T::decode(decoder, plugin)?)) } else { Ok(None) }
+        if is_some {
+            Ok(Some(T::decode(decoder, plugin, session)?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -475,12 +539,13 @@ impl<T: Decode, E: Decode> Decode for Result<T, E> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let is_ok = decoder.read_bool()?;
         if is_ok {
-            Ok(Ok(T::decode(decoder, plugin)?))
+            Ok(Ok(T::decode(decoder, plugin, session)?))
         } else {
-            Ok(Err(E::decode(decoder, plugin)?))
+            Ok(Err(E::decode(decoder, plugin, session)?))
         }
     }
 }
@@ -493,11 +558,12 @@ impl<T: Decode> Decode for Vec<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut vec = Self::with_capacity(len);
         for _ in 0..len {
-            vec.push(T::decode(decoder, plugin)?);
+            vec.push(T::decode(decoder, plugin, session)?);
         }
         Ok(vec)
     }
@@ -507,11 +573,12 @@ impl<T: Decode> Decode for VecDeque<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut deque = Self::with_capacity(len);
         for _ in 0..len {
-            deque.push_back(T::decode(decoder, plugin)?);
+            deque.push_back(T::decode(decoder, plugin, session)?);
         }
         Ok(deque)
     }
@@ -521,11 +588,12 @@ impl<T: Decode> Decode for LinkedList<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut list = Self::new();
         for _ in 0..len {
-            list.push_back(T::decode(decoder, plugin)?);
+            list.push_back(T::decode(decoder, plugin, session)?);
         }
         Ok(list)
     }
@@ -535,6 +603,7 @@ impl<T: Decode, const N: usize> Decode for [T; N] {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         // Use array::try_from_fn when it's stable, for now use manual
         // initialization
@@ -542,7 +611,7 @@ impl<T: Decode, const N: usize> Decode for [T; N] {
             unsafe { std::mem::MaybeUninit::uninit().assume_init() };
 
         for (i, slot) in array.iter_mut().enumerate() {
-            match T::decode(decoder, plugin) {
+            match T::decode(decoder, plugin, session) {
                 Ok(value) => {
                     slot.write(value);
                 }
@@ -572,12 +641,13 @@ where
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut map = Self::with_capacity_and_hasher(len, S::default());
         for _ in 0..len {
-            let key = K::decode(decoder, plugin)?;
-            let value = V::decode(decoder, plugin)?;
+            let key = K::decode(decoder, plugin, session)?;
+            let value = V::decode(decoder, plugin, session)?;
             map.insert(key, value);
         }
         Ok(map)
@@ -592,11 +662,12 @@ where
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut set = Self::with_capacity_and_hasher(len, S::default());
         for _ in 0..len {
-            set.insert(T::decode(decoder, plugin)?);
+            set.insert(T::decode(decoder, plugin, session)?);
         }
         Ok(set)
     }
@@ -606,12 +677,13 @@ impl<K: Decode + Ord, V: Decode> Decode for BTreeMap<K, V> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut map = Self::new();
         for _ in 0..len {
-            let key = K::decode(decoder, plugin)?;
-            let value = V::decode(decoder, plugin)?;
+            let key = K::decode(decoder, plugin, session)?;
+            let value = V::decode(decoder, plugin, session)?;
             map.insert(key, value);
         }
         Ok(map)
@@ -622,11 +694,12 @@ impl<T: Decode + Ord> Decode for BTreeSet<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let len = decoder.read_usize()?;
         let mut set = Self::new();
         for _ in 0..len {
-            set.insert(T::decode(decoder, plugin)?);
+            set.insert(T::decode(decoder, plugin, session)?);
         }
         Ok(set)
     }
@@ -640,6 +713,7 @@ impl Decode for () {
     fn decode<D: Decoder + ?Sized>(
         _decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         Ok(())
     }
@@ -651,9 +725,10 @@ macro_rules! impl_decode_tuple {
             fn decode<D: Decoder + ?Sized>(
                 decoder: &mut D,
                 plugin: &Plugin,
+                session: &mut Session,
             ) -> io::Result<Self> {
                 Ok(($(
-                    $name::decode(decoder, plugin)?,
+                    $name::decode(decoder, plugin, session)?,
                 )+))
             }
         }
@@ -681,6 +756,7 @@ impl<T> Decode for std::marker::PhantomData<T> {
     fn decode<D: Decoder + ?Sized>(
         _decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         Ok(Self)
     }
@@ -690,9 +766,10 @@ impl Decode for std::time::Duration {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        let secs = u64::decode(decoder, plugin)?;
-        let nanos = u32::decode(decoder, plugin)?;
+        let secs = u64::decode(decoder, plugin, session)?;
+        let nanos = u32::decode(decoder, plugin, session)?;
         Ok(Self::new(secs, nanos))
     }
 }
@@ -701,8 +778,9 @@ impl<T: Decode + Copy> Decode for std::cell::Cell<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(Self::new(T::decode(decoder, plugin)?))
+        Ok(Self::new(T::decode(decoder, plugin, session)?))
     }
 }
 
@@ -710,8 +788,9 @@ impl<T: Decode> Decode for std::cell::RefCell<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(Self::new(T::decode(decoder, plugin)?))
+        Ok(Self::new(T::decode(decoder, plugin, session)?))
     }
 }
 
@@ -719,8 +798,9 @@ impl<T: Decode> Decode for std::num::Wrapping<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(Self(T::decode(decoder, plugin)?))
+        Ok(Self(T::decode(decoder, plugin, session)?))
     }
 }
 
@@ -728,8 +808,9 @@ impl<T: Decode> Decode for std::cmp::Reverse<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(Self(T::decode(decoder, plugin)?))
+        Ok(Self(T::decode(decoder, plugin, session)?))
     }
 }
 
@@ -740,8 +821,9 @@ macro_rules! impl_decode_nonzero {
             fn decode<D: Decoder + ?Sized>(
                 decoder: &mut D,
                 plugin: &Plugin,
+                session: &mut Session,
             ) -> io::Result<Self> {
-                let value = <$inner>::decode(decoder, plugin)?;
+                let value = <$inner>::decode(decoder, plugin, session)?;
                 <$ty>::new(value).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -777,8 +859,9 @@ macro_rules! impl_decode_atomic {
             fn decode<D: Decoder + ?Sized>(
                 decoder: &mut D,
                 plugin: &Plugin,
+                session: &mut Session,
             ) -> io::Result<Self> {
-                Ok(<$atomic>::new(<$inner>::decode(decoder, plugin)?))
+                Ok(<$atomic>::new(<$inner>::decode(decoder, plugin, session)?))
             }
         }
     };
@@ -801,9 +884,10 @@ impl<T: Decode> Decode for std::ops::Range<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        let start = T::decode(decoder, plugin)?;
-        let end = T::decode(decoder, plugin)?;
+        let start = T::decode(decoder, plugin, session)?;
+        let end = T::decode(decoder, plugin, session)?;
         Ok(start..end)
     }
 }
@@ -812,9 +896,10 @@ impl<T: Decode> Decode for std::ops::RangeInclusive<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        let start = T::decode(decoder, plugin)?;
-        let end = T::decode(decoder, plugin)?;
+        let start = T::decode(decoder, plugin, session)?;
+        let end = T::decode(decoder, plugin, session)?;
         Ok(start..=end)
     }
 }
@@ -823,8 +908,9 @@ impl<T: Decode> Decode for std::ops::RangeFrom<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(T::decode(decoder, plugin)?..)
+        Ok(T::decode(decoder, plugin, session)?..)
     }
 }
 
@@ -832,8 +918,9 @@ impl<T: Decode> Decode for std::ops::RangeTo<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(..T::decode(decoder, plugin)?)
+        Ok(..T::decode(decoder, plugin, session)?)
     }
 }
 
@@ -841,8 +928,9 @@ impl<T: Decode> Decode for std::ops::RangeToInclusive<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
-        Ok(..=T::decode(decoder, plugin)?)
+        Ok(..=T::decode(decoder, plugin, session)?)
     }
 }
 
@@ -850,6 +938,7 @@ impl Decode for std::ops::RangeFull {
     fn decode<D: Decoder + ?Sized>(
         _decoder: &mut D,
         _plugin: &Plugin,
+        _session: &mut Session,
     ) -> io::Result<Self> {
         Ok(..)
     }
@@ -859,12 +948,13 @@ impl<T: Decode> Decode for std::ops::Bound<T> {
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
+        session: &mut Session,
     ) -> io::Result<Self> {
         let tag = decoder.read_u8()?;
         match tag {
             0 => Ok(Self::Unbounded),
-            1 => Ok(Self::Included(T::decode(decoder, plugin)?)),
-            2 => Ok(Self::Excluded(T::decode(decoder, plugin)?)),
+            1 => Ok(Self::Included(T::decode(decoder, plugin, session)?)),
+            2 => Ok(Self::Excluded(T::decode(decoder, plugin, session)?)),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("invalid Bound tag: {tag}"),
