@@ -4,9 +4,9 @@
 //! databases in a backend-agnostic way. It provides abstractions for logical
 //! data structures, column families, transactions, and async access patterns.
 
-use std::hash::Hash;
+use std::{hash::Hash, marker::PhantomData};
 
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
 
@@ -71,9 +71,9 @@ impl StorageMode for Normal {}
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]
-pub struct KeyOfSet;
+pub struct KeyOfSet<T>(PhantomData<T>);
 
-impl StorageMode for KeyOfSet {}
+impl<T> StorageMode for KeyOfSet<T> {}
 
 /// Represents a column (or table) in the key-value database.
 ///
@@ -120,18 +120,24 @@ pub trait WriteTransaction {
 
     /// Insert a value into the set associated with the given key in a
     /// [`KeyOfSet`] column.
-    fn insert_member<C: Column<Mode = KeyOfSet>>(
+    fn insert_member<
+        V: Encode + Decode + Clone + 'static + Send + Sync,
+        C: Column<Mode = KeyOfSet<V>>,
+    >(
         &self,
         key: &<C as Column>::Key,
-        value: &<C as Column>::Value,
+        value: &V,
     );
 
     /// Delete a value from the set associated with the given key in a
     /// [`KeyOfSet`] column.
-    fn delete_member<C: Column<Mode = KeyOfSet>>(
+    fn delete_member<
+        V: Encode + Decode + Clone + 'static + Send + Sync,
+        C: Column<Mode = KeyOfSet<V>>,
+    >(
         &self,
         key: &<C as Column>::Key,
-        value: &<C as Column>::Value,
+        value: &V,
     );
 
     /// Commits all pending write operations to the database.
@@ -187,10 +193,30 @@ pub trait KvDatabase: 'static + Send + Sync {
     /// specified column.
     ///
     /// Returns a stream of values in the set.
-    fn scan_members<'s, C: Column<Mode = KeyOfSet>>(
+    fn scan_members<
+        's,
+        V: Encode + Decode + Clone + 'static + Send + Sync,
+        C: Column<Mode = KeyOfSet<V>>,
+    >(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Stream<Item = <C as Column>::Value> + Send + use<'s, Self, C>;
+    ) -> impl Stream<Item = V> + Send + use<'s, Self, C, V>;
+
+    /// Collects all members of the set associated with the given key in the
+    /// specified column.
+    fn collect_key_of_set<
+        's,
+        V: Encode + Decode + Clone + 'static + Send + Sync,
+        C: Column<Mode = KeyOfSet<V>>,
+    >(
+        &'s self,
+        key: &'s C::Key,
+    ) -> impl std::future::Future<Output = C::Value> + Send + use<'s, Self, C, V>
+    where
+        C::Value: Extend<V> + Default,
+    {
+        async move { self.scan_members::<V, C>(key).collect().await }
+    }
 
     /// Creates a new write transaction for batching multiple write operations.
     ///

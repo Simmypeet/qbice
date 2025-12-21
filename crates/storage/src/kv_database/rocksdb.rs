@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use futures::{Stream, stream};
 use parking_lot::Mutex;
 use qbice_serialize::{
-    Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
+    Decode, Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
 };
 use qbice_stable_type_id::StableTypeID;
 use rust_rocksdb::{
@@ -273,10 +273,13 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
         self.db.buffer_pool.return_buffer(value_buffer);
     }
 
-    fn insert_member<C: Column<Mode = KeyOfSet>>(
+    fn insert_member<
+        V: Encode + Decode + Clone + 'static + Send + Sync,
+        C: Column<Mode = KeyOfSet<V>>,
+    >(
         &self,
         key: &<C as Column>::Key,
-        value: &<C as Column>::Value,
+        value: &V,
     ) {
         let cf = self.db.get_or_create_cf::<C>();
         let mut buffer = self.db.buffer_pool.get_buffer();
@@ -291,10 +294,13 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
         self.db.buffer_pool.return_buffer(buffer);
     }
 
-    fn delete_member<C: Column<Mode = KeyOfSet>>(
+    fn delete_member<
+        V: Encode + Decode + Clone + 'static + Send + Sync,
+        C: Column<Mode = KeyOfSet<V>>,
+    >(
         &self,
         key: &<C as Column>::Key,
-        value: &<C as Column>::Value,
+        value: &V,
     ) {
         let cf = self.db.get_or_create_cf::<C>();
         let mut buffer = self.db.buffer_pool.get_buffer();
@@ -348,10 +354,14 @@ impl KvDatabase for RocksDB {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn scan_members<'s, C: Column<Mode = KeyOfSet>>(
+    fn scan_members<
+        's,
+        V: Encode + Decode + Clone + 'static + Send + Sync,
+        C: Column<Mode = KeyOfSet<V>>,
+    >(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Stream<Item = <C as Column>::Value> + Send {
+    ) -> impl Stream<Item = V> + Send {
         let cf = self.get_or_create_cf::<C>();
         let mut prefix_buffer = self.buffer_pool.get_buffer();
         self.encode_value_length_prefixed(key, &mut prefix_buffer);
@@ -367,9 +377,7 @@ impl KvDatabase for RocksDB {
             let mut decoder =
                 PostcardDecoder::new(std::io::Cursor::new(&key[8 + length..]));
 
-            decoder
-                .decode::<C::Value>(&self.plugin)
-                .expect("decoding should not fail")
+            decoder.decode::<V>(&self.plugin).expect("decoding should not fail")
         });
 
         stream::iter(iter)

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use qbice_stable_type_id::Identifiable;
 
 use super::*;
@@ -19,8 +21,8 @@ struct TestSetColumn;
 
 impl Column for TestSetColumn {
     type Key = String;
-    type Value = u32;
-    type Mode = KeyOfSet;
+    type Value = HashSet<u32>;
+    type Mode = KeyOfSet<u32>;
 }
 
 #[tokio::test]
@@ -40,30 +42,29 @@ async fn basic_put_get() {
 
 #[tokio::test]
 async fn set_operations() {
-    use futures::StreamExt;
-
     let temp_dir = tempfile::tempdir().unwrap();
     let db = RocksDB::open(temp_dir.path(), Plugin::new()).unwrap();
 
     let tx = db.write_transaction();
-    tx.insert_member::<TestSetColumn>(&"set1".to_string(), &1);
-    tx.insert_member::<TestSetColumn>(&"set1".to_string(), &2);
-    tx.insert_member::<TestSetColumn>(&"set1".to_string(), &3);
-    tx.insert_member::<TestSetColumn>(&"set2".to_string(), &10);
+    tx.insert_member::<u32, TestSetColumn>(&"set1".to_string(), &1);
+    tx.insert_member::<u32, TestSetColumn>(&"set1".to_string(), &2);
+    tx.insert_member::<u32, TestSetColumn>(&"set1".to_string(), &3);
+    tx.insert_member::<u32, TestSetColumn>(&"set2".to_string(), &10);
     tx.commit();
 
-    let members: Vec<u32> =
-        db.scan_members::<TestSetColumn>(&"set1".to_string()).collect().await;
+    let members =
+        db.collect_key_of_set::<u32, TestSetColumn>(&"set1".to_string()).await;
 
     assert_eq!(members.len(), 3);
     assert!(members.contains(&1));
     assert!(members.contains(&2));
     assert!(members.contains(&3));
 
-    let members2: Vec<u32> =
-        db.scan_members::<TestSetColumn>(&"set2".to_string()).collect().await;
+    let members2 =
+        db.collect_key_of_set::<u32, TestSetColumn>(&"set2".to_string()).await;
 
-    assert_eq!(members2, vec![10]);
+    assert_eq!(members2.len(), 1);
+    assert!(members2.contains(&10));
 }
 
 #[tokio::test]
