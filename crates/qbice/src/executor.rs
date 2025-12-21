@@ -119,10 +119,7 @@ use qbice_stable_type_id::StableTypeID;
 
 use crate::{
     config::Config,
-    engine::{
-        Engine, TrackedEngine,
-        meta::{CallerInformation, QueryResult},
-    },
+    engine::{Engine, TrackedEngine},
     query::{DynValueBox, ExecutionStyle, Query},
 };
 
@@ -415,18 +412,18 @@ type InvokeExecutorFn<C> = for<'a> fn(
 ) -> Pin<
     Box<dyn Future<Output = Result<DynValueBox<C>, CyclicError>> + Send + 'a>,
 >;
-type InvokeQueryForFn<C> = for<'a> fn(
-    engine: &'a Arc<Engine<C>>,
-    key: &'a dyn Any,
-    called_from: &'a CallerInformation,
-) -> Pin<
-    Box<
-        dyn std::future::Future<
-                Output = Result<QueryResult<DynValueBox<C>>, CyclicError>,
-            > + Send
-            + 'a,
-    >,
->;
+// type InvokeQueryForFn<C> = for<'a> fn(
+//     engine: &'a Arc<Engine<C>>,
+//     key: &'a dyn Any,
+//     called_from: &'a CallerInformation,
+// ) -> Pin<
+//     Box<
+//         dyn std::future::Future<
+//                 Output = Result<QueryResult<DynValueBox<C>>, CyclicError>,
+//             > + Send
+//             + 'a,
+//     >,
+// >;
 type ObtainSccValueFn = for<'a> fn(buffer: &'a mut dyn Any);
 
 type ObtainExecutionStyleFn = fn() -> ExecutionStyle;
@@ -458,7 +455,6 @@ fn obtain_execution_style<
 pub(crate) struct Entry<C: Config> {
     executor: Arc<dyn Any + Send + Sync>,
     invoke_executor: InvokeExecutorFn<C>,
-    invoke_query_for: InvokeQueryForFn<C>,
     obtain_scc_value: ObtainSccValueFn,
     obtain_execution_style: ObtainExecutionStyleFn,
 }
@@ -470,7 +466,6 @@ impl<C: Config> Entry<C> {
         Self {
             executor,
             invoke_executor: invoke_executor::<C, E, Q>,
-            invoke_query_for: Engine::<C>::dynamic_query_for::<Q>,
             obtain_scc_value: obtain_scc_value::<C, E, Q>,
             obtain_execution_style: obtain_execution_style::<C, E, Q>,
         }
@@ -484,14 +479,14 @@ impl<C: Config> Entry<C> {
         (self.invoke_executor)(query_key, self.executor.as_ref(), engine).await
     }
 
-    pub async fn invoke_query_for(
-        &self,
-        engine: &Arc<Engine<C>>,
-        query_key: &(dyn Any + Send + Sync),
-        called_from: &CallerInformation,
-    ) -> Result<QueryResult<DynValueBox<C>>, CyclicError> {
-        (self.invoke_query_for)(engine, query_key, called_from).await
-    }
+    // pub async fn invoke_query_for(
+    //     &self,
+    //     engine: &Arc<Engine<C>>,
+    //     query_key: &(dyn Any + Send + Sync),
+    //     called_from: &CallerInformation,
+    // ) -> Result<QueryResult<DynValueBox<C>>, CyclicError> {
+    //     // (self.invoke_query_for)(engine, query_key, called_from).await
+    // }
 
     pub fn obtain_scc_value<Q: Query>(&self) -> Q::Value {
         let mut buffer = MaybeUninit::<Q::Value>::uninit();

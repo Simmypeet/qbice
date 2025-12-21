@@ -102,27 +102,29 @@
 //! The engine can generate interactive HTML visualizations of the dependency
 //! graph. See [`Engine::visualize_html`] and [`write_html_visualization`].
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
+use qbice_serialize::Plugin;
 use qbice_stable_hash::StableHash;
+use qbice_storage::{intern::SharedInterner, kv_database::KvDatabaseFactory};
 
 use crate::{
     config::{Config, DefaultConfig},
-    engine::{database::Database, meta::CallerInformation},
     executor::{Executor, Registry},
     query::{DynValueBox, Query, QueryID},
 };
 
-mod database;
-mod fingerprint;
-mod visualization;
+mod computation_graph;
+// mod database;
+// mod fingerprint;
+// mod visualization;
 
-pub(super) mod meta;
+// pub(super) mod meta;
 
-pub use visualization::{
-    EdgeInfo, GraphSnapshot, NodeInfo, write_html_visualization,
-};
+// pub use visualization::{
+//     EdgeInfo, GraphSnapshot, NodeInfo, write_html_visualization,
+// };
 
 /// The central query database engine.
 ///
@@ -197,7 +199,8 @@ pub use visualization::{
 /// # }
 /// ```
 pub struct Engine<C: Config> {
-    database: Database<C>,
+    database: Arc<C::Database>,
+    interner: SharedInterner,
     executor_registry: Registry<C>,
 }
 
@@ -258,28 +261,47 @@ impl<C: Config> Engine<C> {
 
 static_assertions::assert_impl_all!(&Engine<DefaultConfig>: Send, Sync);
 
+fn default_shard_amount() -> usize {
+    static SHARD_AMOUNT: OnceLock<usize> = OnceLock::new();
+    *SHARD_AMOUNT.get_or_init(|| {
+        (std::thread::available_parallelism().map_or(1, usize::from) * 4)
+            .next_power_of_two()
+    })
+}
+
 impl<C: Config> Engine<C> {
-    /// Creates a new engine with default settings.
+    /// Creates a new engine instance.
     ///
-    /// The engine starts with:
-    /// - An empty query database
-    /// - An empty executor registry
+    /// # Arguments
     ///
-    /// You must register executors before querying.
+    /// * `serialization_plugin` - A plugin for serializing and deserializing
+    ///   data.
+    /// * `database_factory` - A factory for creating a database.
+    /// * `stable_hasher` - A stable hasher for generating stable hashes.
     ///
-    /// # Example
+    /// # Returns
     ///
-    /// ```rust
-    /// use qbice::{config::DefaultConfig, engine::Engine};
-    ///
-    /// let engine = Engine::<DefaultConfig>::new();
-    /// ```
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            database: Database::default(),
+    /// A new `Engine` instance.
+    pub fn new_with<F: KvDatabaseFactory<KvDatabase = C::Database>>(
+        mut serialization_plugin: Plugin,
+        database_factory: F,
+        stable_hasher: C::BuildStableHasher,
+    ) -> Result<Self, F::Error> {
+        let shared_interner =
+            SharedInterner::new(default_shard_amount(), stable_hasher);
+
+        assert!(
+            serialization_plugin.insert(shared_interner.clone()).is_none(),
+            "should have no existing interning pluging installed"
+        );
+
+        let database = Arc::new(database_factory.open(serialization_plugin)?);
+
+        Ok(Self {
+            database,
+            interner: shared_interner,
             executor_registry: Registry::default(),
-        }
+        })
     }
 
     /// Creates a tracked engine wrapper for querying.
@@ -313,13 +335,9 @@ impl<C: Config> Engine<C> {
         TrackedEngine {
             engine: self,
             cache: Arc::new(DashMap::new()),
-            caller: CallerInformation::User,
+            // caller: CallerInformation::User,
         }
     }
-}
-
-impl<C: Config> Default for Engine<C> {
-    fn default() -> Self { Self::new() }
 }
 
 impl<C: Config> std::fmt::Debug for Engine<C> {
@@ -405,7 +423,7 @@ impl<C: Config> std::fmt::Debug for Engine<C> {
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
-    caller: CallerInformation,
+    // caller: CallerInformation,
 }
 
 impl<C: Config> Clone for TrackedEngine<C> {
@@ -413,7 +431,7 @@ impl<C: Config> Clone for TrackedEngine<C> {
         Self {
             engine: Arc::clone(&self.engine),
             cache: Arc::clone(&self.cache),
-            caller: self.caller,
+            // caller: self.caller,
         }
     }
 }
@@ -424,7 +442,7 @@ impl<C: Config> std::fmt::Debug for TrackedEngine<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrackedEngine")
             .field("engine", &self.engine)
-            .field("caller", &self.caller)
+            // .field("caller", &self.caller)
             .finish_non_exhaustive()
     }
 }

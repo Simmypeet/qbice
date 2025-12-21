@@ -58,6 +58,7 @@
 
 use std::{any::Any, fmt::Debug, hash::Hash};
 
+use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{Sip128Hasher, StableHash, StableHasher};
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 
@@ -272,7 +273,9 @@ pub trait Query:
 ///     }
 /// }
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
+)]
 pub enum ExecutionStyle {
     /// A normal query with standard dependency tracking.
     ///
@@ -318,7 +321,10 @@ pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
     /// Generates a unique identifier for this query instance.
     fn query_identifier(&self, initial_seed: InitialSeed) -> QueryID {
         QueryID {
-            stable_type_id: self.stable_type_id(),
+            stable_type_id: {
+                let id_128 = self.stable_type_id().as_u128();
+                ((id_128 >> 64) as u64, (id_128 & 0xFFFF_FFFF_FFFF_FFFF) as u64)
+            },
             hash_128: {
                 let hash_128 = self.hash_128(initial_seed);
                 (
@@ -418,10 +424,21 @@ impl<C: Config> Hash for dyn DynQuery<C> + '_ {
 /// - Custom visualization
 /// - Advanced introspection
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Encode,
+    Decode,
+    Identifiable,
 )]
 pub struct QueryID {
-    stable_type_id: StableTypeID,
+    stable_type_id: (u64, u64),
     hash_128: (u64, u64),
 }
 
@@ -430,7 +447,14 @@ impl QueryID {
     ///
     /// The type ID uniquely identifies the query's Rust type.
     #[must_use]
-    pub const fn stable_type_id(&self) -> StableTypeID { self.stable_type_id }
+    pub const fn stable_type_id(&self) -> StableTypeID {
+        unsafe {
+            StableTypeID::from_raw_parts(
+                self.stable_type_id.0,
+                self.stable_type_id.1,
+            )
+        }
+    }
 
     /// Returns the 128-bit content hash of this query.
     ///

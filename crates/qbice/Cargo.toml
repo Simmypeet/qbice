@@ -16,6 +16,7 @@ categories = ["caching", "concurrency", "asynchronous"]
 qbice_stable_hash = { version = "0.1.0", path = "../stable_hash" }
 qbice_stable_type_id = { version = "0.1.0", path = "../stable_type_id" }
 qbice_serialize = { version = "0.1.0", path = "../serialize" }
+qbice_storage = { version = "0.1.0", path = "../storage" }
 tokio.workspace = true
 dashmap.workspace = true
 smallbox.workspace = true
@@ -28,6 +29,7 @@ tracing.workspace = true
 tracing-test.workspace = true
 bimap.workspace = true
 crossbeam-utils.workspace = true
+fxhash.workspace = true
 
 
 [lints]

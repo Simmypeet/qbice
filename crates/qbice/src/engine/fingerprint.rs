@@ -1,3 +1,4 @@
+use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{Sip128Hasher, StableHash, StableHasher};
 
 use crate::engine::InitialSeed;
@@ -30,6 +31,8 @@ pub fn calculate_fingerprint<T: StableHash>(
     Hash,
     Default,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct Compact128(u64, u64);
 
