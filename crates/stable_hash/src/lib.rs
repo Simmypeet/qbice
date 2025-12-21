@@ -1014,8 +1014,11 @@ impl Compact128 {
 ///
 /// This trait defines a factory for creating instances of stable hashers.
 pub trait BuildStableHasher {
+    /// The type of hash produced by this builder.
+    type Hash: Value;
+
     /// The type of stable hasher produced by this builder.
-    type Hasher: StableHasher;
+    type Hasher: StableHasher<Hash = Self::Hash>;
 
     /// Creates a new instance of the stable hasher.
     fn build_stable_hasher(&self) -> Self::Hasher;
@@ -1030,6 +1033,8 @@ pub struct BuildStableHasherDefault<H>(PhantomData<fn() -> H>);
 impl<H: StableHasher + Default> BuildStableHasher
     for BuildStableHasherDefault<H>
 {
+    type Hash = H::Hash;
+
     type Hasher = H;
 
     fn build_stable_hasher(&self) -> Self::Hasher { H::default() }
@@ -1051,6 +1056,8 @@ impl<H> SeededStableHasherBuilder<H> {
 impl<H: StableHasher + Default> BuildStableHasher
     for SeededStableHasherBuilder<H>
 {
+    type Hash = H::Hash;
+
     type Hasher = H;
 
     fn build_stable_hasher(&self) -> Self::Hasher {
