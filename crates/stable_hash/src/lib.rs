@@ -1034,3 +1034,28 @@ impl<H: StableHasher + Default> BuildStableHasher
 
     fn build_stable_hasher(&self) -> Self::Hasher { H::default() }
 }
+
+/// A builder for creating seeded stable hashers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SeededStableHasherBuilder<H> {
+    seed: u64,
+    hasher: PhantomData<fn() -> H>,
+}
+
+impl<H> SeededStableHasherBuilder<H> {
+    /// Creates a new seeded stable hasher builder.
+    #[must_use]
+    pub fn new(seed: u64) -> Self { Self { seed, hasher: PhantomData } }
+}
+
+impl<H: StableHasher + Default> BuildStableHasher
+    for SeededStableHasherBuilder<H>
+{
+    type Hasher = H;
+
+    fn build_stable_hasher(&self) -> Self::Hasher {
+        let mut hasher = H::default();
+        self.seed.stable_hash(&mut hasher);
+        hasher
+    }
+}
