@@ -33,6 +33,7 @@
 use std::{
     any::Any,
     collections::HashMap,
+    hash::Hash,
     ops::Deref,
     sync::{Arc, Weak},
 };
@@ -286,13 +287,10 @@ impl SharedInterner {
     /// ```ignore
     /// let interner = SharedInterner::new(16, SipHasher128Builder::default());
     /// ```
-    pub fn new<S: BuildStableHasher + Send + Sync + 'static>(
+    pub fn new<S: BuildStableHasher<Hash = u128> + Send + Sync + 'static>(
         shard_amount: usize,
         hasher_builder: S,
-    ) -> Self
-    where
-        <S as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
-    {
+    ) -> Self {
         Self(Arc::new(Interner::new(shard_amount, hasher_builder)))
     }
 
