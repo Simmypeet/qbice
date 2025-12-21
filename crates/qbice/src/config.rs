@@ -28,6 +28,11 @@
 
 use std::fmt::Debug;
 
+use qbice_stable_hash::{
+    BuildStableHasher, SeededStableHasherBuilder, Sip128Hasher,
+};
+use qbice_storage::kv_database::{KvDatabase, rocksdb::RocksDB};
+
 /// Configuration trait for QBICE engine, allowing customization of various
 /// parameters.
 ///
@@ -62,6 +67,15 @@ pub trait Config: Default + Debug + Send + Sync + 'static {
     /// - `[u8; 32]` - Balanced for moderate-sized keys
     /// - `[u8; 64]` - For larger query keys with multiple fields
     type Storage: Send + Sync + 'static;
+
+    /// The key-value database backend used by the engine.
+    type Database: KvDatabase;
+
+    /// The stable hasher builder used by the engine.
+    type BuildStableHasher: BuildStableHasher<Hash = u128>
+        + Send
+        + Sync
+        + 'static;
 }
 
 /// The default configuration for QBICE.
@@ -82,4 +96,8 @@ pub struct DefaultConfig;
 
 impl Config for DefaultConfig {
     type Storage = [u8; 16];
+
+    type Database = RocksDB;
+
+    type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
 }
