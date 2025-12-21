@@ -10,12 +10,27 @@ use std::{
 };
 
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLockReadGuard};
+use qbice_serialize::{Decode, Encode};
 use tokio::sync::Notify;
 
 use crate::{
-    kv_database::{Column, KvDatabase, Normal},
+    kv_database::{Column, KeyOfSet, KvDatabase, Normal},
     sharded::Sharded,
 };
+
+/// A marker trait representing the storage mode of a column.
+pub trait BackingStorage<V> {
+    /// The type of value stored in the backing storage for this mode.
+    type Value;
+}
+
+impl<V> BackingStorage<V> for Normal {
+    type Value = Option<V>;
+}
+
+impl<ColumnValue, V> BackingStorage<ColumnValue> for KeyOfSet<V> {
+    type Value = ColumnValue;
+}
 
 /// A sharded cache implementation using the SIEVE eviction algorithm.
 ///
@@ -37,8 +52,11 @@ use crate::{
 /// concurrent access. Each shard maintains its own SIEVE state and can be
 /// accessed independently.
 #[allow(clippy::type_complexity)] // shards field
-pub struct Sieve<C: Column, DB, S = BuildHasherDefault<fxhash::FxHasher>> {
-    shards: Sharded<SieveShard<C, S>>,
+pub struct Sieve<C: Column, DB, S = BuildHasherDefault<fxhash::FxHasher>>
+where
+    C::Mode: BackingStorage<C::Value>,
+{
+    shards: Sharded<SieveShard<C, C::Mode, S>>,
     hasher_builder: S,
 
     backing_db: Arc<DB>,
@@ -48,19 +66,17 @@ pub struct Sieve<C: Column, DB, S = BuildHasherDefault<fxhash::FxHasher>> {
 
 impl<C: Column, DB, S> Debug for Sieve<C, DB, S>
 where
+    C::Mode: BackingStorage<C::Value>,
     C::Key: Debug,
     C::Value: Debug,
+    <C::Mode as BackingStorage<C::Value>>::Value: Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut map = f.debug_map();
 
         for shard in self.shards.iter_read_shards() {
             for (key, &index) in &shard.map {
-                let Some(value) =
-                    shard.nodes[index].as_ref().unwrap().value.as_ref()
-                else {
-                    continue;
-                };
+                let value = &shard.nodes[index].as_ref().unwrap().value;
 
                 map.entry(key, value);
             }
@@ -101,7 +117,10 @@ impl<K: Eq + Hash> FetchingGuard<'_, '_, K> {
     }
 }
 
-impl<C: Column, DB, S: Clone> Sieve<C, DB, S> {
+impl<C: Column, DB, S: Clone> Sieve<C, DB, S>
+where
+    C::Mode: BackingStorage<C::Value>,
+{
     /// Creates a new [`Sieve`] cache with the specified configuration.
     ///
     /// # Arguments
@@ -138,7 +157,10 @@ impl<C: Column, DB, S: Clone> Sieve<C, DB, S> {
     }
 }
 
-impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S> {
+impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S>
+where
+    C::Mode: BackingStorage<C::Value>,
+{
     fn shard_index(&self, key: &C::Key) -> usize {
         self.shards.shard_index(self.hasher_builder.hash_one(key))
     }
@@ -181,12 +203,13 @@ impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S> {
     /// however, its internal state mutates the cache by inserting new
     /// values on cache misses.
     #[allow(clippy::cast_possible_truncation)] // from u64 to usize
-    pub async fn get(
+    pub async fn get_normal(
         &self,
         key: &C::Key,
     ) -> Option<MappedRwLockReadGuard<'_, C::Value>>
     where
         C: Column<Mode = Normal>,
+        C::Mode: BackingStorage<C::Value, Value = Option<C::Value>>,
     {
         let shard_index = self.shard_index(key);
 
@@ -209,6 +232,93 @@ impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S> {
             };
 
             let value = self.backing_db.get::<C>(key).await;
+
+            {
+                let mut lock = self.shards.write_shard(shard_index);
+                lock.insert(key.clone(), value.clone());
+            }
+
+            fetching_guard.done();
+
+            // retry again to get the read lock
+        }
+    }
+
+    /// Retrieves a set value from the cache, fetching from the backing database
+    /// if not present.
+    ///
+    /// This method is designed for columns using the [`KeyOfSet`] storage mode,
+    /// where each key maps to a collection of values. On a cache hit, it
+    /// returns immediately with a read guard to the cached collection. On a
+    /// cache miss, it fetches all members of the set from the backing
+    /// database using [`KvDatabase::collect_key_of_set`], inserts the
+    /// result into the cache, and returns the collection.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `V` - The element type stored in the set. Must implement [`Encode`],
+    ///   [`Decode`], [`Clone`], [`Send`], [`Sync`], and have a `'static`
+    ///   lifetime.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up in the cache.
+    ///
+    /// # Returns
+    ///
+    /// A read guard providing access to the cached set value. Unlike
+    /// [`get_normal`](Self::get_normal), this always returns a value (possibly
+    /// an empty collection) since the set storage mode always has a valid
+    /// default state.
+    ///
+    /// # Concurrency
+    ///
+    /// Multiple concurrent calls with the same key will coordinate to avoid
+    /// duplicate database fetches. Only one fetch will be performed, and other
+    /// callers will wait for the result.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// The function is designed to be cancellation-safe. When the database
+    /// fetch is in progress, if cancellation occurs, the internal state remains
+    /// consistent. However, other possible callers waiting for the same
+    /// key may be woken up and will retry fetching the value.
+    ///
+    /// # Deadlocks
+    ///
+    /// This function **can deadlock** if held another [`ReadGuard`] while
+    /// calling this function. Even though the function returns a read lock,
+    /// its internal state mutates the cache by inserting new values on cache
+    /// misses.
+    pub async fn get_set<V: Encode + Decode + Clone + Send + Sync + 'static>(
+        &self,
+        key: &C::Key,
+    ) -> MappedRwLockReadGuard<'_, C::Value>
+    where
+        C: Column<Mode = KeyOfSet<V>>,
+        C::Value: Extend<V> + Default,
+        C::Mode: BackingStorage<C::Value, Value = C::Value>,
+    {
+        let shard_index = self.shard_index(key);
+
+        loop {
+            let lock = self.shards.read_shard(shard_index);
+
+            if let Ok(lock) =
+                RwLockReadGuard::try_map(lock, |x| match x.get(key) {
+                    Retrieve::Hit(entry) => Some(entry),
+                    Retrieve::Miss => None,
+                })
+            {
+                return lock;
+            }
+
+            let Some(fetching_guard) = self.fetching_lock(key).await else {
+                // some thread has already fetched the value, retry
+                continue;
+            };
+
+            let value = self.backing_db.collect_key_of_set::<V, C>(key).await;
 
             {
                 let mut lock = self.shards.write_shard(shard_index);
@@ -248,23 +358,27 @@ impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S> {
     }
 }
 
-struct Node<C: Column> {
+struct Node<C: Column, M: BackingStorage<C::Value>> {
     key: C::Key,
-    value: Option<C::Value>,
+    value: M::Value,
     visited: AtomicBool,
 }
 
 type Index = usize;
 
-struct SieveShard<C: Column, S = BuildHasherDefault<fxhash::FxHasher>> {
+struct SieveShard<
+    C: Column,
+    M: BackingStorage<C::Value>,
+    S = BuildHasherDefault<fxhash::FxHasher>,
+> {
     map: HashMap<C::Key, Index, S>,
-    nodes: Vec<Option<Node<C>>>,
+    nodes: Vec<Option<Node<C, M>>>,
     hand: Index,
 
     active: usize,
 }
 
-impl<C: Column, S> SieveShard<C, S> {
+impl<C: Column, M: BackingStorage<C::Value>, S> SieveShard<C, M, S> {
     fn new(capacity: usize, hasher: S) -> Self {
         let mut nodes = Vec::with_capacity(capacity);
         nodes.resize_with(capacity, || None);
@@ -273,13 +387,15 @@ impl<C: Column, S> SieveShard<C, S> {
     }
 }
 
-enum Retrieve<'x, V> {
-    Hit(&'x Option<V>),
+enum Retrieve<'x, C: Column, M: BackingStorage<C::Value>> {
+    Hit(&'x M::Value),
     Miss,
 }
 
-impl<C: Column, S: BuildHasher> SieveShard<C, S> {
-    fn insert(&mut self, key: C::Key, value: Option<C::Value>) {
+impl<C: Column, M: BackingStorage<C::Value>, S: BuildHasher>
+    SieveShard<C, M, S>
+{
+    fn insert(&mut self, key: C::Key, value: M::Value) {
         // scan for an empty slot
         loop {
             let index = self.hand;
@@ -317,7 +433,7 @@ impl<C: Column, S: BuildHasher> SieveShard<C, S> {
         }
     }
 
-    fn get(&self, key: &C::Key) -> Retrieve<'_, C::Value> {
+    fn get(&self, key: &C::Key) -> Retrieve<'_, C, M> {
         if let Some(&index) = self.map.get(key) {
             let node = self.nodes[index].as_ref().unwrap();
             node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
