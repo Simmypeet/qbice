@@ -368,17 +368,28 @@ impl KvDatabase for RocksDB {
 
         // Use an iterator with prefix seek
         let iter = self.db.prefix_iterator_cf(&cf, &prefix_buffer);
-        let iter = iter.map(|x| {
-            let (key, _) = x.expect("RocksDB iteration error");
-            let length = u64::from_le_bytes(
-                key[0..8].try_into().expect("length prefix should be 8 bytes"),
-            ) as usize;
 
-            let mut decoder =
-                PostcardDecoder::new(std::io::Cursor::new(&key[8 + length..]));
+        // Filter to only include keys that actually start with our prefix.
+        // RocksDB's prefix_iterator doesn't guarantee this - it just starts
+        // at the prefix position and continues iterating.
+        let iter = iter
+            .map(|x| x.expect("RocksDB iteration error"))
+            .take_while(move |(key, _)| key.starts_with(&prefix_buffer))
+            .map(|(key, _)| {
+                let length = u64::from_le_bytes(
+                    key[0..8]
+                        .try_into()
+                        .expect("length prefix should be 8 bytes"),
+                ) as usize;
 
-            decoder.decode::<V>(&self.plugin).expect("decoding should not fail")
-        });
+                let mut decoder = PostcardDecoder::new(std::io::Cursor::new(
+                    &key[8 + length..],
+                ));
+
+                decoder
+                    .decode::<V>(&self.plugin)
+                    .expect("decoding should not fail")
+            });
 
         stream::iter(iter)
     }
