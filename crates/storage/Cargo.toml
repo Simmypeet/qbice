@@ -21,6 +21,7 @@ crossbeam-utils.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+siphasher.workspace = true
 
 [lints]
 workspace = true
