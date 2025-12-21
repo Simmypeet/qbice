@@ -46,6 +46,7 @@
 //! let value = cache.get(&user_id).await;
 //! ```
 
+pub mod intern;
 pub mod kv_database;
 pub mod sieve;
 

@@ -596,6 +596,7 @@ dependencies = [
  "fxhash",
  "parking_lot",
  "qbice_serialize",
+ "qbice_stable_hash",
  "qbice_stable_type_id",
  "rust-rocksdb",
  "tempfile",
