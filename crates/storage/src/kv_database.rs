@@ -8,6 +8,8 @@ use futures::Stream;
 use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
 
+pub mod rocksdb;
+
 /// A trait representing what logical data structure a column is storing.
 ///
 /// KV-databases can efficiently represent different logical data structures
