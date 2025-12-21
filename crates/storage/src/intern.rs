@@ -269,6 +269,44 @@ pub struct Interner {
 #[derive(Debug, Clone)]
 pub struct SharedInterner(Arc<Interner>);
 
+impl SharedInterner {
+    /// Creates a new shared interner with the specified number of shards and
+    /// hasher builder.
+    ///
+    /// This is a convenience method that creates an [`Interner`] and wraps it
+    /// in an `Arc`.
+    ///
+    /// # Parameters
+    ///
+    /// - `shard_amount`: The number of shards to use for concurrent access.
+    /// - `hasher_builder`: The hasher builder used to create stable hashers.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let interner = SharedInterner::new(16, SipHasher128Builder::default());
+    /// ```
+    pub fn new<S: BuildStableHasher + Send + Sync + 'static>(
+        shard_amount: usize,
+        hasher_builder: S,
+    ) -> Self
+    where
+        <S as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
+    {
+        Self(Arc::new(Interner::new(shard_amount, hasher_builder)))
+    }
+
+    /// Creates a shared interner from an existing [`Interner`].
+    ///
+    /// # Parameters
+    ///
+    /// - `interner`: The interner to wrap in an `Arc`.
+    #[must_use]
+    pub fn from_interner(interner: Interner) -> Self {
+        Self(Arc::new(interner))
+    }
+}
+
 impl Deref for SharedInterner {
     type Target = Interner;
 
@@ -453,3 +491,6 @@ impl Interner {
         }
     }
 }
+
+#[cfg(test)]
+mod test;
