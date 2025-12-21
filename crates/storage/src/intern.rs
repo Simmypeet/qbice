@@ -171,11 +171,11 @@ impl<T: Identifiable + StableHash + Encode + Send + Sync + 'static> Encode
 
         if first {
             // serialize the full value
-            encoder.emit_u8(0);
+            encoder.emit_u8(0)?;
             value.encode(encoder, plugin, session)
         } else {
             // serialize only the reference
-            encoder.emit_u8(1);
+            encoder.emit_u8(1)?;
             compact_128.encode(encoder, plugin, session)
         }
     }
