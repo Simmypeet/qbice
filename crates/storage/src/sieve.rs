@@ -10,11 +10,10 @@ use std::{
 };
 
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLockReadGuard};
-use qbice_serialize::{Decode, Encode};
 use tokio::sync::Notify;
 
 use crate::{
-    kv_database::{Column, KeyOfSet, KvDatabase, Normal},
+    kv_database::{Column, KeyOfSet, KeyOfSetMode, KvDatabase, Normal},
     sharded::Sharded,
 };
 
@@ -290,14 +289,15 @@ where
     /// calling this function. Even though the function returns a read lock,
     /// its internal state mutates the cache by inserting new values on cache
     /// misses.
-    pub async fn get_set<V: Encode + Decode + Clone + Send + Sync + 'static>(
+    pub async fn get_set(
         &self,
         key: &C::Key,
     ) -> MappedRwLockReadGuard<'_, C::Value>
     where
-        C: Column<Mode = KeyOfSet<V>>,
-        C::Value: Extend<V> + Default,
-        C::Mode: BackingStorage<C::Value, Value = C::Value>,
+        C: Column,
+        C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
+        C::Value:
+            Extend<<<C as Column>::Mode as KeyOfSetMode>::Value> + Default,
     {
         let shard_index = self.shard_index(key);
 
@@ -318,7 +318,7 @@ where
                 continue;
             };
 
-            let value = self.backing_db.collect_key_of_set::<V, C>(key).await;
+            let value = self.backing_db.collect_key_of_set::<C>(key).await;
 
             {
                 let mut lock = self.shards.write_shard(shard_index);

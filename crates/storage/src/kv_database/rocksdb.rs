@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use futures::{Stream, stream};
 use parking_lot::Mutex;
 use qbice_serialize::{
-    Decode, Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
+    Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
 };
 use qbice_stable_type_id::StableTypeID;
 use rust_rocksdb::{
@@ -18,7 +18,7 @@ use rust_rocksdb::{
     Options, WriteBatch,
 };
 
-use super::{Column, KeyOfSet, KvDatabase, Normal, WriteTransaction};
+use super::{Column, KvDatabase, Normal, WriteTransaction};
 use crate::kv_database::KvDatabaseFactory;
 
 #[derive(Debug)]
@@ -273,14 +273,13 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
         self.db.buffer_pool.return_buffer(value_buffer);
     }
 
-    fn insert_member<
-        V: Encode + Decode + Clone + 'static + Send + Sync,
-        C: Column<Mode = KeyOfSet<V>>,
-    >(
+    fn insert_member<C: Column>(
         &self,
         key: &<C as Column>::Key,
-        value: &V,
-    ) {
+        value: &<<C as Column>::Mode as super::KeyOfSetMode>::Value,
+    ) where
+        <C as Column>::Mode: super::KeyOfSetMode,
+    {
         let cf = self.db.get_or_create_cf::<C>();
         let mut buffer = self.db.buffer_pool.get_buffer();
 
@@ -294,14 +293,13 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
         self.db.buffer_pool.return_buffer(buffer);
     }
 
-    fn delete_member<
-        V: Encode + Decode + Clone + 'static + Send + Sync,
-        C: Column<Mode = KeyOfSet<V>>,
-    >(
+    fn delete_member<C: Column>(
         &self,
         key: &<C as Column>::Key,
-        value: &V,
-    ) {
+        value: &<<C as Column>::Mode as super::KeyOfSetMode>::Value,
+    ) where
+        <C as Column>::Mode: super::KeyOfSetMode,
+    {
         let cf = self.db.get_or_create_cf::<C>();
         let mut buffer = self.db.buffer_pool.get_buffer();
 
@@ -354,14 +352,13 @@ impl KvDatabase for RocksDB {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn scan_members<
-        's,
-        V: Encode + Decode + Clone + 'static + Send + Sync,
-        C: Column<Mode = KeyOfSet<V>>,
-    >(
+    fn scan_members<'s, C: Column>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Stream<Item = V> + Send {
+    ) -> impl Stream<Item = <C::Mode as super::KeyOfSetMode>::Value> + Send
+    where
+        C::Mode: super::KeyOfSetMode,
+    {
         let cf = self.get_or_create_cf::<C>();
         let mut prefix_buffer = self.buffer_pool.get_buffer();
         self.encode_value_length_prefixed(key, &mut prefix_buffer);
@@ -387,7 +384,9 @@ impl KvDatabase for RocksDB {
                 ));
 
                 decoder
-                    .decode::<V>(&self.plugin)
+                    .decode::<<C::Mode as super::KeyOfSetMode>::Value>(
+                        &self.plugin,
+                    )
                     .expect("decoding should not fail")
             });
 

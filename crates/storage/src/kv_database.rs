@@ -22,6 +22,14 @@ pub mod rocksdb;
 /// - Use [`KeyOfSet`] for set membership (`HashMap<K, HashSet<V>>`).
 pub trait StorageMode {}
 
+/// Marker trait for set membership columns (`HashMap<K, HashSet<V>>`).
+///
+/// See [`KeyOfSet`] for more details.
+pub trait KeyOfSetMode: StorageMode {
+    /// The type of each element in the set.
+    type Value: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;
+}
+
 /// Marker type for normal key-value pairs in a column family.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
@@ -75,6 +83,12 @@ pub struct KeyOfSet<T>(PhantomData<T>);
 
 impl<T> StorageMode for KeyOfSet<T> {}
 
+impl<T: Encode + Decode + Hash + Eq + Clone + Send + Sync + 'static>
+    KeyOfSetMode for KeyOfSet<T>
+{
+    type Value = T;
+}
+
 /// Represents a column (or table) in the key-value database.
 ///
 /// Each column defines its key and value types, and a storage mode (`Normal` or
@@ -120,25 +134,21 @@ pub trait WriteTransaction {
 
     /// Insert a value into the set associated with the given key in a
     /// [`KeyOfSet`] column.
-    fn insert_member<
-        V: Encode + Decode + Clone + 'static + Send + Sync,
-        C: Column<Mode = KeyOfSet<V>>,
-    >(
+    fn insert_member<C: Column>(
         &self,
         key: &<C as Column>::Key,
-        value: &V,
-    );
+        value: &<<C as Column>::Mode as KeyOfSetMode>::Value,
+    ) where
+        <C as Column>::Mode: KeyOfSetMode;
 
     /// Delete a value from the set associated with the given key in a
     /// [`KeyOfSet`] column.
-    fn delete_member<
-        V: Encode + Decode + Clone + 'static + Send + Sync,
-        C: Column<Mode = KeyOfSet<V>>,
-    >(
+    fn delete_member<C: Column>(
         &self,
         key: &<C as Column>::Key,
-        value: &V,
-    );
+        value: &<<C as Column>::Mode as KeyOfSetMode>::Value,
+    ) where
+        <C as Column>::Mode: KeyOfSetMode;
 
     /// Commits all pending write operations to the database.
     ///
@@ -193,29 +203,24 @@ pub trait KvDatabase: 'static + Send + Sync {
     /// specified column.
     ///
     /// Returns a stream of values in the set.
-    fn scan_members<
-        's,
-        V: Encode + Decode + Clone + 'static + Send + Sync,
-        C: Column<Mode = KeyOfSet<V>>,
-    >(
+    fn scan_members<'s, C: Column>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Stream<Item = V> + Send + use<'s, Self, C, V>;
+    ) -> impl Stream<Item = <C::Mode as KeyOfSetMode>::Value> + Send + use<'s, Self, C>
+    where
+        C::Mode: KeyOfSetMode;
 
     /// Collects all members of the set associated with the given key in the
     /// specified column.
-    fn collect_key_of_set<
-        's,
-        V: Encode + Decode + Clone + 'static + Send + Sync,
-        C: Column<Mode = KeyOfSet<V>>,
-    >(
+    fn collect_key_of_set<'s, C: Column>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl std::future::Future<Output = C::Value> + Send + use<'s, Self, C, V>
+    ) -> impl std::future::Future<Output = C::Value> + Send + use<'s, Self, C>
     where
-        C::Value: Extend<V> + Default,
+        C::Mode: KeyOfSetMode,
+        C::Value: Extend<<C::Mode as KeyOfSetMode>::Value> + Default,
     {
-        async move { self.scan_members::<V, C>(key).collect().await }
+        async move { self.scan_members::<C>(key).collect().await }
     }
 
     /// Creates a new write transaction for batching multiple write operations.

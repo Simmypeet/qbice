@@ -46,14 +46,14 @@ async fn set_operations() {
     let db = RocksDB::open(temp_dir.path(), Plugin::new()).unwrap();
 
     let tx = db.write_transaction();
-    tx.insert_member::<u32, TestSetColumn>(&"set1".to_string(), &1);
-    tx.insert_member::<u32, TestSetColumn>(&"set1".to_string(), &2);
-    tx.insert_member::<u32, TestSetColumn>(&"set1".to_string(), &3);
-    tx.insert_member::<u32, TestSetColumn>(&"set2".to_string(), &10);
+    tx.insert_member::<TestSetColumn>(&"set1".to_string(), &1);
+    tx.insert_member::<TestSetColumn>(&"set1".to_string(), &2);
+    tx.insert_member::<TestSetColumn>(&"set1".to_string(), &3);
+    tx.insert_member::<TestSetColumn>(&"set2".to_string(), &10);
     tx.commit();
 
     let members =
-        db.collect_key_of_set::<u32, TestSetColumn>(&"set1".to_string()).await;
+        db.collect_key_of_set::<TestSetColumn>(&"set1".to_string()).await;
 
     assert_eq!(members.len(), 3);
     assert!(members.contains(&1));
@@ -61,7 +61,7 @@ async fn set_operations() {
     assert!(members.contains(&3));
 
     let members2 =
-        db.collect_key_of_set::<u32, TestSetColumn>(&"set2".to_string()).await;
+        db.collect_key_of_set::<TestSetColumn>(&"set2".to_string()).await;
 
     assert_eq!(members2.len(), 1);
     assert!(members2.contains(&10));
