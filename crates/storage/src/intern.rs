@@ -37,6 +37,11 @@ use std::{
     sync::{Arc, Weak},
 };
 
+use fxhash::FxHashSet;
+use qbice_serialize::{
+    Decode, Decoder, Encode, Encoder, Plugin,
+    session::{Session, SessionKey},
+};
 use qbice_stable_hash::{
     BuildStableHasher, Compact128, StableHash, StableHasher,
 };
@@ -85,6 +90,147 @@ impl<T> Deref for Interned<T> {
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
+enum WiredInterned<T> {
+    Source(T),
+    Reference(Compact128),
+}
+
+impl<T: Encode> Encode for WiredInterned<T> {
+    fn encode<E: Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Source(value) => {
+                encoder.emit_u8(0)?;
+                value.encode(encoder, plugin, session)
+            }
+            Self::Reference(hash) => {
+                encoder.emit_u8(1)?;
+                hash.encode(encoder, plugin, session)
+            }
+        }
+    }
+}
+
+impl<T: Decode> Decode for WiredInterned<T> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> std::io::Result<Self> {
+        let tag = decoder.read_u8()?;
+        match tag {
+            0 => {
+                let value = T::decode(decoder, plugin, session)?;
+                Ok(Self::Source(value))
+            }
+            1 => {
+                let hash = Compact128::decode(decoder, plugin, session)?;
+                Ok(Self::Reference(hash))
+            }
+
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid tag for WiredInterned",
+            )),
+        }
+    }
+}
+
+/// A session key for tracking seen interned IDs during encoding.
+struct SeenInterned;
+
+impl SessionKey for SeenInterned {
+    type Value = FxHashSet<InternedID>;
+}
+
+impl<T: Identifiable + StableHash + Encode + Send + Sync + 'static> Encode
+    for Interned<T>
+{
+    fn encode<E: Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> std::io::Result<()> {
+        let interner = plugin.get::<SharedInterner>().expect(
+            "`SharedInterner` plugin missing for encoding `Interned<T>`",
+        );
+
+        let value: &T = &self.0;
+        let compact_128 = interner.hash_128(value);
+
+        let seen_interned = session.get_mut_or_default::<SeenInterned>();
+        let first = seen_interned.insert(InternedID {
+            stable_type_id: T::STABLE_TYPE_ID,
+            hash_128: compact_128,
+        });
+
+        if first {
+            // serialize the full value
+            encoder.emit_u8(0);
+            value.encode(encoder, plugin, session)
+        } else {
+            // serialize only the reference
+            encoder.emit_u8(1);
+            compact_128.encode(encoder, plugin, session)
+        }
+    }
+}
+
+impl<T: Identifiable + StableHash + Decode + Send + Sync + 'static> Decode
+    for Interned<T>
+{
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> std::io::Result<Self> {
+        let wired = WiredInterned::<T>::decode(decoder, plugin, session)?;
+        let interner = plugin.get::<SharedInterner>().expect(
+            "`SharedInterner` plugin missing for decoding `Interned<T>`",
+        );
+
+        let value = match wired {
+            WiredInterned::Source(source) => interner.intern(source),
+
+            WiredInterned::Reference(compact128) => interner
+                .get_from_hash::<T>(compact128)
+                .expect("referenced interned value not found in interner"),
+        };
+
+        Ok(value)
+    }
+}
+
+fn stable_hash<H: BuildStableHasher + 'static>(
+    build_hasher: &dyn Any,
+    value: &dyn DynStableHash,
+) -> u128
+where
+    <H as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
+{
+    let build_hasher =
+        build_hasher.downcast_ref::<H>().expect("invalid hasher type");
+
+    let mut hasher = build_hasher.build_stable_hasher();
+    value.stable_hash_dyn(&mut hasher);
+    hasher.finish()
+}
+
+trait DynStableHash {
+    fn stable_hash_dyn(&self, hasher: &mut dyn StableHasher<Hash = u128>);
+}
+
+impl<T: StableHash> DynStableHash for T {
+    fn stable_hash_dyn(&self, hasher: &mut dyn StableHasher<Hash = u128>) {
+        StableHash::stable_hash(self, hasher);
+    }
+}
+
 /// A thread-safe interner for deduplicating values based on their stable hash.
 ///
 /// The `Interner` uses sharding to allow concurrent access from multiple
@@ -110,25 +256,32 @@ impl<T> Deref for Interned<T> {
 /// The interner is fully thread-safe and can be shared across threads using
 /// `Arc<Interner<S>>`. Concurrent intern operations may block briefly on
 /// the same shard but will not deadlock.
-pub struct Interner<S: BuildStableHasher> {
+pub struct Interner {
     shards: Sharded<HashMap<InternedID, Weak<dyn Any + Send + Sync>>>,
-    hasher_builder: S,
+
+    hasher_builder_erased: Box<dyn Any + Send + Sync>,
+    stable_hash_fn: fn(&dyn Any, &dyn DynStableHash) -> u128,
 }
 
-impl<S: BuildStableHasher + std::fmt::Debug> std::fmt::Debug for Interner<S> {
+/// A shared, reference-counted [`Interner<S>`].
+///
+/// See [`Interner<S>`] for details.
+#[derive(Debug, Clone)]
+pub struct SharedInterner(Arc<Interner>);
+
+impl Deref for SharedInterner {
+    type Target = Interner;
+
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl std::fmt::Debug for Interner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Interner")
-            .field("hasher_builder", &self.hasher_builder)
-            .finish_non_exhaustive()
+        f.debug_struct("Interner").finish_non_exhaustive()
     }
 }
 
-impl<S: BuildStableHasher> Interner<S>
-where
-    // only accept stable hasher that produces
-    // 128-bit hashes
-    <S as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
-{
+impl Interner {
     /// Creates a new interner with the specified number of shards and hasher
     /// builder.
     ///
@@ -146,10 +299,17 @@ where
     /// ```ignore
     /// let interner = Interner::new(16, SipHasher128Builder::default());
     /// ```
-    pub fn new(shard_amount: usize, hasher_builder: S) -> Self {
+    pub fn new<S: BuildStableHasher + Send + Sync + 'static>(
+        shard_amount: usize,
+        hasher_builder: S,
+    ) -> Self
+    where
+        <S as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
+    {
         Self {
             shards: Sharded::new(shard_amount, |_| HashMap::new()),
-            hasher_builder,
+            hasher_builder_erased: Box::new(hasher_builder),
+            stable_hash_fn: stable_hash::<S>,
         }
     }
 
@@ -167,9 +327,33 @@ where
     ///
     /// A [`Compact128`] representing the 128-bit hash of the value.
     pub fn hash_128<T: StableHash>(&self, value: &T) -> Compact128 {
-        let mut hasher = self.hasher_builder.build_stable_hasher();
-        value.stable_hash(&mut hasher);
-        hasher.finish().into()
+        let hash_u128 =
+            (self.stable_hash_fn)(&*self.hasher_builder_erased, value);
+
+        hash_u128.into()
+    }
+
+    /// Attempts to retrieve an interned value by its 128-bit hash.
+    pub fn get_from_hash<T: Identifiable + Send + Sync + 'static>(
+        &self,
+        hash_128: Compact128,
+    ) -> Option<Interned<T>> {
+        let shard_index = self.shards.shard_index(hash_128.low());
+
+        let interned_id =
+            InternedID { stable_type_id: T::STABLE_TYPE_ID, hash_128 };
+
+        let read_shard = self.shards.read_shard(shard_index);
+
+        if let Some(arc) = read_shard
+            .get(&interned_id)
+            .and_then(std::sync::Weak::upgrade)
+            .map(|x| x.downcast::<T>().expect("should've been a correct type"))
+        {
+            return Some(Interned(arc));
+        }
+
+        None
     }
 
     /// Interns a value, returning a reference-counted handle to it.
