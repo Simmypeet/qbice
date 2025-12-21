@@ -1,6 +1,8 @@
-//! Key-Value Database Abstraction Layer.
+//! Key-Value Database Abstraction Layer
 //!
-//! This module provides traits for interacting with key-value databases.
+//! This module defines the core traits and types for interacting with key-value
+//! databases in a backend-agnostic way. It provides abstractions for logical
+//! data structures, column families, transactions, and async access patterns.
 
 use std::hash::Hash;
 
@@ -10,19 +12,17 @@ use qbice_stable_type_id::Identifiable;
 
 pub mod rocksdb;
 
-/// A trait representing what logical data structure a column is storing.
+/// Marker trait for logical data structure representation in a column family.
 ///
-/// KV-databases can efficiently represent different logical data structures
-/// using different physical representations. This trait is used to indicate
-/// which logical structure is being represented.
+/// Key-value databases can efficiently represent different logical data
+/// structures using different physical representations. This trait is used to
+/// indicate which logical structure is being represented in a column family.
 ///
-/// - Representing normal `HashMap<K, V>` key-value pairs: [`Normal`].
-/// - Representing `HashMap<K, HashSet<V>>` keys mapping to sets of values :
-///   [`KeyOfSet`].
+/// - Use [`Normal`] for standard key-value pairs (`HashMap<K, V>`).
+/// - Use [`KeyOfSet`] for set membership (`HashMap<K, HashSet<V>>`).
 pub trait StorageMode {}
 
-/// A marker type indicating that this column family is used to represent
-/// normal key-value pairs.
+/// Marker type for normal key-value pairs in a column family.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]
@@ -30,56 +30,44 @@ pub struct Normal;
 
 impl StorageMode for Normal {}
 
-/// A marker type indicating that this column family is used to represent
-/// a key mapping to a set of values
-/// (something equivalent to `HashMap<K  HashSet<V>>`).
+/// Marker type for set membership columns (`HashMap<K, HashSet<V>>`).
 ///
 /// ## Motivation
 ///
-/// When inserting a value into a set associated with a key, in naive
-/// implementation, we need to deserialize the entire set, modify it in memory,
-/// and then serialize it back to the database. This can be inefficient for
-/// large sets. To optimize this, we store the data in physical representation
-/// in different way that allows us to add or remove individual values from the
-/// set without needing to read or write the entire set.
+/// Naively, adding a value to a set in a key-value store requires reading,
+/// modifying, and writing the entire set. This is inefficient for large sets.
+/// Instead, this marker type signals that the set is stored as individual
+/// key-value pairs, where the presence of a key-value pair indicates
+/// membership.
 ///
 /// ## Physical Representation
 ///
-/// The physical representation in the database will be different from a
-/// normal key-value pair. This is how it's represented at the physical level.
+/// For a logical set:
 ///
 /// ```json
 /// {
-///     "keyA": ["value1", "value2", "value3"],
-///     "keyB": ["value4", "value5"]
+///   "keyA": ["value1", "value2"],
+///   "keyB": ["value3"]
 /// }
 /// ```
 ///
-/// Internally, this will be represented as:
+/// The physical storage is:
 ///
 /// ```txt
-/// - '<keyA>|<value1>' -> (empty)
-/// - '<keyA>|<value2>' -> (empty)
-/// - '<keyA>|<value3>' -> (empty)
-/// - '<keyB>|<value4>' -> (empty)
-/// - '<keyB>|<value5>' -> (empty)
+/// '<keyA>|<value1>' -> (empty)
+/// '<keyA>|<value2>' -> (empty)
+/// '<keyB>|<value3>' -> (empty)
 /// ```
 ///
-/// We use the `KeyOfSet` marker type to indicate that the value type is not
-/// actually stored, and the presence of the key-value pair indicates membership
-/// in the set.
+/// The value is not stored; only the key's presence matters.
 ///
-/// **NOTE**: Additionally, it should append a length-prefixed encoding to the
-/// key to avoid prefix collisions. For example, keys "user" and "username"
-/// share the same prefix "user", which could lead to incorrect set
+/// **Note:** A length-prefixed encoding is used to avoid prefix collisions
+/// (e.g., between "user" and "username").
 ///
-/// # Iterating Over Sets
+/// # Iteration
 ///
-/// To iterate over all values in the set of a given key, use the `prefix_scan`
-/// functionality of the underlying `KvDatabase`. For example, to get all values
-/// in the set for `keyA`, you would perform a prefix scan with the prefix
-/// `"<keyA>|"`. This will return all entries that belong to the set associated
-/// with `keyA`.
+/// To iterate all values in a set for a key, use the `scan_members` method of
+/// [`KvDatabase`].
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]
@@ -89,8 +77,9 @@ impl StorageMode for KeyOfSet {}
 
 /// Represents a column (or table) in the key-value database.
 ///
-/// Each column has associated key and value types, which must implement the
-/// `Encodable` and `Decodable` traits for serialization and deserialization.
+/// Each column defines its key and value types, and a storage mode (`Normal` or
+/// `KeyOfSet`). Key and value types must implement [`Encode`] and [`Decode`]
+/// for serialization.
 pub trait Column: 'static + Send + Sync + Identifiable {
     /// The type of keys used in this column.
     type Key: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;
@@ -112,27 +101,25 @@ impl<
     type Mode = Normal;
 }
 
-/// A write transaction that allows batching multiple write operations.
+/// A write transaction for batching multiple write operations atomically.
 ///
-/// Write transactions provide atomicity guarantees - either all operations in
-/// the transaction succeed, or none of them are applied to the database.
+/// Write transactions provide atomicity: either all operations succeed, or none
+/// are applied.
 ///
-/// The write transaction doesn't provide "read your own writes" semantics.
-/// But it does guarantee that the database will only see the committed writes
-/// after `commit` is called.
-///
-/// The implementation must rollback any changes if `commit` is not called
-/// (dropped without commit).
+/// - No "read your own writes" guarantee: reads in the same transaction may not
+///   see uncommitted writes.
+/// - Changes are only visible after `commit` is called.
+/// - If dropped without `commit`, all changes must be rolled back.
 pub trait WriteTransaction {
-    /// If the key already exists, its value will be overwritten.
+    /// Insert or overwrite a key-value pair in a [`Normal`] column.
     fn put<C: Column<Mode = Normal>>(
         &self,
         key: &<C as Column>::Key,
         value: &<C as Column>::Value,
     );
 
-    /// Inserts a member into the set associated with the given key in the
-    /// specified column.
+    /// Insert a value into the set associated with the given key in a
+    /// [`KeyOfSet`] column.
     fn insert_member<C: Column<Mode = KeyOfSet>>(
         &self,
         key: &<C as Column>::Key,
@@ -141,12 +128,14 @@ pub trait WriteTransaction {
 
     /// Commits all pending write operations to the database.
     ///
-    /// We assume that commit always succeeds as it's very difficult to restore
-    /// the invariant that a transaction.
+    /// After commit, all changes become visible to other readers.
+    ///
+    /// Implementations should assume commit always succeeds; rollback on
+    /// failure is not supported.
     fn commit(self);
 }
 
-/// A factory trait for creating instances of a key-value database.
+/// Factory trait for creating instances of a key-value database backend.
 pub trait KvDatabaseFactory {
     /// The type of key-value database produced by this factory.
     type KvDatabase;
@@ -166,10 +155,9 @@ pub trait KvDatabaseFactory {
 ///
 /// This trait abstracts over different key-value storage implementations,
 /// allowing the system to work with various backends (e.g., `RocksDB`, `LMDB`,
-/// in-memory storage, etc.).
+/// in-memory, etc.).
 ///
-/// All operations are async to allow for non-blocking I/O with the underlying
-/// storage.
+/// All operations are async to support non-blocking I/O.
 pub trait KvDatabase: 'static + Send + Sync {
     /// The type of write transaction provided by this database implementation.
     type WriteTransaction<'a>: WriteTransaction + Send
@@ -179,7 +167,7 @@ pub trait KvDatabase: 'static + Send + Sync {
     /// Retrieves the value associated with the given key from the specified
     /// column.
     ///
-    /// Returns `None` if the key does not exist in the database.
+    /// Returns `None` if the key does not exist.
     fn get<'s, C: Column<Mode = Normal>>(
         &'s self,
         key: &'s C::Key,

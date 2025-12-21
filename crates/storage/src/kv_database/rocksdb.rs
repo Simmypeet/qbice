@@ -1,7 +1,8 @@
-//! `RocksDB` backend implementation for the KV database trait.
+//! [`RocksDB`] backend implementation for the key-value database abstraction.
 //!
 //! This module provides a [`RocksDB`] struct that implements the [`KvDatabase`]
-//! trait using `RocksDB` as the underlying storage engine.
+//! trait using [`RocksDB`] as the underlying storage engine. It supports
+//! dynamic column families, efficient buffer reuse, and full thread safety.
 
 use std::{path::Path, sync::Arc};
 
@@ -40,23 +41,23 @@ impl BufferPool {
     }
 }
 
-/// A `RocksDB`-backed key-value database implementation.
+/// A RocksDB-backed key-value database implementation.
 ///
-/// This struct wraps a `RocksDB` instance and provides the [`KvDatabase`] trait
-/// implementation. It manages column families dynamically based on the
-/// [`Column`] types used.
+/// This struct wraps a [`RocksDB`] instance and provides the [`KvDatabase`]
+/// trait implementation.
 ///
 /// # Column Family Management
 ///
-/// Column families are created lazily when first accessed. Each column type
-/// (identified by its [`StableTypeID`]) gets its own column family. The column
-/// family name is derived from the stable type ID to ensure consistency across
-/// restarts.
+/// - Column families are created lazily when first accessed.
+/// - Each column type (identified by its [`StableTypeID`]) gets its own column
+///   family.
+/// - Column family names are derived from the stable type ID for consistency
+///   across restarts.
 ///
 /// # Thread Safety
 ///
-/// This implementation is fully thread-safe and can be shared across multiple
-/// threads. `RocksDB`'s `DBWithThreadMode<MultiThreaded>` is used internally.
+/// This implementation is fully thread-safe and can be shared across threads.
+/// Internally uses `DBWithThreadMode<MultiThreaded>`.
 #[derive(Debug)]
 pub struct RocksDB {
     /// The underlying `RocksDB` instance.
@@ -74,7 +75,7 @@ pub struct RocksDB {
     buffer_pool: BufferPool,
 }
 
-/// A factory for creating `RocksDB` instances.
+/// Factory for creating [`RocksDB`] instances.
 #[derive(Debug)]
 pub struct RocksDBFactory<P> {
     path: P,
@@ -214,10 +215,10 @@ impl RocksDB {
     }
 }
 
-/// A write transaction for the `RocksDB` backend.
+/// Write transaction for the [`RocksDB`] backend.
 ///
-/// This struct batches multiple write operations and commits them atomically
-/// when [`WriteTransaction::commit`] is called.
+/// Batches multiple write operations and commits them atomically when
+/// [`WriteTransaction::commit`] is called.
 pub struct RocksDBWriteTransaction<'a> {
     /// Reference to the parent database.
     db: &'a RocksDB,
