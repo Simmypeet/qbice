@@ -126,6 +126,14 @@ pub trait WriteTransaction {
         value: &<C as Column>::Value,
     );
 
+    /// Delete a value from the set associated with the given key in a
+    /// [`KeyOfSet`] column.
+    fn delete_member<C: Column<Mode = KeyOfSet>>(
+        &self,
+        key: &<C as Column>::Key,
+        value: &<C as Column>::Value,
+    );
+
     /// Commits all pending write operations to the database.
     ///
     /// After commit, all changes become visible to other readers.

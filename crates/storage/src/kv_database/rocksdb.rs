@@ -285,6 +285,22 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
         self.db.buffer_pool.return_buffer(buffer);
     }
 
+    fn delete_member<C: Column<Mode = KeyOfSet>>(
+        &self,
+        key: &<C as Column>::Key,
+        value: &<C as Column>::Value,
+    ) {
+        let cf = self.db.get_or_create_cf::<C>();
+        let mut buffer = self.db.buffer_pool.get_buffer();
+
+        self.db.encode_value_length_prefixed(key, &mut buffer);
+        self.db.encode_value(value, &mut buffer);
+
+        self.batch.lock().delete_cf(&cf, buffer.as_slice());
+
+        self.db.buffer_pool.return_buffer(buffer);
+    }
+
     fn commit(self) {
         let batch = self.batch.into_inner();
         self.db.db.write(&batch).expect("write should not fail");
