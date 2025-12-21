@@ -149,6 +149,12 @@ impl RocksDB {
         })
     }
 
+    /// Creates a factory for opening or creating a `RocksDB` database.
+    #[must_use]
+    pub const fn factory<P: AsRef<Path>>(path: P) -> RocksDBFactory<P> {
+        RocksDBFactory { path }
+    }
+
     /// Generates a column family name from a stable type ID.
     fn cf_name_from_id(id: StableTypeID) -> String {
         format!("cf_{:032x}", id.as_u128())
