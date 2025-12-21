@@ -5,7 +5,7 @@
 use std::hash::Hash;
 
 use futures::Stream;
-use qbice_serialize::{Decode, Encode};
+use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
 
 /// A trait representing what logical data structure a column is storing.
@@ -115,11 +115,13 @@ impl<
 /// Write transactions provide atomicity guarantees - either all operations in
 /// the transaction succeed, or none of them are applied to the database.
 ///
+/// The write transaction doesn't provide "read your own writes" semantics.
+/// But it does guarantee that the database will only see the committed writes
+/// after `commit` is called.
+///
 /// The implementation must rollback any changes if `commit` is not called
 /// (dropped without commit).
 pub trait WriteTransaction {
-    /// Inserts or updates a key-value pair in the specified column.
-    ///
     /// If the key already exists, its value will be overwritten.
     fn put<C: Column<Mode = Normal>>(
         &self,
@@ -140,6 +142,22 @@ pub trait WriteTransaction {
     /// We assume that commit always succeeds as it's very difficult to restore
     /// the invariant that a transaction.
     fn commit(self);
+}
+
+/// A factory trait for creating instances of a key-value database.
+pub trait KvDatabaseFactory {
+    /// The type of key-value database produced by this factory.
+    type KvDatabase;
+
+    /// The error type returned if opening the database fails.
+    type Error;
+
+    /// Opens a new instance of the key-value database with the given
+    /// serialization plugin.
+    fn open(
+        self,
+        serialization_plugin: Plugin,
+    ) -> Result<Self::KvDatabase, Self::Error>;
 }
 
 /// The main interface for a key-value database backend.
