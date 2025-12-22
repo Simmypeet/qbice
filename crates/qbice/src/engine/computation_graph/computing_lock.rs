@@ -55,9 +55,7 @@ impl Computing {
         }
     }
 
-    pub fn query_kind(&self) -> QueryKind {
-        self.callee_info.query_kind.clone()
-    }
+    pub const fn query_kind(&self) -> QueryKind { self.callee_info.query_kind }
 }
 
 pub struct Computing {
