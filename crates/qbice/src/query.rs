@@ -435,6 +435,8 @@ pub struct QueryID {
 }
 
 impl QueryID {
+    /// Creates a new `QueryID` for the given query type and content hash.
+    #[must_use]
     pub fn new<Q: Query>(hash_128: Compact128) -> Self {
         let stable_type_id = Q::STABLE_TYPE_ID.as_u128();
 
