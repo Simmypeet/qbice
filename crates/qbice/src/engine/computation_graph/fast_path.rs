@@ -20,7 +20,7 @@ impl<C: Config> Engine<C> {
         caller: &CallerInformation,
     ) -> Result<FastPathResult<Q::Value>, CyclicError> {
         if let Some(computing) =
-            self.computation_graph.computing_lock.get_lock(query_id)
+            self.computation_graph.computing_lock.try_get_lcok(query_id)
         {
             let notified_owned = computing.notified_owned();
             drop(computing);

@@ -44,7 +44,7 @@ impl ComputingLock {
 }
 
 impl ComputingLock {
-    pub fn get_lock(
+    pub fn try_get_lcok(
         &self,
         query_id: &QueryID,
     ) -> Option<Ref<'_, QueryID, Computing>> {
