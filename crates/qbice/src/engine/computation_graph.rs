@@ -1,7 +1,8 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, marker::MetaSized, sync::Arc};
 
+use fxhash::FxHashSet;
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::Compact128;
+use qbice_stable_hash::{Compact128, StableHash};
 use qbice_stable_type_id::Identifiable;
 use qbice_storage::kv_database::{Column, KeyOfSet, Normal};
 
@@ -9,24 +10,26 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::{Config, DefaultConfig},
     engine::computation_graph::{
-        caller::CallerInformation, computing_lock::ComputingLock,
+        caller::CallerInformation, computed::Computed,
+        computing_lock::ComputingLock, fast_path::FastPathResult,
         query_store::QueryStore,
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, QueryID},
 };
 
+mod caller;
+mod computed;
+mod computing_lock;
+mod fast_path;
+mod query_store;
+mod register_callee;
+
 type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
     Col,
     <Con as Config>::Database,
     <Con as Config>::BuildHasher,
 >;
-
-mod caller;
-mod computing_lock;
-mod fast_path;
-mod query_store;
-mod register_callee;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
@@ -41,70 +44,13 @@ enum QueryKind {
     Executable(ExecutionStyle),
 }
 
-impl QueryKind {
-    pub fn is_projection(&self) -> bool {
-        matches!(self, QueryKind::Executable(ExecutionStyle::Projection))
-    }
-}
-
-type ForwardEdgeColumn = (QueryID, Vec<QueryID>);
-type NodeInfoColumn = (QueryID, NodeInfo);
-
-#[derive(Identifiable)]
-struct DirtySetColumn;
-
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
+    Debug, Clone, PartialEq, Eq, StableHash, Encode, Decode, Identifiable,
 )]
-struct Edge {
-    from: QueryID,
-    to: QueryID,
-}
-
-impl Column for DirtySetColumn {
-    type Key = Edge;
-    type Value = ();
-    type Mode = Normal;
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Encode,
-    Decode,
-    Identifiable,
-)]
-struct NodeInfo {
-    last_verified: Timestamp,
-    query_kind: QueryKind,
-    fingerprint: Compact128,
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
-)]
-struct BackwardEdgeColumn;
-
-impl Column for BackwardEdgeColumn {
-    type Key = QueryID;
-
-    type Value = HashSet<QueryID>;
-
-    type Mode = KeyOfSet<QueryID>;
-}
+pub struct TransitiveFirewallCallees(FxHashSet<QueryID>);
 
 pub struct ComputationGraph<C: Config> {
-    forward_edges: Sieve<(QueryID, Arc<[QueryID]>), C>,
-    node_info: Sieve<(QueryID, NodeInfo), C>,
-    dirty_edge_set: Sieve<DirtySetColumn, C>,
-    backward_edges: Sieve<BackwardEdgeColumn, C>,
-
+    computed: Computed<C>,
     query_store: QueryStore<C>,
     computing_lock: ComputingLock,
 
@@ -119,33 +65,12 @@ impl<C: Config> ComputationGraph<C> {
         build_hasher: C::BuildHasher,
     ) -> Self {
         const CAPACITY: usize = 10_000;
-
         Self {
-            forward_edges: Sieve::<_, C>::new(
-                CAPACITY,
-                shard_amount,
+            computed: Computed::new(
                 db.clone(),
+                shard_amount,
                 build_hasher.clone(),
             ),
-            node_info: Sieve::<_, C>::new(
-                CAPACITY,
-                shard_amount,
-                db.clone(),
-                build_hasher.clone(),
-            ),
-            dirty_edge_set: Sieve::<_, C>::new(
-                CAPACITY,
-                shard_amount,
-                db.clone(),
-                build_hasher.clone(),
-            ),
-            backward_edges: Sieve::<_, C>::new(
-                CAPACITY,
-                shard_amount,
-                db.clone(),
-                build_hasher.clone(),
-            ),
-
             query_store: QueryStore::new(
                 CAPACITY,
                 shard_amount,
