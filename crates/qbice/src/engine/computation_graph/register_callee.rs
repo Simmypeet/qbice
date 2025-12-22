@@ -43,7 +43,7 @@ impl<C: Config> Drop for UndoRegisterCallee<'_, C> {
     }
 }
 impl<C: Config> Engine<C> {
-    fn register_callee(
+    pub(super) fn register_callee(
         &self,
         caller_source: Option<&QueryID>,
         calee_target: QueryID,
