@@ -118,8 +118,8 @@ use std::{
 use qbice_stable_type_id::StableTypeID;
 
 use crate::{
+    TrackedEngine,
     config::Config,
-    engine::TrackedEngine,
     query::{DynValueBox, ExecutionStyle, Query},
 };
 

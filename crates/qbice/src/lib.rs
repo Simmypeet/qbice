@@ -261,7 +261,7 @@ pub mod engine;
 pub mod executor;
 pub mod query;
 
-pub use engine::{Engine, TrackedEngine};
+pub use engine::{Engine, computation_graph::TrackedEngine};
 pub use executor::Executor;
 pub use qbice_serialize::{Decode, Encode};
 pub use qbice_stable_hash::StableHash;

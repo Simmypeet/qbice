@@ -119,7 +119,7 @@ use crate::{
     query::{DynValueBox, Query, QueryID},
 };
 
-mod computation_graph;
+pub(super) mod computation_graph;
 // mod database;
 // mod fingerprint;
 // mod visualization;
