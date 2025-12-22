@@ -191,6 +191,8 @@ pub trait Query:
     + Hash
     + Clone
     + Debug
+    + Encode
+    + Decode
     + Send
     + Sync
     + 'static
@@ -198,7 +200,14 @@ pub trait Query:
     /// The output value type associated with this query.
     ///
     /// This is the type returned when querying the engine for this query key.
-    type Value: 'static + Send + Sync + Clone + Debug + StableHash;
+    type Value: 'static
+        + Send
+        + Sync
+        + Clone
+        + Debug
+        + StableHash
+        + Encode
+        + Decode;
 }
 
 /// Specifies the execution style of a query.
