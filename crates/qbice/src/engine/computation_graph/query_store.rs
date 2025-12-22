@@ -5,6 +5,7 @@ use std::{
 };
 
 use dashmap::DashMap;
+use parking_lot::MappedRwLockReadGuard;
 use qbice_serialize::{Decode, Encode, Plugin, session::Session};
 use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::Identifiable;
@@ -110,5 +111,20 @@ impl<C: Config> QueryStore<C> {
             query_input_hash_128,
             Some(QueryEntry { original_query_input, query_result }),
         );
+    }
+
+    pub async fn get_value<Q: Query>(
+        &self,
+        query_input_hash_128: &Compact128,
+    ) -> Option<Q::Value> {
+        let entry = self.map.get(&TypeId::of::<Q>())?;
+
+        let sieve =
+            (**entry).downcast_ref::<Sieve<QueryColumn<Q>, C>>().unwrap();
+
+        sieve
+            .get_normal(query_input_hash_128)
+            .await
+            .map(|x| x.query_result.clone())
     }
 }
