@@ -73,6 +73,7 @@ pub trait Config: Default + Debug + Send + Sync + 'static {
 
     /// The stable hasher builder used by the engine.
     type BuildStableHasher: BuildStableHasher<Hash = u128>
+        + Clone
         + Send
         + Sync
         + 'static;

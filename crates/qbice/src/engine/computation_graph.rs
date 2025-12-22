@@ -1,14 +1,17 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::Identifiable;
-use qbice_storage::{
-    kv_database::{Column, Normal},
-    sieve::Sieve,
-};
+use qbice_storage::kv_database::{Column, KeyOfSet, Normal};
 
 use crate::{ExecutionStyle, config::Config, query::QueryID};
+
+type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
+    Col,
+    <Con as Config>::Database,
+    <Con as Config>::BuildStableHasher,
+>;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
@@ -62,11 +65,65 @@ struct NodeInfo {
     fingerprint: Compact128,
 }
 
-struct ComputationGraph<C: Config> {
-    forward_edges:
-        Sieve<(QueryID, Arc<[QueryID]>), C::Database, C::BuildStableHasher>,
-    node_info: Sieve<(QueryID, NodeInfo), C::Database, C::BuildStableHasher>,
-    dirty_edge_set: Sieve<DirtySetColumn, C::Database, C::BuildStableHasher>,
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+struct BackwardEdgeColumn;
 
+impl Column for BackwardEdgeColumn {
+    type Key = QueryID;
+
+    type Value = HashSet<QueryID>;
+
+    type Mode = KeyOfSet<QueryID>;
+}
+
+struct ComputationGraph<C: Config> {
+    forward_edges: Sieve<(QueryID, Arc<[QueryID]>), C>,
+    node_info: Sieve<(QueryID, NodeInfo), C>,
+    dirty_edge_set: Sieve<DirtySetColumn, C>,
+    backward_edges: Sieve<BackwardEdgeColumn, C>,
+
+    database: Arc<C::Database>,
     timestamp: Timestamp,
+}
+
+impl<C: Config> ComputationGraph<C> {
+    pub fn new_with(
+        db: Arc<<C as Config>::Database>,
+        shard_amount: usize,
+        builder_stable_hasher: C::BuildStableHasher,
+    ) -> Self {
+        const CAPACITY: usize = 10_000;
+
+        Self {
+            forward_edges: Sieve::<_, C>::new(
+                CAPACITY,
+                shard_amount,
+                db.clone(),
+                builder_stable_hasher.clone(),
+            ),
+            node_info: Sieve::<_, C>::new(
+                CAPACITY,
+                shard_amount,
+                db.clone(),
+                builder_stable_hasher.clone(),
+            ),
+            dirty_edge_set: Sieve::<_, C>::new(
+                CAPACITY,
+                shard_amount,
+                db.clone(),
+                builder_stable_hasher.clone(),
+            ),
+            backward_edges: Sieve::<_, C>::new(
+                CAPACITY,
+                shard_amount,
+                db.clone(),
+                builder_stable_hasher,
+            ),
+
+            database: db,
+            timestamp: Timestamp(0),
+        }
+    }
 }
