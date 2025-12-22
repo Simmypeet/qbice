@@ -111,6 +111,7 @@ use qbice_storage::{intern::SharedInterner, kv_database::KvDatabaseFactory};
 
 use crate::{
     config::{Config, DefaultConfig},
+    engine::computation_graph::ComputationGraph,
     executor::{Executor, Registry},
     query::{DynValueBox, Query, QueryID},
 };
@@ -201,6 +202,7 @@ mod computation_graph;
 pub struct Engine<C: Config> {
     database: Arc<C::Database>,
     interner: SharedInterner,
+    computation_graph: ComputationGraph<C>,
     executor_registry: Registry<C>,
 }
 
@@ -286,6 +288,7 @@ impl<C: Config> Engine<C> {
         mut serialization_plugin: Plugin,
         database_factory: F,
         stable_hasher: C::BuildStableHasher,
+        hasher: C::BuildHasher,
     ) -> Result<Self, F::Error> {
         let shared_interner =
             SharedInterner::new(default_shard_amount(), stable_hasher);
@@ -298,6 +301,11 @@ impl<C: Config> Engine<C> {
         let database = Arc::new(database_factory.open(serialization_plugin)?);
 
         Ok(Self {
+            computation_graph: ComputationGraph::new(
+                database.clone(),
+                default_shard_amount(),
+                hasher,
+            ),
             database,
             interner: shared_interner,
             executor_registry: Registry::default(),

@@ -5,13 +5,19 @@ use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::Identifiable;
 use qbice_storage::kv_database::{Column, KeyOfSet, Normal};
 
-use crate::{ExecutionStyle, config::Config, query::QueryID};
+use crate::{
+    ExecutionStyle, config::Config,
+    engine::computation_graph::query_store::QueryStore, query::QueryID,
+};
 
 type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
     Col,
     <Con as Config>::Database,
-    <Con as Config>::BuildStableHasher,
+    <Con as Config>::BuildHasher,
 >;
+
+mod computing_lock;
+mod query_store;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
@@ -78,21 +84,23 @@ impl Column for BackwardEdgeColumn {
     type Mode = KeyOfSet<QueryID>;
 }
 
-struct ComputationGraph<C: Config> {
+pub struct ComputationGraph<C: Config> {
     forward_edges: Sieve<(QueryID, Arc<[QueryID]>), C>,
     node_info: Sieve<(QueryID, NodeInfo), C>,
     dirty_edge_set: Sieve<DirtySetColumn, C>,
     backward_edges: Sieve<BackwardEdgeColumn, C>,
+
+    query_store: QueryStore<C>,
 
     database: Arc<C::Database>,
     timestamp: Timestamp,
 }
 
 impl<C: Config> ComputationGraph<C> {
-    pub fn new_with(
+    pub fn new(
         db: Arc<<C as Config>::Database>,
         shard_amount: usize,
-        builder_stable_hasher: C::BuildStableHasher,
+        build_hasher: C::BuildHasher,
     ) -> Self {
         const CAPACITY: usize = 10_000;
 
@@ -101,25 +109,32 @@ impl<C: Config> ComputationGraph<C> {
                 CAPACITY,
                 shard_amount,
                 db.clone(),
-                builder_stable_hasher.clone(),
+                build_hasher.clone(),
             ),
             node_info: Sieve::<_, C>::new(
                 CAPACITY,
                 shard_amount,
                 db.clone(),
-                builder_stable_hasher.clone(),
+                build_hasher.clone(),
             ),
             dirty_edge_set: Sieve::<_, C>::new(
                 CAPACITY,
                 shard_amount,
                 db.clone(),
-                builder_stable_hasher.clone(),
+                build_hasher.clone(),
             ),
             backward_edges: Sieve::<_, C>::new(
                 CAPACITY,
                 shard_amount,
                 db.clone(),
-                builder_stable_hasher,
+                build_hasher.clone(),
+            ),
+
+            query_store: QueryStore::new(
+                CAPACITY,
+                shard_amount,
+                db.clone(),
+                build_hasher,
             ),
 
             database: db,

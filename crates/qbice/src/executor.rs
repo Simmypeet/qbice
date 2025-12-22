@@ -119,7 +119,7 @@ use qbice_stable_type_id::StableTypeID;
 
 use crate::{
     config::Config,
-    engine::{Engine, TrackedEngine},
+    engine::TrackedEngine,
     query::{DynValueBox, ExecutionStyle, Query},
 };
 
