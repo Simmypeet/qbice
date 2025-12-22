@@ -365,6 +365,13 @@ where
     ///   represent deletion or absence of a value, depending on the column
     ///   semantics.
     ///
+    /// # Durability
+    ///
+    /// This method only updates the in-memory cache and does not persist
+    /// changes to the backing database. It is the caller's responsibility to
+    /// ensure that the backing database is updated accordingly before or after
+    /// calling this method, if persistence is required.
+    ///
     /// # Concurrency
     ///
     /// If another thread is currently fetching the value for the same key, this
