@@ -7,23 +7,15 @@ use dashmap::{
     DashMap,
     mapref::one::{Ref, RefMut},
 };
-use fxhash::FxHashSet;
-use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::Compact128;
-use qbice_stable_type_id::Identifiable;
-use qbice_storage::intern::Interned;
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{engine::computation_graph::QueryKind, query::QueryID};
 
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Identifiable)]
-pub struct TransitiveFirewallCallees(FxHashSet<QueryID>);
-
 #[derive(Debug)]
 pub struct Observation {
     seen_value_fingerprint: Compact128,
-    seen_transitive_firewall_callees_fingerprint:
-        Interned<TransitiveFirewallCallees>,
+    seen_transitive_firewall_callees_fingerprint: Compact128,
 }
 
 pub struct CalleeInfo {
@@ -67,6 +59,24 @@ impl Computing {
 
     pub fn registered_callees(&self) -> impl Iterator<Item = &QueryID> {
         self.callee_info.callee_queries.keys()
+    }
+
+    pub fn observe_callee(
+        &mut self,
+        callee_target_id: &QueryID,
+        seen_value_fingerprint: Compact128,
+        seen_transitive_firewall_callees_fingerprint: Compact128,
+    ) {
+        let callee_observation = self
+            .callee_info
+            .callee_queries
+            .get_mut(callee_target_id)
+            .expect("callee should have been registered");
+
+        *callee_observation = Some(Observation {
+            seen_value_fingerprint,
+            seen_transitive_firewall_callees_fingerprint,
+        });
     }
 }
 
