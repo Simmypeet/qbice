@@ -4,7 +4,8 @@ use crate::{
     Engine, Query,
     config::Config,
     engine::computation_graph::{
-        caller::CallerInformation, computing_lock::Computing,
+        caller::CallerInformation, computed::NodeInfo,
+        computing_lock::Computing,
     },
     executor::CyclicError,
     query::QueryID,
@@ -18,6 +19,24 @@ pub enum FastPathResult<V> {
 }
 
 impl<C: Config> Engine<C> {
+    /// Add both forward and backward dependencies for both caller and callee.
+    fn observe_callee_fingerprint(
+        &self,
+        callee_info: &NodeInfo,
+        callee_target: &QueryID,
+        caller_source: &QueryID,
+    ) {
+        // add dependency for the caller
+        let mut caller_computing =
+            self.computation_graph.computing_lock.get_lock_mut(caller_source);
+
+        caller_computing.observe_callee(
+            callee_target,
+            callee_info.value_fingerprint(),
+            callee_info.transitive_firewall_callees_fingerprint(),
+        );
+    }
+
     /// Checks whether the stack of computing queries contains a cycle
     fn check_cyclic(&self, computing: &Computing, target: QueryID) -> bool {
         if computing.contains_query(&target) {
@@ -92,18 +111,18 @@ impl<C: Config> Engine<C> {
         } else {
             // check if we have the existing query info
             let Some(query_info) =
-                self.computation_graph.node_info.get_normal(query_id).await
+                self.computation_graph.node_info().get_normal(query_id).await
             else {
                 return Ok(FastPathResult::ToSlowPath);
             };
 
             // check if the query is up-to-date
-            if query_info.last_verified != self.computation_graph.timestamp {
+            if query_info.last_verified() != self.computation_graph.timestamp {
                 return Ok(FastPathResult::ToSlowPath);
             }
 
             // gets the result
-            if caller.require_value() {
+            let query_result = if caller.require_value() {
                 let Some(query_result) = self
                     .computation_graph
                     .query_store
@@ -113,10 +132,16 @@ impl<C: Config> Engine<C> {
                     return Ok(FastPathResult::ToSlowPath);
                 };
 
-                Ok(FastPathResult::Hit(Some(query_result)))
+                Some(query_result)
             } else {
-                Ok(FastPathResult::Hit(None))
+                None
+            };
+
+            if let Some(caller) = caller.has_a_caller_requiring_value() {
+                self.observe_callee_fingerprint(&query_info, query_id, caller);
             }
+
+            Ok(FastPathResult::Hit(query_result))
         }
     }
 }
