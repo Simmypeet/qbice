@@ -59,7 +59,7 @@
 use std::{any::Any, fmt::Debug, hash::Hash};
 
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::{Sip128Hasher, StableHash, StableHasher};
+use qbice_stable_hash::{Compact128, Sip128Hasher, StableHash, StableHasher};
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 
 use crate::{config::Config, engine::InitialSeed};
@@ -327,23 +327,6 @@ pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
     /// Hashes this query into the given hasher.
     fn hash_dyn(&self, state: &mut dyn std::hash::Hasher);
 
-    /// Generates a unique identifier for this query instance.
-    fn query_identifier(&self, initial_seed: InitialSeed) -> QueryID {
-        QueryID {
-            stable_type_id: {
-                let id_128 = self.stable_type_id().as_u128();
-                ((id_128 >> 64) as u64, (id_128 & 0xFFFF_FFFF_FFFF_FFFF) as u64)
-            },
-            hash_128: {
-                let hash_128 = self.hash_128(initial_seed);
-                (
-                    (hash_128 >> 64) as u64,
-                    (hash_128 & 0xFFFF_FFFF_FFFF_FFFF) as u64,
-                )
-            },
-        }
-    }
-
     /// Clones this query into a type-erased box.
     fn dyn_clone(&self) -> DynQueryBox<C>;
 
@@ -447,11 +430,17 @@ impl<C: Config> Hash for dyn DynQuery<C> + '_ {
     Identifiable,
 )]
 pub struct QueryID {
-    stable_type_id: (u64, u64),
-    hash_128: (u64, u64),
+    stable_type_id: Compact128,
+    hash_128: Compact128,
 }
 
 impl QueryID {
+    pub fn new<Q: Query>(hash_128: Compact128) -> Self {
+        let stable_type_id = Q::STABLE_TYPE_ID.as_u128();
+
+        Self { stable_type_id: stable_type_id.into(), hash_128 }
+    }
+
     /// Returns the stable type ID of this query.
     ///
     /// The type ID uniquely identifies the query's Rust type.
@@ -459,8 +448,8 @@ impl QueryID {
     pub const fn stable_type_id(&self) -> StableTypeID {
         unsafe {
             StableTypeID::from_raw_parts(
-                self.stable_type_id.0,
-                self.stable_type_id.1,
+                self.stable_type_id.high(),
+                self.stable_type_id.low(),
             )
         }
     }
@@ -470,9 +459,7 @@ impl QueryID {
     /// This hash is computed from the query's fields using stable hashing,
     /// ensuring consistency across program runs.
     #[must_use]
-    pub const fn hash_128(&self) -> u128 {
-        ((self.hash_128.0 as u128) << 64) | (self.hash_128.1 as u128)
-    }
+    pub fn hash_128(&self) -> u128 { self.hash_128.to_u128() }
 }
 
 /// Type-erased boxed query value.

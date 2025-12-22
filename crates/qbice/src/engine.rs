@@ -305,6 +305,7 @@ impl<C: Config> Engine<C> {
                 database.clone(),
                 default_shard_amount(),
                 hasher,
+                
             ),
             database,
             interner: shared_interner,

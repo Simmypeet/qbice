@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use fxhash::FxHashSet;
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::StableHash;
+use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};
 use qbice_stable_type_id::Identifiable;
 
 use crate::{
@@ -158,12 +159,118 @@ impl<C: Config> ComputationGraph<C> {
 /// query within a single "session".
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
+    cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
     caller: CallerInformation,
+}
+
+impl<C: Config> TrackedEngine<C> {
+    /// Executes a query and returns its value.
+    ///
+    /// This is the primary method for retrieving computed values from the
+    /// engine. The engine will:
+    ///
+    /// 1. Check the local cache for a cached result
+    /// 2. Check if the query has a valid cached result in the database
+    /// 3. If not valid, execute the query's registered executor
+    /// 4. Track dependencies if called from within another executor
+    ///
+    /// # Incremental Behavior
+    ///
+    /// Results are cached and reused when possible. A query is recomputed
+    /// only if:
+    /// - It has never been computed before
+    /// - Any of its dependencies have changed since the last computation
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CyclicError`] if a cyclic dependency is detected (the query
+    /// directly or indirectly depends on itself).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    ///
+    /// use qbice::{
+    ///     Identifiable, StableHash,
+    ///     config::DefaultConfig,
+    ///     engine::{Engine, TrackedEngine},
+    ///     executor::{CyclicError, Executor},
+    ///     query::Query,
+    /// };
+    ///
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// struct Double(i64);
+    /// impl Query for Double {
+    ///     type Value = i64;
+    /// }
+    ///
+    /// struct DoubleExecutor;
+    /// impl<C: qbice::config::Config> Executor<Double, C> for DoubleExecutor {
+    ///     async fn execute(
+    ///         &self,
+    ///         q: &Double,
+    ///         _: &TrackedEngine<C>,
+    ///     ) -> Result<i64, CyclicError> {
+    ///         Ok(q.0 * 2)
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut engine = Engine::<DefaultConfig>::new();
+    /// engine.register_executor::<Double, _>(Arc::new(DoubleExecutor));
+    ///
+    /// let engine = Arc::new(engine);
+    /// let tracked = engine.tracked();
+    ///
+    /// // Execute the query
+    /// let result = tracked.query(&Double(21)).await;
+    /// assert_eq!(result, Ok(42));
+    ///
+    /// // Subsequent queries return cached result
+    /// let result2 = tracked.query(&Double(21)).await;
+    /// assert_eq!(result2, Ok(42));
+    /// # }
+    /// ```
+    ///
+    /// [`CyclicError`]: crate::executor::CyclicError
+    pub async fn query<Q: Query>(
+        &self,
+        query: &Q,
+    ) -> Result<Q::Value, CyclicError> {
+        // YIELD POINT: query function will be called very often, this is a
+        // good point for yielding to allow cancelation.
+        tokio::task::yield_now().await;
+
+        let query_with_id = self.engine.new_query_with_id(query);
+
+        // check local cache
+        if let Some(value) = self.cache.get(query_with_id.id()) {
+            // cache hit! don't have to go through central database
+            let value: &dyn DynValue<C> = &**value;
+
+            return Ok(value
+                .downcast_value::<Q::Value>()
+                .expect("should've been a correct type")
+                .clone());
+        }
+
+        // run the main process
+        self.engine
+            .query_for(&query_with_id, &self.caller)
+            .await
+            .map(QueryResult::unwrap_return)
+    }
 }
 
 impl<C: Config> Clone for TrackedEngine<C> {
     fn clone(&self) -> Self {
-        Self { engine: Arc::clone(&self.engine), caller: self.caller }
+        Self {
+            engine: Arc::clone(&self.engine),
+            cache: Arc::clone(&self.cache),
+            caller: self.caller,
+        }
     }
 }
 
@@ -206,8 +313,12 @@ impl<C: Config> Engine<C> {
     /// let tracked2 = engine.clone().tracked();
     /// ```
     #[must_use]
-    pub const fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
-        TrackedEngine { engine: self, caller: CallerInformation::User }
+    pub fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
+        TrackedEngine {
+            engine: self,
+            cache: Arc::new(DashMap::new()),
+            caller: CallerInformation::User,
+        }
     }
 }
 
@@ -267,7 +378,7 @@ impl<V> QueryResult<V> {
 impl<C: Config> Engine<C> {
     async fn query_for<Q: Query>(
         self: &Arc<Self>,
-        query: QueryWithID<'_, Q>,
+        query: &QueryWithID<'_, Q>,
         caller: &CallerInformation,
     ) -> Result<QueryResult<Q::Value>, CyclicError> {
         // register the dependency for the sake of detecting cycles
@@ -312,5 +423,16 @@ impl<C: Config> Engine<C> {
         };
 
         Ok(value)
+    }
+
+    /// Create a new query with its associated unique identifier.
+    pub(super) fn new_query_with_id<'c, Q: Query>(
+        &'c self,
+        query: &'c Q,
+    ) -> QueryWithID<'c, Q> {
+        let mut hash = self.build_stable_hasher.build_stable_hasher();
+        query.stable_hash(&mut hash);
+
+        QueryWithID { id: QueryID::new::<Q>(hash.finish().into()), query }
     }
 }
