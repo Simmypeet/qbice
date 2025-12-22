@@ -19,8 +19,8 @@ use crate::{
 };
 
 impl QueryKind {
-    pub fn is_projection(&self) -> bool {
-        matches!(self, QueryKind::Executable(ExecutionStyle::Projection))
+    pub const fn is_projection(self) -> bool {
+        matches!(self, Self::Executable(ExecutionStyle::Projection))
     }
 }
 
@@ -54,11 +54,11 @@ pub struct NodeInfo {
 }
 
 impl NodeInfo {
-    pub fn last_verified(&self) -> Timestamp { self.last_verified }
+    pub const fn last_verified(&self) -> Timestamp { self.last_verified }
 
-    pub fn value_fingerprint(&self) -> Compact128 { self.fingerprint }
+    pub const fn value_fingerprint(&self) -> Compact128 { self.fingerprint }
 
-    pub fn transitive_firewall_callees_fingerprint(&self) -> Compact128 {
+    pub const fn transitive_firewall_callees_fingerprint(&self) -> Compact128 {
         self.transitive_firewall_callees_fingerprint
     }
 }
@@ -113,27 +113,27 @@ impl<C: Config> Computed<C> {
             backward_edges: Sieve::<_, C>::new(
                 CAPACITY,
                 shard_amount,
-                db.clone(),
-                build_hasher.clone(),
+                db,
+                build_hasher,
             ),
         }
     }
 }
 
 impl<C: Config> ComputationGraph<C> {
-    pub fn forward_edges(&self) -> &Sieve<(QueryID, Arc<[QueryID]>), C> {
+    pub const fn forward_edges(&self) -> &Sieve<(QueryID, Arc<[QueryID]>), C> {
         &self.computed.forward_edges
     }
 
-    pub fn node_info(&self) -> &Sieve<(QueryID, NodeInfo), C> {
+    pub const fn node_info(&self) -> &Sieve<(QueryID, NodeInfo), C> {
         &self.computed.node_info
     }
 
-    pub fn backward_edges(&self) -> &Sieve<BackwardEdgeColumn, C> {
+    pub const fn backward_edges(&self) -> &Sieve<BackwardEdgeColumn, C> {
         &self.computed.backward_edges
     }
 
-    pub fn dirty_edge_set(&self) -> &Sieve<DirtySetColumn, C> {
+    pub const fn dirty_edge_set(&self) -> &Sieve<DirtySetColumn, C> {
         &self.computed.dirty_edge_set
     }
 }
