@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use dashmap::{
@@ -56,11 +56,24 @@ impl Computing {
     }
 
     pub const fn query_kind(&self) -> QueryKind { self.callee_info.query_kind }
+
+    pub fn mark_scc(&self) {
+        self.is_in_scc.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn contains_query(&self, query_id: &QueryID) -> bool {
+        self.callee_info.callee_queries.contains_key(query_id)
+    }
+
+    pub fn registered_callees(&self) -> impl Iterator<Item = &QueryID> {
+        self.callee_info.callee_queries.keys()
+    }
 }
 
 pub struct Computing {
     notify: Arc<Notify>,
     callee_info: CalleeInfo,
+    is_in_scc: AtomicBool,
 }
 
 impl Computing {
@@ -90,5 +103,9 @@ impl ComputingLock {
         query_id: &QueryID,
     ) -> RefMut<'_, QueryID, Computing> {
         self.lock.get_mut(query_id).unwrap()
+    }
+
+    pub fn get_lock(&self, query_id: &QueryID) -> Ref<'_, QueryID, Computing> {
+        self.lock.get(query_id).unwrap()
     }
 }
