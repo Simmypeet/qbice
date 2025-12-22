@@ -102,12 +102,8 @@
 //! The engine can generate interactive HTML visualizations of the dependency
 //! graph. See [`Engine::visualize_html`] and [`write_html_visualization`].
 
-use std::{
-    io::StdinLock,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
-use dashmap::DashMap;
 use qbice_serialize::Plugin;
 use qbice_stable_hash::StableHash;
 use qbice_storage::{intern::SharedInterner, kv_database::KvDatabaseFactory};
@@ -116,7 +112,7 @@ use crate::{
     config::{Config, DefaultConfig},
     engine::computation_graph::ComputationGraph,
     executor::{Executor, Registry},
-    query::{DynValueBox, Query, QueryID},
+    query::Query,
 };
 
 pub(super) mod computation_graph;
