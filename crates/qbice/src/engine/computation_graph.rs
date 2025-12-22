@@ -282,7 +282,7 @@ impl<C: Config> Engine<C> {
     /// let tracked2 = engine.clone().tracked();
     /// ```
     #[must_use]
-    pub fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
+    pub const fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
         TrackedEngine { engine: self, caller: CallerInformation::User }
     }
 }
