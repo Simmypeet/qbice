@@ -6,12 +6,14 @@ use qbice_stable_type_id::Identifiable;
 use qbice_storage::kv_database::{Column, KeyOfSet, Normal};
 
 use crate::{
-    ExecutionStyle,
-    config::Config,
+    Engine, ExecutionStyle, Query,
+    config::{Config, DefaultConfig},
     engine::computation_graph::{
-        computing_lock::ComputingLock, query_store::QueryStore,
+        caller::CallerInformation, computing_lock::ComputingLock,
+        query_store::QueryStore,
     },
-    query::QueryID,
+    executor::CyclicError,
+    query::{DynValue, DynValueBox, QueryID},
 };
 
 type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
@@ -24,6 +26,7 @@ mod caller;
 mod computing_lock;
 mod fast_path;
 mod query_store;
+mod register_callee;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
@@ -36,6 +39,12 @@ struct Timestamp(u64);
 enum QueryKind {
     Input,
     Executable(ExecutionStyle),
+}
+
+impl QueryKind {
+    pub fn is_projection(&self) -> bool {
+        matches!(self, QueryKind::Executable(ExecutionStyle::Projection))
+    }
 }
 
 type ForwardEdgeColumn = (QueryID, Vec<QueryID>);
