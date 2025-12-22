@@ -102,7 +102,10 @@
 //! The engine can generate interactive HTML visualizations of the dependency
 //! graph. See [`Engine::visualize_html`] and [`write_html_visualization`].
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    io::StdinLock,
+    sync::{Arc, OnceLock},
+};
 
 use dashmap::DashMap;
 use qbice_serialize::Plugin;
@@ -204,6 +207,7 @@ pub struct Engine<C: Config> {
     interner: SharedInterner,
     computation_graph: ComputationGraph<C>,
     executor_registry: Registry<C>,
+    build_stable_hasher: C::BuildStableHasher,
 }
 
 impl<C: Config> Engine<C> {
@@ -291,7 +295,7 @@ impl<C: Config> Engine<C> {
         hasher: C::BuildHasher,
     ) -> Result<Self, F::Error> {
         let shared_interner =
-            SharedInterner::new(default_shard_amount(), stable_hasher);
+            SharedInterner::new(default_shard_amount(), stable_hasher.clone());
 
         assert!(
             serialization_plugin.insert(shared_interner.clone()).is_none(),
@@ -309,149 +313,14 @@ impl<C: Config> Engine<C> {
             database,
             interner: shared_interner,
             executor_registry: Registry::default(),
+            build_stable_hasher: stable_hasher,
         })
-    }
-
-    /// Creates a tracked engine wrapper for querying.
-    ///
-    /// The returned [`TrackedEngine`] provides the
-    /// [`query`][TrackedEngine::query] method for executing queries.
-    /// Multiple `TrackedEngine` instances can be created from the same
-    /// `Arc<Engine>` for concurrent querying.
-    ///
-    /// # Thread Safety
-    ///
-    /// `TrackedEngine` is cheap to clone and can be safely sent to other
-    /// threads. Each clone shares the same underlying engine but has its
-    /// own local cache.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use std::sync::Arc;
-    ///
-    /// use qbice::{config::DefaultConfig, engine::Engine};
-    ///
-    /// let engine = Arc::new(Engine::<DefaultConfig>::new());
-    /// let tracked = engine.clone().tracked();
-    ///
-    /// // Can create multiple tracked engines
-    /// let tracked2 = engine.clone().tracked();
-    /// ```
-    #[must_use]
-    pub fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
-        TrackedEngine {
-            engine: self,
-            cache: Arc::new(DashMap::new()),
-            // caller: CallerInformation::User,
-        }
     }
 }
 
 impl<C: Config> std::fmt::Debug for Engine<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine").finish_non_exhaustive()
-    }
-}
-
-/// A wrapper around [`Arc<Engine>`] that enables query execution.
-///
-/// `TrackedEngine` is the primary interface for executing queries. It wraps
-/// an `Arc<Engine>` and provides dependency tracking during query execution.
-///
-/// # Creating a `TrackedEngine`
-///
-/// Create a `TrackedEngine` from an `Arc<Engine>`:
-///
-/// ```rust
-/// use std::sync::Arc;
-///
-/// use qbice::{config::DefaultConfig, engine::Engine};
-///
-/// let engine = Arc::new(Engine::<DefaultConfig>::new());
-/// let tracked = engine.tracked();
-/// ```
-///
-/// # Querying
-///
-/// Use the [`query`][Self::query] method to execute queries:
-///
-/// ```rust
-/// use std::sync::Arc;
-///
-/// use qbice::{
-///     Identifiable, StableHash,
-///     config::DefaultConfig,
-///     engine::{Engine, TrackedEngine},
-///     executor::{CyclicError, Executor},
-///     query::Query,
-/// };
-///
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-/// struct MyQuery(u64);
-/// impl Query for MyQuery {
-///     type Value = i64;
-/// }
-///
-/// struct MyExecutor;
-/// impl<C: qbice::config::Config> Executor<MyQuery, C> for MyExecutor {
-///     async fn execute(
-///         &self,
-///         q: &MyQuery,
-///         _: &TrackedEngine<C>,
-///     ) -> Result<i64, CyclicError> {
-///         Ok(q.0 as i64)
-///     }
-/// }
-///
-/// # #[tokio::main]
-/// # async fn main() {
-/// let mut engine = Engine::<DefaultConfig>::new();
-/// engine.register_executor::<MyQuery, _>(Arc::new(MyExecutor));
-///
-/// let engine = Arc::new(engine);
-/// let tracked = engine.tracked();
-///
-/// let result = tracked.query(&MyQuery(42)).await;
-/// assert_eq!(result, Ok(42));
-/// # }
-/// ```
-///
-/// # Thread Safety
-///
-/// `TrackedEngine` is `Clone`, `Send`, and `Sync`. It can be cheaply cloned
-/// and sent to other threads for concurrent query execution.
-///
-/// # Local Caching
-///
-/// Each `TrackedEngine` maintains a local cache of query results. This cache
-/// is specific to the `TrackedEngine` instance and its clones (they share the
-/// same cache). The local cache provides fast repeated access to the same
-/// query within a single "session".
-pub struct TrackedEngine<C: Config> {
-    engine: Arc<Engine<C>>,
-    cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
-    // caller: CallerInformation,
-}
-
-impl<C: Config> Clone for TrackedEngine<C> {
-    fn clone(&self) -> Self {
-        Self {
-            engine: Arc::clone(&self.engine),
-            cache: Arc::clone(&self.cache),
-            // caller: self.caller,
-        }
-    }
-}
-
-static_assertions::assert_impl_all!(&TrackedEngine<DefaultConfig>: Send, Sync);
-
-impl<C: Config> std::fmt::Debug for TrackedEngine<C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TrackedEngine")
-            .field("engine", &self.engine)
-            // .field("caller", &self.caller)
-            .finish_non_exhaustive()
     }
 }
 
