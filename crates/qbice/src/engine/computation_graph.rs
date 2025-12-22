@@ -1,10 +1,9 @@
-use std::{collections::HashSet, marker::MetaSized, sync::Arc};
+use std::sync::Arc;
 
 use fxhash::FxHashSet;
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::{Compact128, StableHash};
+use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
-use qbice_storage::kv_database::{Column, KeyOfSet, Normal};
 
 use crate::{
     Engine, ExecutionStyle, Query,
@@ -271,5 +270,47 @@ impl<C: Config> Engine<C> {
         query: QueryWithID<'_, Q>,
         caller: &CallerInformation,
     ) -> Result<QueryResult<Q::Value>, CyclicError> {
+        // register the dependency for the sake of detecting cycles
+        let undo_register =
+            self.register_callee(caller.get_caller(), *query.id());
+
+        let mut checked = QueryRepairation::UpToDate;
+
+        // pulling the value
+        let value = loop {
+            match self.fast_path::<Q>(query.id(), caller).await {
+                // try again
+                Ok(FastPathResult::TryAgain) => continue,
+
+                // go to slow path
+                Ok(FastPathResult::ToSlowPath) => {}
+
+                // hit
+                Ok(FastPathResult::Hit(value)) => {
+                    // defuse the undo `register_callee` since we have obtained
+                    // the value, record the dependency successfully
+                    if let Some(undo_register) = undo_register {
+                        undo_register.defuse();
+                    }
+
+                    break value.map_or_else(
+                        || QueryResult::Checked(checked),
+                        |v| QueryResult::Return(v, checked),
+                    );
+                }
+
+                Err(e) => {
+                    // defuse the undo `register_callee` keep cyclic dependency
+                    // detection correct
+                    if let Some(undo) = undo_register {
+                        undo.defuse();
+                    }
+
+                    return Err(e);
+                }
+            }
+        };
+
+        Ok(value)
     }
 }
