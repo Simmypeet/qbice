@@ -2,7 +2,7 @@
 
 use core::fmt;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     fmt::Debug,
     hash::{BuildHasher, BuildHasherDefault, Hash},
     option::Option,
@@ -101,17 +101,11 @@ impl<K: Eq + Hash> Drop for FetchingGuard<'_, '_, K> {
         }
 
         let mut in_flight = self.in_flight.lock();
-        let notify = in_flight.remove(self.key).unwrap();
-        notify.notify_waiters();
-    }
-}
 
-impl<K: Eq + Hash> FetchingGuard<'_, '_, K> {
-    pub fn done(mut self) {
-        self.defused = true;
+        let Some(notify) = in_flight.remove(self.key) else {
+            return;
+        };
 
-        let mut in_flight = self.in_flight.lock();
-        let notify = in_flight.remove(self.key).unwrap();
         notify.notify_waiters();
     }
 }
@@ -225,19 +219,31 @@ where
                     .ok();
             }
 
-            let Some(fetching_guard) = self.fetching_lock(key).await else {
+            let Some(mut fetching_guard) = self.fetching_lock(key).await else {
                 // some thread has already fetched the value, retry
                 continue;
             };
 
             let value = self.backing_db.get::<C>(key).await;
 
+            // hold the lock while inserting to avoid races
             {
+                let mut in_flight_lock = self.in_flight.lock();
+
+                // defuse the guard
+                fetching_guard.defused = true;
+
+                let Some(notify) = in_flight_lock.remove(key) else {
+                    // the `put` operation has overwritten this entry, discard
+                    continue;
+                };
+
+                // insert into the cache
                 let mut lock = self.shards.write_shard(shard_index);
                 lock.insert(key.clone(), value.clone());
-            }
 
-            fetching_guard.done();
+                notify.notify_waiters();
+            }
 
             // retry again to get the read lock
         }
@@ -313,21 +319,84 @@ where
                 return lock;
             }
 
-            let Some(fetching_guard) = self.fetching_lock(key).await else {
+            let Some(mut fetching_guard) = self.fetching_lock(key).await else {
                 // some thread has already fetched the value, retry
                 continue;
             };
 
             let value = self.backing_db.collect_key_of_set::<C>(key).await;
 
+            // hold the lock while inserting to avoid races
             {
+                let mut in_flight_lock = self.in_flight.lock();
+
+                // defuse the guard
+                fetching_guard.defused = true;
+
+                let Some(notify) = in_flight_lock.remove(key) else {
+                    // the `put` operation has overwritten this entry, discard
+                    continue;
+                };
+
+                // insert into the cache
                 let mut lock = self.shards.write_shard(shard_index);
                 lock.insert(key.clone(), value.clone());
+
+                notify.notify_waiters();
             }
 
-            fetching_guard.done();
-
             // retry again to get the read lock
+        }
+    }
+
+    /// Inserts or updates a value in the cache for the given key.
+    ///
+    /// This method allows direct insertion or update of a value in the cache,
+    /// bypassing the backing database. If there is an ongoing fetch for the
+    /// same key (i.e., another thread is currently fetching the value from
+    /// the database), this method will take over the fetch lock, perform
+    /// the insertion, and notify any waiters. If there is no ongoing fetch,
+    /// it simply inserts or updates the value in the appropriate shard.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert or update in the cache.
+    /// * `value` - The value to associate with the key. `None` can be used to
+    ///   represent deletion or absence of a value, depending on the column
+    ///   semantics.
+    ///
+    /// # Concurrency
+    ///
+    /// If another thread is currently fetching the value for the same key, this
+    /// method will take over the fetch lock and notify all waiters after
+    /// the insertion. Otherwise, it performs the insertion directly.
+    pub fn put(&self, key: C::Key, value: Option<C::Value>)
+    where
+        C: Column<Mode = Normal>,
+        C::Mode: BackingStorage<C::Value, Value = Option<C::Value>>,
+    {
+        let mut in_flight = self.in_flight.lock();
+
+        match in_flight.entry(key.clone()) {
+            // steal the fetching lock to perform the insertion
+            Entry::Occupied(occupied_entry) => {
+                let notify = occupied_entry.remove();
+
+                {
+                    let shard_index = self.shard_index(&key);
+                    let mut lock = self.shards.write_shard(shard_index);
+                    lock.insert(key, value);
+                }
+
+                notify.notify_waiters();
+            }
+
+            // do nothing with the inflight, but has to hold the lock
+            Entry::Vacant(_) => {
+                let shard_index = self.shard_index(&key);
+                let mut lock = self.shards.write_shard(shard_index);
+                lock.insert(key, value);
+            }
         }
     }
 
