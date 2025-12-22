@@ -6,8 +6,12 @@ use qbice_stable_type_id::Identifiable;
 use qbice_storage::kv_database::{Column, KeyOfSet, Normal};
 
 use crate::{
-    ExecutionStyle, config::Config,
-    engine::computation_graph::query_store::QueryStore, query::QueryID,
+    ExecutionStyle,
+    config::Config,
+    engine::computation_graph::{
+        computing_lock::ComputingLock, query_store::QueryStore,
+    },
+    query::QueryID,
 };
 
 type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
@@ -18,6 +22,7 @@ type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
 
 mod caller;
 mod computing_lock;
+mod fast_path;
 mod query_store;
 
 #[derive(
@@ -92,6 +97,7 @@ pub struct ComputationGraph<C: Config> {
     backward_edges: Sieve<BackwardEdgeColumn, C>,
 
     query_store: QueryStore<C>,
+    computing_lock: ComputingLock,
 
     database: Arc<C::Database>,
     timestamp: Timestamp,
@@ -137,6 +143,7 @@ impl<C: Config> ComputationGraph<C> {
                 db.clone(),
                 build_hasher,
             ),
+            computing_lock: ComputingLock::new(),
 
             database: db,
             timestamp: Timestamp(0),
