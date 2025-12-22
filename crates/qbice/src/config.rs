@@ -26,8 +26,9 @@
 //! heap allocation is required. Larger storage can reduce allocations for
 //! queries with bigger keys or values, but increases memory usage per query.
 
-use std::fmt::Debug;
+use std::{fmt::Debug, hash::BuildHasher};
 
+use fxhash::FxBuildHasher;
 use qbice_stable_hash::{
     BuildStableHasher, SeededStableHasherBuilder, Sip128Hasher,
 };
@@ -77,6 +78,9 @@ pub trait Config: Default + Debug + Send + Sync + 'static {
         + Send
         + Sync
         + 'static;
+
+    /// The standard hasher builder used by the engine.
+    type BuildHasher: BuildHasher + Clone + Send + Sync + 'static;
 }
 
 /// The default configuration for QBICE.
@@ -101,4 +105,6 @@ impl Config for DefaultConfig {
     type Database = RocksDB;
 
     type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
+
+    type BuildHasher = FxBuildHasher;
 }
