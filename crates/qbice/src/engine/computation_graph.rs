@@ -16,6 +16,7 @@ type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
     <Con as Config>::BuildHasher,
 >;
 
+mod caller;
 mod computing_lock;
 mod query_store;
 
