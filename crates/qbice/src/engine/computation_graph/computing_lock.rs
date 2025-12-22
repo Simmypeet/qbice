@@ -86,4 +86,11 @@ impl ComputingLock {
     ) -> Option<Ref<'_, QueryID, Computing>> {
         self.lock.get(query_id)
     }
+
+    pub fn get_lock_mut(
+        &self,
+        query_id: &QueryID,
+    ) -> RefMut<'_, QueryID, Computing> {
+        self.lock.get_mut(query_id).unwrap()
+    }
 }
