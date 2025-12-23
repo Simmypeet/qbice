@@ -9,7 +9,9 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use parking_lot::{MappedRwLockReadGuard, Mutex, RwLockReadGuard};
+use parking_lot::{
+    MappedRwLockReadGuard, Mutex, RwLockReadGuard, RwLockWriteGuard,
+};
 use tokio::sync::Notify;
 
 use crate::{
@@ -361,6 +363,75 @@ where
         }
     }
 
+    /// Inserts an element into a set stored in the cache for the given key.
+    ///
+    /// This method is specifically designed for columns using the `KeyOfSet`
+    /// storage mode. It retrieves the set associated with the key (loading it
+    /// from the backing database if necessary) and adds a single element to it.
+    ///
+    /// # Type Parameters
+    ///
+    /// This method requires that:
+    /// * `C` implements `Column` with a `KeyOfSetMode` storage mode
+    /// * `C::Value` implements `Extend` to allow adding elements to the set
+    /// * `C::Value` implements `Default` for creating empty sets on cache
+    ///   misses
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - A reference to the key identifying the set in the cache
+    /// * `element` - The element to insert into the set
+    ///
+    /// # Behavior
+    ///
+    /// 1. If the key is already cached, the element is added to the existing
+    ///    set
+    /// 2. If the key is not cached, the set is loaded from the backing database
+    ///    using `collect_key_of_set`, and then the element is added
+    /// 3. The operation holds a write lock on the shard during insertion to
+    ///    ensure thread-safety
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Insert a value into a set associated with a key
+    /// cache.insert_set(&my_key, new_element).await;
+    /// ```
+    ///
+    /// # Concurrency
+    ///
+    /// This method uses `get_loop` internally to handle concurrent access,
+    /// ensuring that only one task fetches the data from the backing database
+    /// if multiple tasks attempt to access the same key simultaneously.
+    pub async fn insert_set(
+        &self,
+        key: &C::Key,
+        element: <C::Mode as KeyOfSetMode>::Value,
+    ) where
+        C: Column,
+        C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
+        C::Value:
+            Extend<<<C as Column>::Mode as KeyOfSetMode>::Value> + Default,
+    {
+        let mut write_lock = self
+            .get_loop(
+                key,
+                |index| {
+                    let lock = self.shards.write_shard(index);
+
+                    RwLockWriteGuard::try_map(lock, |x| match x.get_mut(key) {
+                        RetrieveMut::Hit(entry) => Some(entry),
+                        RetrieveMut::Miss => None,
+                    })
+                    .ok()
+                },
+                async |_| self.backing_db.collect_key_of_set::<C>(key).await,
+            )
+            .await;
+
+        write_lock.extend(std::iter::once(element));
+    }
+
     async fn get_loop<T>(
         &self,
         key: &C::Key,
@@ -468,6 +539,11 @@ enum Retrieve<'x, C: Column, M: BackingStorage<C::Value>> {
     Miss,
 }
 
+enum RetrieveMut<'x, C: Column, M: BackingStorage<C::Value>> {
+    Hit(&'x mut M::Value),
+    Miss,
+}
+
 impl<C: Column, M: BackingStorage<C::Value>, S: BuildHasher>
     SieveShard<C, M, S>
 {
@@ -517,5 +593,16 @@ impl<C: Column, M: BackingStorage<C::Value>, S: BuildHasher>
         }
 
         Retrieve::Miss
+    }
+
+    fn get_mut(&mut self, key: &C::Key) -> RetrieveMut<'_, C, M> {
+        if let Some(&index) = self.map.get(key) {
+            let node = self.nodes[index].as_mut().unwrap();
+            node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            return RetrieveMut::Hit(&mut node.value);
+        }
+
+        RetrieveMut::Miss
     }
 }
