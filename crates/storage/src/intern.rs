@@ -85,6 +85,17 @@ pub struct InternedID {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash)]
 pub struct Interned<T>(Arc<T>);
 
+impl<T> Interned<T> {
+    /// Returns an owned clone of the interned value.
+    #[must_use]
+    pub fn inner_owned(&self) -> T
+    where
+        T: Clone,
+    {
+        self.0.as_ref().clone()
+    }
+}
+
 impl<T> Deref for Interned<T> {
     type Target = T;
 
