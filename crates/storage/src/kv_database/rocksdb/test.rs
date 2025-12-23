@@ -25,8 +25,8 @@ impl Column for TestSetColumn {
     type Mode = KeyOfSet<u32>;
 }
 
-#[tokio::test]
-async fn basic_put_get() {
+#[test]
+fn basic_put_get() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db = RocksDB::open(temp_dir.path(), Plugin::new()).unwrap();
 
@@ -35,13 +35,13 @@ async fn basic_put_get() {
     tx.put::<TestColumn>(&"key2".to_string(), &100);
     tx.commit();
 
-    assert_eq!(db.get::<TestColumn>(&"key1".to_string()).await, Some(42));
-    assert_eq!(db.get::<TestColumn>(&"key2".to_string()).await, Some(100));
-    assert_eq!(db.get::<TestColumn>(&"key3".to_string()).await, None);
+    assert_eq!(db.get::<TestColumn>(&"key1".to_string()), Some(42));
+    assert_eq!(db.get::<TestColumn>(&"key2".to_string()), Some(100));
+    assert_eq!(db.get::<TestColumn>(&"key3".to_string()), None);
 }
 
-#[tokio::test]
-async fn set_operations() {
+#[test]
+fn set_operations() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db = RocksDB::open(temp_dir.path(), Plugin::new()).unwrap();
 
@@ -52,16 +52,14 @@ async fn set_operations() {
     tx.insert_member::<TestSetColumn>(&"set2".to_string(), &10);
     tx.commit();
 
-    let members =
-        db.collect_key_of_set::<TestSetColumn>(&"set1".to_string()).await;
+    let members = db.collect_key_of_set::<TestSetColumn>(&"set1".to_string());
 
     assert_eq!(members.len(), 3);
     assert!(members.contains(&1));
     assert!(members.contains(&2));
     assert!(members.contains(&3));
 
-    let members2 =
-        db.collect_key_of_set::<TestSetColumn>(&"set2".to_string()).await;
+    let members2 = db.collect_key_of_set::<TestSetColumn>(&"set2".to_string());
 
     assert_eq!(members2.len(), 1);
     assert!(members2.contains(&10));
@@ -82,15 +80,12 @@ async fn persistence() {
     // Read data after reopening
     {
         let db = RocksDB::open(temp_dir.path(), Plugin::new()).unwrap();
-        assert_eq!(
-            db.get::<TestColumn>(&"persistent".to_string()).await,
-            Some(999)
-        );
+        assert_eq!(db.get::<TestColumn>(&"persistent".to_string()), Some(999));
     }
 }
 
-#[tokio::test]
-async fn read_committed() {
+#[test]
+fn read_committed() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db = RocksDB::open(temp_dir.path(), Plugin::new()).unwrap();
 
@@ -100,24 +95,24 @@ async fn read_committed() {
         tx.commit();
     }
 
-    assert_eq!(db.get::<TestColumn>(&"key".to_string()).await, Some(123));
+    assert_eq!(db.get::<TestColumn>(&"key".to_string()), Some(123));
 
     {
         let tx = db.write_transaction();
         tx.put::<TestColumn>(&"key".to_string(), &456);
 
         // Before commit, the old value should still be visible
-        assert_eq!(db.get::<TestColumn>(&"key".to_string()).await, Some(123));
+        assert_eq!(db.get::<TestColumn>(&"key".to_string()), Some(123));
 
         tx.commit();
     }
 
     // After commit, the new value should be visible
-    assert_eq!(db.get::<TestColumn>(&"key".to_string()).await, Some(456));
+    assert_eq!(db.get::<TestColumn>(&"key".to_string()), Some(456));
 }
 
-#[tokio::test]
-async fn last_commit_wins() {
+#[test]
+fn last_commit_wins() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db = RocksDB::open(temp_dir.path(), Plugin::new()).unwrap();
 
@@ -133,5 +128,5 @@ async fn last_commit_wins() {
     }
 
     // The last committed value should be visible
-    assert_eq!(db.get::<TestColumn>(&"conflict".to_string()).await, Some(2));
+    assert_eq!(db.get::<TestColumn>(&"conflict".to_string()), Some(2));
 }

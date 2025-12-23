@@ -6,7 +6,6 @@
 
 use std::{hash::Hash, marker::PhantomData};
 
-use futures::{Stream, StreamExt};
 use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
 
@@ -195,9 +194,7 @@ pub trait KvDatabase: 'static + Send + Sync {
     fn get<'s, C: Column<Mode = Normal>>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl std::future::Future<Output = Option<<C as Column>::Value>>
-    + Send
-    + use<'s, Self, C>;
+    ) -> Option<<C as Column>::Value>;
 
     /// Scans all members of the set associated with the given key in the
     /// specified column.
@@ -206,21 +203,20 @@ pub trait KvDatabase: 'static + Send + Sync {
     fn scan_members<'s, C: Column>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Stream<Item = <C::Mode as KeyOfSetMode>::Value> + Send + use<'s, Self, C>
+    ) -> impl Iterator<Item = <C::Mode as KeyOfSetMode>::Value>
+    + Send
+    + use<'s, Self, C>
     where
         C::Mode: KeyOfSetMode;
 
     /// Collects all members of the set associated with the given key in the
     /// specified column.
-    fn collect_key_of_set<'s, C: Column>(
-        &'s self,
-        key: &'s C::Key,
-    ) -> impl std::future::Future<Output = C::Value> + Send + use<'s, Self, C>
+    fn collect_key_of_set<'s, C: Column>(&'s self, key: &'s C::Key) -> C::Value
     where
         C::Mode: KeyOfSetMode,
-        C::Value: Extend<<C::Mode as KeyOfSetMode>::Value> + Default,
+        C::Value: FromIterator<<C::Mode as KeyOfSetMode>::Value>,
     {
-        async move { self.scan_members::<C>(key).collect().await }
+        self.scan_members::<C>(key).collect()
     }
 
     /// Creates a new write transaction for batching multiple write operations.

@@ -7,7 +7,6 @@
 use std::{path::Path, sync::Arc};
 
 use dashmap::DashMap;
-use futures::{Stream, stream};
 use parking_lot::Mutex;
 use qbice_serialize::{
     Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
@@ -320,7 +319,7 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
 impl KvDatabase for RocksDB {
     type WriteTransaction<'a> = RocksDBWriteTransaction<'a>;
 
-    async fn get<C: Column<Mode = Normal>>(
+    fn get<C: Column<Mode = Normal>>(
         &self,
         key: &C::Key,
     ) -> Option<<C as Column>::Value> {
@@ -355,7 +354,7 @@ impl KvDatabase for RocksDB {
     fn scan_members<'s, C: Column>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Stream<Item = <C::Mode as super::KeyOfSetMode>::Value> + Send
+    ) -> impl Iterator<Item = <C::Mode as super::KeyOfSetMode>::Value> + Send
     where
         C::Mode: super::KeyOfSetMode,
     {
@@ -369,8 +368,7 @@ impl KvDatabase for RocksDB {
         // Filter to only include keys that actually start with our prefix.
         // RocksDB's prefix_iterator doesn't guarantee this - it just starts
         // at the prefix position and continues iterating.
-        let iter = iter
-            .map(|x| x.expect("RocksDB iteration error"))
+        iter.map(|x| x.expect("RocksDB iteration error"))
             .take_while(move |(key, _)| key.starts_with(&prefix_buffer))
             .map(|(key, _)| {
                 let length = u64::from_le_bytes(
@@ -388,9 +386,7 @@ impl KvDatabase for RocksDB {
                         &self.plugin,
                     )
                     .expect("decoding should not fail")
-            });
-
-        stream::iter(iter)
+            })
     }
 
     fn write_transaction(&self) -> Self::WriteTransaction<'_> {

@@ -10,9 +10,8 @@ use std::{
 };
 
 use parking_lot::{
-    MappedRwLockReadGuard, Mutex, RwLockReadGuard, RwLockWriteGuard,
+    Condvar, MappedRwLockReadGuard, Mutex, RwLockReadGuard, RwLockWriteGuard,
 };
-use tokio::sync::Notify;
 
 use crate::{
     kv_database::{Column, KeyOfSet, KeyOfSetMode, KvDatabase, Normal},
@@ -31,6 +30,31 @@ impl<V> BackingStorage<V> for Normal {
 
 impl<ColumnValue, V> BackingStorage<ColumnValue> for KeyOfSet<V> {
     type Value = ColumnValue;
+}
+
+#[derive(Clone)]
+struct Notify(Arc<(Condvar, Mutex<bool>)>);
+
+impl Notify {
+    pub fn new() -> Self { Self(Arc::new((Condvar::new(), Mutex::new(false)))) }
+
+    pub fn notify_waiters(&self) {
+        let (condvar, lock) = &*self.0;
+
+        let mut notified = lock.lock();
+        *notified = true;
+        condvar.notify_all();
+    }
+
+    pub fn wait(&self) {
+        let (condvar, lock) = &*self.0;
+
+        let mut notified = lock.lock();
+
+        while !*notified {
+            condvar.wait(&mut notified);
+        }
+    }
 }
 
 /// A sharded cache implementation using the SIEVE eviction algorithm.
@@ -198,7 +222,7 @@ where
     /// however, its internal state mutates the cache by inserting new
     /// values on cache misses.
     #[allow(clippy::cast_possible_truncation)] // from u64 to usize
-    pub async fn get_normal(
+    pub fn get_normal(
         &self,
         key: &C::Key,
     ) -> Option<MappedRwLockReadGuard<'_, C::Value>>
@@ -228,9 +252,8 @@ where
                     },
                 )
             },
-            async |_| self.backing_db.get::<C>(key).await,
+            |_| self.backing_db.get::<C>(key),
         )
-        .await
     }
 
     /// Retrieves a set value from the cache, fetching from the backing database
@@ -279,15 +302,11 @@ where
     /// calling this function. Even though the function returns a read lock,
     /// its internal state mutates the cache by inserting new values on cache
     /// misses.
-    pub async fn get_set(
-        &self,
-        key: &C::Key,
-    ) -> MappedRwLockReadGuard<'_, C::Value>
+    pub fn get_set(&self, key: &C::Key) -> MappedRwLockReadGuard<'_, C::Value>
     where
         C: Column,
         C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
-        C::Value:
-            Extend<<<C as Column>::Mode as KeyOfSetMode>::Value> + Default,
+        C::Value: FromIterator<<<C as Column>::Mode as KeyOfSetMode>::Value>,
     {
         self.get_loop(
             key,
@@ -300,9 +319,8 @@ where
                 })
                 .ok()
             },
-            async |_| self.backing_db.collect_key_of_set::<C>(key).await,
+            |_| self.backing_db.collect_key_of_set::<C>(key),
         )
-        .await
     }
 
     /// Inserts or updates a value in the cache for the given key.
@@ -403,40 +421,39 @@ where
     /// This method uses `get_loop` internally to handle concurrent access,
     /// ensuring that only one task fetches the data from the backing database
     /// if multiple tasks attempt to access the same key simultaneously.
-    pub async fn insert_set(
+    pub fn insert_set(
         &self,
         key: &C::Key,
-        element: <C::Mode as KeyOfSetMode>::Value,
+        element: impl IntoIterator<Item = <C::Mode as KeyOfSetMode>::Value>,
     ) where
         C: Column,
         C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
-        C::Value:
-            Extend<<<C as Column>::Mode as KeyOfSetMode>::Value> + Default,
+        C::Value: FromIterator<<<C as Column>::Mode as KeyOfSetMode>::Value>
+            + Extend<<<C as Column>::Mode as KeyOfSetMode>::Value>
+            + Default,
     {
-        let mut write_lock = self
-            .get_loop(
-                key,
-                |index| {
-                    let lock = self.shards.write_shard(index);
+        let mut write_lock = self.get_loop(
+            key,
+            |index| {
+                let lock = self.shards.write_shard(index);
 
-                    RwLockWriteGuard::try_map(lock, |x| match x.get_mut(key) {
-                        RetrieveMut::Hit(entry) => Some(entry),
-                        RetrieveMut::Miss => None,
-                    })
-                    .ok()
-                },
-                async |_| self.backing_db.collect_key_of_set::<C>(key).await,
-            )
-            .await;
+                RwLockWriteGuard::try_map(lock, |x| match x.get_mut(key) {
+                    RetrieveMut::Hit(entry) => Some(entry),
+                    RetrieveMut::Miss => None,
+                })
+                .ok()
+            },
+            |_| self.backing_db.collect_key_of_set::<C>(key),
+        );
 
-        write_lock.extend(std::iter::once(element));
+        write_lock.extend(element);
     }
 
-    async fn get_loop<T>(
+    fn get_loop<T>(
         &self,
         key: &C::Key,
         mut fast_path: impl FnMut(usize) -> Option<T>,
-        mut slow_path: impl AsyncFnMut(
+        mut slow_path: impl FnMut(
             usize,
         )
             -> <C::Mode as BackingStorage<C::Value>>::Value,
@@ -448,12 +465,12 @@ where
                 return fast_path_result;
             }
 
-            let Some(mut fetching_guard) = self.fetching_lock(key).await else {
+            let Some(mut fetching_guard) = self.fetching_lock(key) else {
                 // some thread has already fetched the value, retry
                 continue;
             };
 
-            let value = slow_path(shard_index).await;
+            let value = slow_path(shard_index);
 
             // hold the lock while inserting to avoid races
             {
@@ -479,17 +496,17 @@ where
     }
 
     #[allow(clippy::await_holding_lock)] // FALSE POSITIVE
-    async fn fetching_lock<'k>(
+    fn fetching_lock<'k>(
         &self,
         key: &'k C::Key,
     ) -> Option<FetchingGuard<'k, '_, C::Key>> {
         let mut in_flight = self.in_flight.lock();
 
         if let Some(notify) = in_flight.get(key) {
-            let notified = notify.clone().notified_owned();
+            let notified = notify.clone();
             drop(in_flight);
 
-            notified.await;
+            notified.wait();
 
             None
         } else {
