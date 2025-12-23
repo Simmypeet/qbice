@@ -204,49 +204,31 @@ where
         C: Column<Mode = Normal>,
         C::Mode: BackingStorage<C::Value, Value = Option<C::Value>>,
     {
-        let shard_index = self.shard_index(key);
+        self.get_loop(
+            key,
+            |shard_index| {
+                let lock = self.shards.read_shard(shard_index);
 
-        loop {
-            let lock = self.shards.read_shard(shard_index);
-
-            if let Ok(lock) =
                 RwLockReadGuard::try_map(lock, |x| match x.get(key) {
                     Retrieve::Hit(entry) => Some(entry),
                     Retrieve::Miss => None,
                 })
-            {
-                return MappedRwLockReadGuard::try_map(lock, Option::as_ref)
-                    .ok();
-            }
-
-            let Some(mut fetching_guard) = self.fetching_lock(key).await else {
-                // some thread has already fetched the value, retry
-                continue;
-            };
-
-            let value = self.backing_db.get::<C>(key).await;
-
-            // hold the lock while inserting to avoid races
-            {
-                let mut in_flight_lock = self.in_flight.lock();
-
-                // defuse the guard
-                fetching_guard.defused = true;
-
-                let Some(notify) = in_flight_lock.remove(key) else {
-                    // the `put` operation has overwritten this entry, discard
-                    continue;
-                };
-
-                // insert into the cache
-                let mut lock = self.shards.write_shard(shard_index);
-                lock.insert(key.clone(), value.clone());
-
-                notify.notify_waiters();
-            }
-
-            // retry again to get the read lock
-        }
+                .map_or_else(
+                    |_| None,
+                    |lock| {
+                        Some(
+                            MappedRwLockReadGuard::try_map(
+                                lock,
+                                Option::as_ref,
+                            )
+                            .ok(),
+                        )
+                    },
+                )
+            },
+            async |_| self.backing_db.get::<C>(key).await,
+        )
+        .await
     }
 
     /// Retrieves a set value from the cache, fetching from the backing database
@@ -305,48 +287,20 @@ where
         C::Value:
             Extend<<<C as Column>::Mode as KeyOfSetMode>::Value> + Default,
     {
-        let shard_index = self.shard_index(key);
+        self.get_loop(
+            key,
+            |index| {
+                let lock = self.shards.read_shard(index);
 
-        loop {
-            let lock = self.shards.read_shard(shard_index);
-
-            if let Ok(lock) =
                 RwLockReadGuard::try_map(lock, |x| match x.get(key) {
                     Retrieve::Hit(entry) => Some(entry),
                     Retrieve::Miss => None,
                 })
-            {
-                return lock;
-            }
-
-            let Some(mut fetching_guard) = self.fetching_lock(key).await else {
-                // some thread has already fetched the value, retry
-                continue;
-            };
-
-            let value = self.backing_db.collect_key_of_set::<C>(key).await;
-
-            // hold the lock while inserting to avoid races
-            {
-                let mut in_flight_lock = self.in_flight.lock();
-
-                // defuse the guard
-                fetching_guard.defused = true;
-
-                let Some(notify) = in_flight_lock.remove(key) else {
-                    // the `put` operation has overwritten this entry, discard
-                    continue;
-                };
-
-                // insert into the cache
-                let mut lock = self.shards.write_shard(shard_index);
-                lock.insert(key.clone(), value.clone());
-
-                notify.notify_waiters();
-            }
-
-            // retry again to get the read lock
-        }
+                .ok()
+            },
+            async |_| self.backing_db.collect_key_of_set::<C>(key).await,
+        )
+        .await
     }
 
     /// Inserts or updates a value in the cache for the given key.
@@ -404,6 +358,52 @@ where
                 let mut lock = self.shards.write_shard(shard_index);
                 lock.insert(key, value);
             }
+        }
+    }
+
+    async fn get_loop<T>(
+        &self,
+        key: &C::Key,
+        mut fast_path: impl FnMut(usize) -> Option<T>,
+        mut slow_path: impl AsyncFnMut(
+            usize,
+        )
+            -> <C::Mode as BackingStorage<C::Value>>::Value,
+    ) -> T {
+        let shard_index = self.shard_index(key);
+
+        loop {
+            if let Some(fast_path_result) = fast_path(shard_index) {
+                return fast_path_result;
+            }
+
+            let Some(mut fetching_guard) = self.fetching_lock(key).await else {
+                // some thread has already fetched the value, retry
+                continue;
+            };
+
+            let value = slow_path(shard_index).await;
+
+            // hold the lock while inserting to avoid races
+            {
+                let mut in_flight_lock = self.in_flight.lock();
+
+                // defuse the guard
+                fetching_guard.defused = true;
+
+                let Some(notify) = in_flight_lock.remove(key) else {
+                    // the `put` operation has overwritten this entry, discard
+                    continue;
+                };
+
+                // insert into the cache
+                let mut lock = self.shards.write_shard(shard_index);
+                lock.insert(key.clone(), value);
+
+                notify.notify_waiters();
+            }
+
+            // retry again to get the read lock
         }
     }
 
