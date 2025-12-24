@@ -35,6 +35,12 @@ impl<C: Config> Engine<C> {
             callee_info.value_fingerprint(),
             callee_info.transitive_firewall_callees_fingerprint(),
         );
+
+        self.caller_observe_tfc_callees(
+            &mut caller_computing,
+            callee_info,
+            callee_target,
+        );
     }
 
     /// Checks whether the stack of computing queries contains a cycle
@@ -110,14 +116,20 @@ impl<C: Config> Engine<C> {
             Ok(FastPathResult::TryAgain)
         } else {
             // check if we have the existing query info
-            let Some(query_info) =
-                self.computation_graph.node_info().get_normal(query_id).await
-            else {
+            let (Some(query_info), Some(last_verified)) = (
+                self.computation_graph.node_info().get_normal(query_id),
+                self.computation_graph
+                    .last_verifieds()
+                    .get_normal(query_id)
+                    .map(|x| *x),
+            ) else {
                 return Ok(FastPathResult::ToSlowPath);
             };
 
             // check if the query is up-to-date
-            if query_info.last_verified() != self.computation_graph.timestamp {
+            if last_verified
+                != self.computation_graph.timestamp_manager.get_current()
+            {
                 return Ok(FastPathResult::ToSlowPath);
             }
 
@@ -127,7 +139,6 @@ impl<C: Config> Engine<C> {
                     .computation_graph
                     .query_store
                     .get_value::<Q>(&query_id.hash_128().into())
-                    .await
                 else {
                     return Ok(FastPathResult::ToSlowPath);
                 };

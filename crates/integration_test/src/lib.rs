@@ -7,16 +7,22 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::missing_const_for_fn)]
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::{
+    hash::BuildHasherDefault,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use qbice::{
-    config::Config,
-    engine::TrackedEngine,
+    Decode, Encode, Engine, TrackedEngine,
+    config::{Config, DefaultConfig},
     executor::{CyclicError, Executor},
     query::Query,
 };
-use qbice_stable_hash::StableHash;
+use qbice_serialize::Plugin;
+use qbice_stable_hash::{SeededStableHasherBuilder, Sip128Hasher, StableHash};
 use qbice_stable_type_id::Identifiable;
+use qbice_storage::kv_database::rocksdb::RocksDB;
+use tempfile::TempDir;
 
 // ============================================================================
 // Basic Variable Query
@@ -33,6 +39,8 @@ use qbice_stable_type_id::Identifiable;
     Ord,
     Hash,
     StableHash,
+    Encode,
+    Decode,
     Identifiable,
 )]
 pub struct Variable(pub u64);
@@ -56,6 +64,8 @@ impl Query for Variable {
     Ord,
     Hash,
     StableHash,
+    Encode,
+    Decode,
     Identifiable,
 )]
 pub struct Division {
@@ -105,6 +115,8 @@ impl<C: Config> Executor<Division, C> for DivisionExecutor {
     Ord,
     Hash,
     Identifiable,
+    Encode,
+    Decode,
     StableHash,
 )]
 pub struct SafeDivision {
@@ -163,6 +175,8 @@ impl<C: Config> Executor<SafeDivision, C> for SafeDivisionExecutor {
     Ord,
     Hash,
     StableHash,
+    Encode,
+    Decode,
     Identifiable,
 )]
 pub struct Absolute {
@@ -206,6 +220,8 @@ impl<C: Config> Executor<Absolute, C> for AbsoluteExecutor {
     Ord,
     Hash,
     StableHash,
+    Encode,
+    Decode,
     Identifiable,
 )]
 pub struct AddTwoAbsolutes {
@@ -257,6 +273,8 @@ impl<C: Config> Executor<AddTwoAbsolutes, C> for AddTwoAbsolutesExecutor {
     Ord,
     Hash,
     Identifiable,
+    Encode,
+    Decode,
     StableHash,
 )]
 pub struct SlowQuery(pub u64);
@@ -285,4 +303,14 @@ impl<C: Config> Executor<SlowQuery, C> for SlowExecutor {
             engine.query(&Variable(query.0)).await
         }
     }
+}
+
+pub fn create_test_engine(tempdir: &TempDir) -> Engine<DefaultConfig> {
+    Engine::<DefaultConfig>::new_with(
+        Plugin::default(),
+        RocksDB::factory(tempdir.path()),
+        SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+        BuildHasherDefault::default(),
+    )
+    .unwrap()
 }

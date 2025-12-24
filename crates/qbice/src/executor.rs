@@ -120,7 +120,7 @@ use qbice_stable_type_id::StableTypeID;
 use crate::{
     TrackedEngine,
     config::Config,
-    query::{DynValueBox, ExecutionStyle, Query},
+    query::{ExecutionStyle, Query},
 };
 
 /// Error indicating that a cyclic query dependency was detected.
@@ -262,14 +262,14 @@ pub struct CyclicError;
 ///     async fn execute(&self, query: &MyQuery, engine: &TrackedEngine<C>) -> Result<i64, CyclicError> {
 ///         // BAD: Reading system time makes this non-deterministic
 ///         let now = std::time::SystemTime::now();
-///         
+///
 ///         // BAD: Reading from filesystem without it being a dependency
 ///         let data = std::fs::read_to_string("config.txt").unwrap();
-///         
+///
 ///         // BAD: Using global mutable state
 ///         static COUNTER: AtomicU64 = AtomicU64::new(0);
 ///         let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-///         
+///
 ///         Ok(count as i64)
 ///     }
 /// }
@@ -390,28 +390,28 @@ fn invoke_executor<
     key: &'a dyn Any,
     executor: &'a dyn Any,
     engine: &'a mut TrackedEngine<C>,
-) -> Pin<
-    Box<dyn Future<Output = Result<DynValueBox<C>, CyclicError>> + Send + 'a>,
-> {
+    result: &'a mut (dyn Any + Send + Sync),
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     let key = key.downcast_ref::<K>().expect("Key type mismatch");
     let executor =
         executor.downcast_ref::<E>().expect("Executor type mismatch");
 
     Box::pin(async {
-        executor.execute(key, engine).await.map(|x| {
-            let boxed: DynValueBox<C> = smallbox::smallbox!(x);
-            boxed
-        })
+        let result_buffer: &mut MaybeUninit<Result<K::Value, CyclicError>> =
+            result.downcast_mut().expect("Result type mismatch");
+
+        result_buffer.write(executor.execute(key, engine).await);
     })
 }
 
-type InvokeExecutorFn<C> = for<'a> fn(
-    key: &'a dyn Any,
-    executor: &'a dyn Any,
-    engine: &'a mut TrackedEngine<C>,
-) -> Pin<
-    Box<dyn Future<Output = Result<DynValueBox<C>, CyclicError>> + Send + 'a>,
->;
+type InvokeExecutorFn<C> =
+    for<'a> fn(
+        key: &'a dyn Any,
+        executor: &'a dyn Any,
+        engine: &'a mut TrackedEngine<C>,
+        result: &'a mut (dyn Any + Send + Sync),
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
 // type InvokeQueryForFn<C> = for<'a> fn(
 //     engine: &'a Arc<Engine<C>>,
 //     key: &'a dyn Any,
@@ -471,12 +471,24 @@ impl<C: Config> Entry<C> {
         }
     }
 
-    pub async fn invoke_executor(
+    pub async fn invoke_executor<Q: Query>(
         &self,
-        query_key: &(dyn Any + Send + Sync),
+        query_key: &Q,
         engine: &mut TrackedEngine<C>,
-    ) -> Result<DynValueBox<C>, CyclicError> {
-        (self.invoke_executor)(query_key, self.executor.as_ref(), engine).await
+    ) -> Result<Q::Value, CyclicError> {
+        let mut result_buffer =
+            MaybeUninit::<Result<Q::Value, CyclicError>>::uninit();
+
+        (self.invoke_executor)(
+            query_key,
+            self.executor.as_ref(),
+            engine,
+            &mut result_buffer,
+        )
+        .await;
+
+        // SAFETY: the previous call should've initialized the buffer
+        unsafe { result_buffer.assume_init() }
     }
 
     // pub async fn invoke_query_for(

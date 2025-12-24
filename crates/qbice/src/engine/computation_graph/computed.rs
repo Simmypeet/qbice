@@ -12,8 +12,8 @@ use crate::{
     ExecutionStyle,
     config::Config,
     engine::computation_graph::{
-        ComputationGraph, QueryKind, Sieve, Timestamp,
-        TransitiveFirewallCallees,
+        ComputationGraph, QueryKind, Sieve,
+        tfc_achetype::TransitiveFirewallCallees, timestamp::Timestamp,
     },
     query::QueryID,
 };
@@ -24,16 +24,17 @@ impl QueryKind {
     }
 }
 
-type ForwardEdgeColumn = (QueryID, Vec<QueryID>);
-type NodeInfoColumn = (QueryID, NodeInfo);
+pub type LastVerifiedColumn = (QueryID, Timestamp);
+pub type ForwardEdgeColumn = (QueryID, Arc<[QueryID]>);
+pub type NodeInfoColumn = (QueryID, NodeInfo);
 
 #[derive(Identifiable)]
-struct DirtySetColumn;
+pub struct DirtySetColumn;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]
-struct Edge {
+pub struct Edge {
     from: QueryID,
     to: QueryID,
 }
@@ -46,27 +47,48 @@ impl Column for DirtySetColumn {
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Identifiable)]
 pub struct NodeInfo {
-    last_verified: Timestamp,
     query_kind: QueryKind,
     fingerprint: Compact128,
     transitive_firewall_callees_fingerprint: Compact128,
-    transitive_firewall_callees: Interned<TransitiveFirewallCallees>,
+    transitive_firewall_callees: Option<Interned<TransitiveFirewallCallees>>,
 }
 
 impl NodeInfo {
-    pub const fn last_verified(&self) -> Timestamp { self.last_verified }
+    pub const fn new(
+        query_kind: QueryKind,
+        fingerprint: Compact128,
+        transitive_firewall_callees_fingerprint: Compact128,
+        transitive_firewall_callees: Option<
+            Interned<TransitiveFirewallCallees>,
+        >,
+    ) -> Self {
+        Self {
+            query_kind,
+            fingerprint,
+            transitive_firewall_callees_fingerprint,
+            transitive_firewall_callees,
+        }
+    }
 
     pub const fn value_fingerprint(&self) -> Compact128 { self.fingerprint }
 
     pub const fn transitive_firewall_callees_fingerprint(&self) -> Compact128 {
         self.transitive_firewall_callees_fingerprint
     }
+
+    pub const fn transitive_firewall_callees(
+        &self,
+    ) -> Option<&Interned<TransitiveFirewallCallees>> {
+        self.transitive_firewall_callees.as_ref()
+    }
+
+    pub const fn query_kind(&self) -> QueryKind { self.query_kind }
 }
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
 )]
-struct BackwardEdgeColumn;
+pub struct BackwardEdgeColumn;
 
 impl Column for BackwardEdgeColumn {
     type Key = QueryID;
@@ -77,8 +99,9 @@ impl Column for BackwardEdgeColumn {
 }
 
 pub struct Computed<C: Config> {
-    forward_edges: Sieve<(QueryID, Arc<[QueryID]>), C>,
-    node_info: Sieve<(QueryID, NodeInfo), C>,
+    last_verifieds: Sieve<LastVerifiedColumn, C>,
+    forward_edges: Sieve<ForwardEdgeColumn, C>,
+    node_info: Sieve<NodeInfoColumn, C>,
     dirty_edge_set: Sieve<DirtySetColumn, C>,
     backward_edges: Sieve<BackwardEdgeColumn, C>,
 }
@@ -92,6 +115,12 @@ impl<C: Config> Computed<C> {
         const CAPACITY: usize = 10_000;
 
         Self {
+            last_verifieds: Sieve::<_, C>::new(
+                CAPACITY,
+                shard_amount,
+                db.clone(),
+                build_hasher.clone(),
+            ),
             forward_edges: Sieve::<_, C>::new(
                 CAPACITY,
                 shard_amount,
@@ -127,6 +156,10 @@ impl<C: Config> ComputationGraph<C> {
 
     pub const fn node_info(&self) -> &Sieve<(QueryID, NodeInfo), C> {
         &self.computed.node_info
+    }
+
+    pub const fn last_verifieds(&self) -> &Sieve<(QueryID, Timestamp), C> {
+        &self.computed.last_verifieds
     }
 
     pub const fn backward_edges(&self) -> &Sieve<BackwardEdgeColumn, C> {

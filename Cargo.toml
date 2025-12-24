@@ -41,6 +41,7 @@ crossbeam-utils = "0.8.21"
 bimap = "0.6.3"
 fxhash = "0.2.1"
 rust-rocksdb = "0.44.2"
+tempfile = "3"
 futures = "0.3.31"
 
 [workspace.lints.rust]

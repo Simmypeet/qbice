@@ -70,6 +70,12 @@ pub struct QueryEntry<Q: Query> {
     query_result: Q::Value,
 }
 
+impl<Q: Query> QueryEntry<Q> {
+    pub const fn new(original_query_input: Q, query_result: Q::Value) -> Self {
+        Self { original_query_input, query_result }
+    }
+}
+
 impl<C: Config> QueryStore<C> {
     pub fn new(
         total_capacity: usize,
@@ -88,10 +94,9 @@ impl<C: Config> QueryStore<C> {
     }
 
     pub fn insert<Q: Query>(
-        &mut self,
+        &self,
         query_input_hash_128: Compact128,
-        original_query_input: Q,
-        query_result: Q::Value,
+        query_entry: QueryEntry<Q>,
     ) {
         let mut entry =
             self.map.entry(TypeId::of::<Q>()).or_insert_with(|| {
@@ -106,13 +111,10 @@ impl<C: Config> QueryStore<C> {
         let entry =
             (**entry).downcast_mut::<Sieve<QueryColumn<Q>, C>>().unwrap();
 
-        entry.put(
-            query_input_hash_128,
-            Some(QueryEntry { original_query_input, query_result }),
-        );
+        entry.put(query_input_hash_128, Some(query_entry));
     }
 
-    pub async fn get_value<Q: Query>(
+    pub fn get_value<Q: Query>(
         &self,
         query_input_hash_128: &Compact128,
     ) -> Option<Q::Value> {
@@ -121,9 +123,6 @@ impl<C: Config> QueryStore<C> {
         let sieve =
             (**entry).downcast_ref::<Sieve<QueryColumn<Q>, C>>().unwrap();
 
-        sieve
-            .get_normal(query_input_hash_128)
-            .await
-            .map(|x| x.query_result.clone())
+        sieve.get_normal(query_input_hash_128).map(|x| x.query_result.clone())
     }
 }

@@ -105,7 +105,9 @@
 use std::sync::{Arc, OnceLock};
 
 use qbice_serialize::Plugin;
-use qbice_stable_hash::StableHash;
+use qbice_stable_hash::{
+    BuildStableHasher, Compact128, StableHash, StableHasher,
+};
 use qbice_storage::{intern::SharedInterner, kv_database::KvDatabaseFactory};
 
 use crate::{
@@ -305,13 +307,18 @@ impl<C: Config> Engine<C> {
                 database.clone(),
                 default_shard_amount(),
                 hasher,
-                
             ),
             database,
             interner: shared_interner,
             executor_registry: Registry::default(),
             build_stable_hasher: stable_hasher,
         })
+    }
+
+    fn hash<V: StableHash>(&self, value: &V) -> Compact128 {
+        let mut hasher = self.build_stable_hasher.build_stable_hasher();
+        value.stable_hash(&mut hasher);
+        hasher.finish().into()
     }
 }
 

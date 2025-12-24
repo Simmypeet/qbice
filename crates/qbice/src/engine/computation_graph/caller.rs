@@ -29,6 +29,12 @@ pub struct QueryCaller {
     reason: CallerReason,
 }
 
+impl QueryCaller {
+    pub const fn new(query_id: QueryID, reason: CallerReason) -> Self {
+        Self { query_id, reason }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallerInformation {
     User,

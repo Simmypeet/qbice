@@ -2,14 +2,17 @@
 
 use std::sync::Arc;
 
-use qbice::{config::DefaultConfig, engine::Engine};
 use qbice_integration_test::{
     DivisionExecutor, SafeDivision, SafeDivisionExecutor, Variable,
+    create_test_engine,
 };
+use tempfile::tempdir;
 
 #[tokio::test]
 async fn safe_division_basic() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+
+    let mut engine = create_test_engine(&tempdir);
 
     let division_ex = Arc::new(DivisionExecutor::default());
     let safe_division_ex = Arc::new(SafeDivisionExecutor::default());

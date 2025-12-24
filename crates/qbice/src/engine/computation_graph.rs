@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use fxhash::FxHashSet;
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};
-use qbice_stable_type_id::Identifiable;
+use qbice_stable_hash::{BuildStableHasher, StableHasher};
 
 use crate::{
     Engine, ExecutionStyle, Query,
@@ -12,7 +10,7 @@ use crate::{
     engine::computation_graph::{
         caller::CallerInformation, computed::Computed,
         computing_lock::ComputingLock, fast_path::FastPathResult,
-        query_store::QueryStore,
+        query_store::QueryStore, timestamp::TimestampManager,
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, QueryID},
@@ -22,8 +20,12 @@ mod caller;
 mod computed;
 mod computing_lock;
 mod fast_path;
+mod input_session;
 mod query_store;
 mod register_callee;
+mod slow_path;
+mod tfc_achetype;
+mod timestamp;
 
 type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
     Col,
@@ -32,22 +34,23 @@ type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
 >;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Encode,
+    Decode,
+    Default,
 )]
-struct Timestamp(u64);
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
-)]
-enum QueryKind {
+pub enum QueryKind {
+    #[default]
     Input,
     Executable(ExecutionStyle),
 }
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, StableHash, Encode, Decode, Identifiable,
-)]
-pub struct TransitiveFirewallCallees(FxHashSet<QueryID>);
 
 pub struct ComputationGraph<C: Config> {
     computed: Computed<C>,
@@ -55,7 +58,7 @@ pub struct ComputationGraph<C: Config> {
     computing_lock: ComputingLock,
 
     database: Arc<C::Database>,
-    timestamp: Timestamp,
+    timestamp_manager: TimestampManager,
 }
 
 impl<C: Config> ComputationGraph<C> {
@@ -79,8 +82,8 @@ impl<C: Config> ComputationGraph<C> {
             ),
             computing_lock: ComputingLock::new(),
 
+            timestamp_manager: TimestampManager::new(&*db),
             database: db,
-            timestamp: Timestamp(0),
         }
     }
 }
@@ -246,7 +249,7 @@ impl<C: Config> TrackedEngine<C> {
         let query_with_id = self.engine.new_query_with_id(query);
 
         // check local cache
-        if let Some(value) = self.cache.get(query_with_id.id()) {
+        if let Some(value) = self.cache.get(&query_with_id.id) {
             // cache hit! don't have to go through central database
             let value: &dyn DynValue<C> = &**value;
 
@@ -328,11 +331,6 @@ pub struct QueryWithID<'c, Q: Query> {
     query: &'c Q,
 }
 
-impl<Q: Query> QueryWithID<'_, Q> {
-    pub const fn id(&self) -> &QueryID { &self.id }
-    pub const fn query(&self) -> &Q { self.query }
-}
-
 /// Specifies whether the query is has been repaired or is up-to-date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum QueryRepairation {
@@ -360,19 +358,6 @@ impl<V> QueryResult<V> {
             }
         }
     }
-
-    /// Type erases the type parameter `V` into a `DynValueBox<C>`.
-    pub fn into_dyn_query_result<C: Config>(self) -> QueryResult<DynValueBox<C>>
-    where
-        V: DynValue<C>,
-    {
-        match self {
-            Self::Return(v, c) => {
-                QueryResult::Return(smallbox::smallbox!(v), c)
-            }
-            Self::Checked(c) => QueryResult::Checked(c),
-        }
-    }
 }
 
 impl<C: Config> Engine<C> {
@@ -382,14 +367,13 @@ impl<C: Config> Engine<C> {
         caller: &CallerInformation,
     ) -> Result<QueryResult<Q::Value>, CyclicError> {
         // register the dependency for the sake of detecting cycles
-        let undo_register =
-            self.register_callee(caller.get_caller(), *query.id());
+        let undo_register = self.register_callee(caller.get_caller(), query.id);
 
         let mut checked = QueryRepairation::UpToDate;
 
         // pulling the value
         let value = loop {
-            match self.fast_path::<Q>(query.id(), caller).await {
+            match self.fast_path::<Q>(&query.id, caller).await {
                 // try again
                 Ok(FastPathResult::TryAgain) => continue,
 
@@ -424,13 +408,21 @@ impl<C: Config> Engine<C> {
             // now the `query` state is held in computing state.
             // if `lock_computing` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
-            let Some(lock_computing) =
-                self.computing_lock_guard(query.id()).await
+            let Some(lock_computing) = self.computing_lock_guard(&query.id)
             else {
                 // try the fast path again
                 continue;
             };
+
+            self.continuation(query, caller, lock_computing).await;
+
+            checked = QueryRepairation::Repaired;
+
+            // retry to the fast path and obtain value.
         };
+
+        // if cyclic dependency is detected, return error
+        self.is_query_running_in_scc(caller.get_caller())?;
 
         Ok(value)
     }
