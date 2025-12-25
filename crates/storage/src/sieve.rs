@@ -2,16 +2,19 @@
 
 use core::fmt;
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    borrow::Borrow,
+    collections::{HashMap, HashSet, hash_map::Entry},
     fmt::Debug,
     hash::{BuildHasher, BuildHasherDefault, Hash},
     option::Option,
     sync::{Arc, atomic::AtomicBool},
 };
 
+use dashmap::DashSet;
 use parking_lot::{
     Condvar, MappedRwLockReadGuard, Mutex, RwLockReadGuard, RwLockWriteGuard,
 };
+use rust_rocksdb::properties::ESTIMATE_TABLE_READERS_MEM;
 
 use crate::{
     kv_database::{Column, KeyOfSet, KeyOfSetMode, KvDatabase, Normal},
@@ -30,6 +33,43 @@ impl<V> BackingStorage<V> for Normal {
 
 impl<ColumnValue, V> BackingStorage<ColumnValue> for KeyOfSet<V> {
     type Value = ColumnValue;
+}
+
+/// A trait for removing an element from a set-like collection.
+///
+/// This trait is used by sieve cache to remove elements from set values.
+pub trait RemoveElementFromSet {
+    /// The type of elements stored in the set.
+    type Element;
+
+    /// Removes an element from the set.
+    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
+    where
+        Self::Element: Borrow<Q>;
+}
+
+impl<T: Eq + Hash, S: BuildHasher> RemoveElementFromSet for HashSet<T, S> {
+    type Element = T;
+
+    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
+    where
+        Self::Element: Borrow<Q>,
+    {
+        self.remove(element)
+    }
+}
+
+impl<T: Eq + Hash, S: BuildHasher + Clone> RemoveElementFromSet
+    for DashSet<T, S>
+{
+    type Element = T;
+
+    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
+    where
+        Self::Element: Borrow<Q>,
+    {
+        self.remove(element).is_some()
+    }
 }
 
 #[derive(Clone)]
@@ -421,7 +461,7 @@ where
     /// This method uses `get_loop` internally to handle concurrent access,
     /// ensuring that only one task fetches the data from the backing database
     /// if multiple tasks attempt to access the same key simultaneously.
-    pub fn insert_set(
+    pub fn insert_set_element(
         &self,
         key: &C::Key,
         element: impl IntoIterator<Item = <C::Mode as KeyOfSetMode>::Value>,
@@ -447,6 +487,40 @@ where
         );
 
         write_lock.extend(element);
+    }
+
+    /// Removes an element from a set stored in the cache for the given key.
+    ///
+    /// This method is specifically designed for columns using the `KeyOfSet`
+    /// storage mode. It retrieves the set associated with the key (loading it
+    /// from the backing database if necessary) and removes a single element
+    /// from it.
+    pub fn remove_set_element<Q: ?Sized + Eq + Hash>(
+        &self,
+        key: &C::Key,
+        element: &Q,
+    ) where
+        C: Column,
+        C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
+        C::Value: RemoveElementFromSet<Element = <C::Mode as KeyOfSetMode>::Value>
+            + FromIterator<<<C as Column>::Mode as KeyOfSetMode>::Value>,
+        <C::Mode as KeyOfSetMode>::Value: Borrow<Q>,
+    {
+        let mut write_lock = self.get_loop(
+            key,
+            |index| {
+                let lock = self.shards.write_shard(index);
+
+                RwLockWriteGuard::try_map(lock, |x| match x.get_mut(key) {
+                    RetrieveMut::Hit(entry) => Some(entry),
+                    RetrieveMut::Miss => None,
+                })
+                .ok()
+            },
+            |_| self.backing_db.collect_key_of_set::<C>(key),
+        );
+
+        write_lock.remove_element(element);
     }
 
     fn get_loop<T>(
