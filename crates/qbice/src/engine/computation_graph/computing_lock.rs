@@ -326,7 +326,9 @@ impl<C: Config> Engine<C> {
                 callee_observations: callee_info
                     .callee_queries
                     .into_iter()
-                    .map(|(k, v)| (k, v.unwrap()))
+                    // in case of cyclic dependencies, some callees may have
+                    // been aborted
+                    .filter_map(|(k, v)| v.map(|v| (k, v)))
                     .collect(),
                 callee_order: callee_info.callee_order,
             },
