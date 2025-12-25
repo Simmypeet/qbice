@@ -13,19 +13,23 @@ use std::{
 };
 
 use qbice::{
-    config::{Config, DefaultConfig},
-    engine::{Engine, TrackedEngine},
+    Decode, Encode, TrackedEngine,
+    config::Config,
     executor::{CyclicError, Executor},
     query::Query,
 };
-use qbice_integration_test::{SlowExecutor, SlowQuery, Variable};
+use qbice_integration_test::{
+    SlowExecutor, SlowQuery, Variable, create_test_engine,
+};
 use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
+use tempfile::tempdir;
 use tokio::task::yield_now;
 
 #[tokio::test]
 async fn cancellation_safety() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let slow_executor = Arc::new(SlowExecutor::default());
 
@@ -79,6 +83,8 @@ async fn cancellation_safety() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct CancellableChainA(pub u64);
 
@@ -97,6 +103,8 @@ impl Query for CancellableChainA {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct CancellableChainB(pub u64);
 
@@ -153,7 +161,8 @@ impl<C: Config> Executor<CancellableChainB, C> for CancellableChainBExecutor {
 
 #[tokio::test]
 async fn cancellation_with_dependency_chain() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let executor_a = Arc::new(CancellableChainAExecutor::default());
     let executor_b = Arc::new(CancellableChainBExecutor::default());
@@ -222,6 +231,8 @@ async fn cancellation_with_dependency_chain() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct ParallelCancellableQuery(pub u64);
 
@@ -256,7 +267,8 @@ impl<C: Config> Executor<ParallelCancellableQuery, C>
 
 #[tokio::test]
 async fn parallel_queries_with_cancellation() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let executor = Arc::new(ParallelCancellableExecutor::default());
     executor.delay_ms.store(200, Ordering::Relaxed);
@@ -340,6 +352,8 @@ async fn parallel_queries_with_cancellation() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct MultiDependencyQuery {
     pub deps: [Variable; 3],
@@ -384,7 +398,8 @@ impl<C: Config> Executor<MultiDependencyQuery, C> for MultiDependencyExecutor {
 
 #[tokio::test]
 async fn cancellation_with_partial_dependencies() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let executor = Arc::new(MultiDependencyExecutor::default());
     engine.register_executor(executor.clone());
@@ -451,6 +466,8 @@ async fn cancellation_with_partial_dependencies() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct RepairableCancellableQuery(pub Variable);
 
@@ -488,7 +505,8 @@ impl<C: Config> Executor<RepairableCancellableQuery, C>
 
 #[tokio::test]
 async fn cancellation_during_repair() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let executor = Arc::new(RepairableCancellableExecutor::default());
     engine.register_executor(executor.clone());
@@ -565,6 +583,8 @@ async fn cancellation_during_repair() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct NestedCancellableQuery(pub u64);
 
@@ -583,6 +603,8 @@ impl Query for NestedCancellableQuery {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct NestedCancellableInner(pub u64);
 
@@ -647,7 +669,8 @@ impl<C: Config> Executor<NestedCancellableInner, C>
 
 #[tokio::test]
 async fn cancellation_at_different_nesting_levels() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let outer_executor = Arc::new(NestedCancellableOuterExecutor::default());
     let inner_executor = Arc::new(NestedCancellableInnerExecutor::default());
