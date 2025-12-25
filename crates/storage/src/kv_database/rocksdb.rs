@@ -179,15 +179,36 @@ impl RocksDB {
             return cf;
         }
 
-        // Create new column family
-        self.db
-            .create_cf(&cf_name, &Options::default())
-            .expect("failed to create column family");
+        match self.column_families.entry(id) {
+            dashmap::Entry::Occupied(occupied_entry) => {
+                self.db.cf_handle(occupied_entry.get()).unwrap_or_else(|| {
+                    self.db
+                        .create_cf(&cf_name, &Options::default())
+                        .expect("failed to create column family");
 
-        self.column_families.insert(id, cf_name.clone());
-        self.db
-            .cf_handle(&cf_name)
-            .expect("column family should exist after creation")
+                    self.db
+                        .cf_handle(&cf_name)
+                        .expect("column family should exist after creation")
+                })
+            }
+
+            dashmap::Entry::Vacant(vacant_entry) => {
+                if let Some(cf) = self.db.cf_handle(&cf_name) {
+                    vacant_entry.insert(cf_name);
+                    cf
+                } else {
+                    // proceed to create new column family
+                    self.db
+                        .create_cf(&cf_name, &Options::default())
+                        .expect("failed to create column family");
+
+                    vacant_entry.insert(cf_name.clone());
+                    self.db
+                        .cf_handle(&cf_name)
+                        .expect("column family should exist after creation")
+                }
+            }
+        }
     }
 
     /// Encodes a key using the postcard format.
