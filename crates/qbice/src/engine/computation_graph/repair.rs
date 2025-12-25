@@ -177,11 +177,16 @@ impl<C: Config> Engine<C> {
 
             let new_tfc = self.union_tfcs(
                 forward_edges.callee_order.iter().filter_map(|x| {
-                    self.computation_graph
-                        .get_node_info(x)
-                        .unwrap()
-                        .transitive_firewall_callees()
-                        .map(|x| Cow::Owned(x.clone()))
+                    let callee_info =
+                        self.computation_graph.get_node_info(x).unwrap();
+
+                    if callee_info.query_kind().is_firewall() {
+                        Some(Cow::Owned(self.new_singleton_tfc(*x)))
+                    } else {
+                        callee_info
+                            .transitive_firewall_callees()
+                            .map(|x| Cow::Owned(x.clone()))
+                    }
                 }),
             );
 
