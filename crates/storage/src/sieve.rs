@@ -14,7 +14,6 @@ use dashmap::DashSet;
 use parking_lot::{
     Condvar, MappedRwLockReadGuard, Mutex, RwLockReadGuard, RwLockWriteGuard,
 };
-use rust_rocksdb::properties::ESTIMATE_TABLE_READERS_MEM;
 
 use crate::{
     kv_database::{Column, KeyOfSet, KeyOfSetMode, KvDatabase, Normal},
