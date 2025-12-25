@@ -23,6 +23,7 @@ mod dirty_propagation;
 mod fast_path;
 mod input_session;
 mod register_callee;
+mod repair;
 mod slow_path;
 mod tfc_achetype;
 mod timestamp;
@@ -50,6 +51,16 @@ pub enum QueryKind {
     #[default]
     Input,
     Executable(ExecutionStyle),
+}
+
+impl QueryKind {
+    #[must_use]
+    pub const fn is_input(self) -> bool { matches!(self, Self::Input) }
+
+    #[must_use]
+    pub const fn is_firewall(self) -> bool {
+        matches!(self, Self::Executable(ExecutionStyle::Firewall))
+    }
 }
 
 pub struct ComputationGraph<C: Config> {

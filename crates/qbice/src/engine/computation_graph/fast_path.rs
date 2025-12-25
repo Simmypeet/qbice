@@ -117,10 +117,10 @@ impl<C: Config> Engine<C> {
         } else {
             // check if we have the existing query info
 
-            let (Some(query_info), Some(last_verified)) = dbg!((
+            let (Some(query_info), Some(last_verified)) = (
                 self.computation_graph.get_node_info(query_id),
                 self.computation_graph.get_last_verified(query_id),
-            )) else {
+            ) else {
                 return Ok(FastPathResult::ToSlowPath);
             };
 

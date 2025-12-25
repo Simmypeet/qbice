@@ -22,7 +22,7 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
-        execute_query_for: ExecuteQueryFor,
+        _execute_query_for: ExecuteQueryFor,
         lock_guard: ComputingLockGuard<'_>,
     ) {
         // create a new tracked engine
@@ -92,12 +92,7 @@ impl<C: Config> Engine<C> {
 
         let value = result.unwrap_or_else(|_| entry.obtain_scc_value::<Q>());
 
-        match execute_query_for {
-            ExecuteQueryFor::FreshQuery => {
-                self.computing_lock_to_computed(query, value, lock_guard);
-            }
-            ExecuteQueryFor::RecomputeQuery => todo!("handle recompute query"),
-        }
+        self.computing_lock_to_computed(query, value, lock_guard);
     }
 
     pub(super) async fn continuation<Q: Query>(
@@ -115,7 +110,7 @@ impl<C: Config> Engine<C> {
             )
             .await;
         } else {
-            todo!("haven't implemented")
+            self.repair_query(query, caller_information, lock_guard).await;
         }
     }
 }

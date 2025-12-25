@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{HashMap, hash_map::Entry},
     sync::{Arc, atomic::AtomicBool},
 };
@@ -106,7 +107,8 @@ impl<C: Config> Engine<C> {
                         .tfc_archetype
                         .as_ref()
                         .into_iter()
-                        .chain(callee_info.transitive_firewall_callees()),
+                        .chain(callee_info.transitive_firewall_callees())
+                        .map(Cow::Borrowed),
                 );
             }
             QueryKind::Executable(ExecutionStyle::Firewall) => {
@@ -117,7 +119,8 @@ impl<C: Config> Engine<C> {
                         .tfc_archetype
                         .as_ref()
                         .into_iter()
-                        .chain(std::iter::once(&singleton_tfc)),
+                        .chain(std::iter::once(&singleton_tfc))
+                        .map(Cow::Borrowed),
                 );
             }
         }
@@ -225,15 +228,20 @@ impl<C: Config> Engine<C> {
                     return None;
                 }
 
-                let executor = self
-                    .executor_registry
-                    .get_executor_entry_by_type_id(&query_id.stable_type_id());
+                let (mode, query_kind) = if last_verified.is_some() {
+                    let node_info =
+                        self.computation_graph.get_node_info(query_id).unwrap();
 
-                let style = executor.obtain_execution_style();
-                let mode = if last_verified.is_some() {
-                    ComputingMode::Repair
+                    (ComputingMode::Repair, node_info.query_kind())
                 } else {
-                    ComputingMode::Execute
+                    let executor =
+                        self.executor_registry.get_executor_entry_by_type_id(
+                            &query_id.stable_type_id(),
+                        );
+
+                    let style = executor.obtain_execution_style();
+
+                    (ComputingMode::Execute, QueryKind::Executable(style))
                 };
 
                 vacant_entry.insert(Computing {
@@ -247,7 +255,7 @@ impl<C: Config> Engine<C> {
                     // node.
                     mode,
 
-                    query_kind: QueryKind::Executable(style),
+                    query_kind,
                     is_in_scc: AtomicBool::new(false),
                     tfc_archetype: None,
                 });
@@ -260,6 +268,31 @@ impl<C: Config> Engine<C> {
                 })
             }
         }
+    }
+
+    #[allow(clippy::option_option)]
+    pub(super) fn computing_lock_to_clean_query(
+        &self,
+        query_id: &QueryID,
+        clean_edges: &[QueryID],
+        new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
+        lock_guard: ComputingLockGuard<'_>,
+    ) {
+        let dashmap::Entry::Occupied(entry_lock) =
+            self.computation_graph.computing_lock.lock.entry(*query_id)
+        else {
+            panic!("computing lock should exist when transferring to computed");
+        };
+
+        let notify = entry_lock.get().notify.clone();
+
+        self.clean_query(query_id, clean_edges, new_tfc);
+
+        lock_guard.defuse();
+
+        entry_lock.remove();
+
+        notify.notify_waiters();
     }
 
     pub(super) fn computing_lock_to_computed<Q: Query>(
@@ -290,7 +323,7 @@ impl<C: Config> Engine<C> {
             value,
             query_kind,
             ForwardEdges {
-                callee_observation: callee_info
+                callee_observations: callee_info
                     .callee_queries
                     .into_iter()
                     .map(|(k, v)| (k, v.unwrap()))

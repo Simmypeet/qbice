@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    borrow::Cow,
+    ops::{Deref, DerefMut},
+};
 
 use fxhash::FxHashSet;
 use qbice_serialize::{Decode, Encode};
@@ -37,7 +40,9 @@ impl<C: Config> Engine<C> {
 
     pub(super) fn union_tfcs<'a>(
         &self,
-        others: impl IntoIterator<Item = &'a Interned<TransitiveFirewallCallees>>,
+        others: impl IntoIterator<
+            Item = Cow<'a, Interned<TransitiveFirewallCallees>>,
+        >,
     ) -> Option<Interned<TransitiveFirewallCallees>> {
         let mut current_tfc: Option<Interned<TransitiveFirewallCallees>> = None;
         let mut new_archetype: Option<FxHashSet<QueryID>> = None;
@@ -46,7 +51,10 @@ impl<C: Config> Engine<C> {
             match (&mut current_tfc, &mut new_archetype) {
                 // extract new tfc
                 (None, None) => {
-                    current_tfc = Some(other.clone());
+                    current_tfc = Some(match other {
+                        Cow::Borrowed(x) => x.clone(),
+                        Cow::Owned(x) => x,
+                    });
                 }
 
                 (None, Some(_)) => {
@@ -57,7 +65,10 @@ impl<C: Config> Engine<C> {
                     // if one of these two is a superset of the other, we can
                     // skip creating a new archetype
                     if other.0.is_superset(&current.0) {
-                        *current = other.clone();
+                        *current = match other {
+                            Cow::Borrowed(x) => x.clone(),
+                            Cow::Owned(x) => x,
+                        };
                     } else if current.0.is_superset(&other.0) {
                     } else {
                         // create a new archetype set that is the union of both

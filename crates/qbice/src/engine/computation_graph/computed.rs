@@ -258,7 +258,7 @@ pub struct Observation {
 
 #[derive(Identifiable)]
 pub struct ForwardEdges<C: Config> {
-    pub callee_observation: HashMap<QueryID, Observation, C::BuildHasher>,
+    pub callee_observations: HashMap<QueryID, Observation, C::BuildHasher>,
     pub callee_order: Vec<QueryID>,
 }
 
@@ -269,7 +269,7 @@ impl<C: Config> Encode for ForwardEdges<C> {
         plugin: &qbice_serialize::Plugin,
         session: &mut qbice_serialize::session::Session,
     ) -> std::io::Result<()> {
-        self.callee_observation.encode(encoder, plugin, session)?;
+        self.callee_observations.encode(encoder, plugin, session)?;
         self.callee_order.encode(encoder, plugin, session)
     }
 }
@@ -283,23 +283,16 @@ impl<C: Config> Decode for ForwardEdges<C> {
         let callee_observation = HashMap::decode(decoder, plugin, session)?;
         let callee_order = Vec::decode(decoder, plugin, session)?;
 
-        Ok(Self { callee_observation, callee_order })
+        Ok(Self { callee_observations: callee_observation, callee_order })
     }
 }
 
 impl<C: Config> ForwardEdges<C> {
     pub fn empty() -> Self {
         Self {
-            callee_observation: HashMap::with_hasher(C::BuildHasher::default()),
+            callee_observations: HashMap::with_hasher(C::BuildHasher::default()),
             callee_order: Vec::new(),
         }
-    }
-
-    pub const fn new(
-        callee_observation: HashMap<QueryID, Observation, C::BuildHasher>,
-        callee_order: Vec<QueryID>,
-    ) -> Self {
-        Self { callee_observation, callee_order }
     }
 }
 
@@ -355,8 +348,21 @@ impl<C: Config> Engine<C> {
         let current_timestamp =
             self.computation_graph.timestamp_manager.get_current();
 
+        let existing_forward_edges =
+            self.computation_graph.get_forward_edges(&query_id.id);
+
         {
             let tx = self.database.write_transaction();
+
+            // remove prior backward edges
+            if let Some(forward_edges) = &existing_forward_edges {
+                for edge in &forward_edges.callee_order {
+                    tx.delete_member::<BackwardEdgeColumn<C>>(
+                        edge,
+                        &query_id.id,
+                    );
+                }
+            }
 
             tx.put::<LastVerifiedColumn>(&query_id.id, &current_timestamp);
 
@@ -377,6 +383,16 @@ impl<C: Config> Engine<C> {
         }
 
         {
+            // remove prior backward edges
+            if let Some(forward_edges) = &existing_forward_edges {
+                for edge in &forward_edges.callee_order {
+                    self.computation_graph
+                        .computed
+                        .backward_edges
+                        .remove_set_element(edge, &query_id.id);
+                }
+            }
+
             self.computation_graph
                 .computed
                 .last_verifieds
@@ -496,5 +512,80 @@ impl<C: Config> Engine<C> {
         tx.put::<DirtySetColumn>(&edge, &());
 
         self.computation_graph.computed.dirty_edge_set.put(edge, Some(()));
+    }
+
+    #[allow(clippy::option_option)]
+    pub(super) fn clean_query(
+        &self,
+        query_id: &QueryID,
+        clean_edges: &[QueryID],
+        new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
+    ) {
+        let current_timestamp =
+            self.computation_graph.timestamp_manager.get_current();
+
+        let new_node_info = new_tfc.map(|x| {
+            let mut current_node_info =
+                self.computation_graph.get_node_info(query_id).unwrap();
+
+            current_node_info.transitive_firewall_callees = x;
+            current_node_info.transitive_firewall_callees_fingerprint =
+                self.hash(&current_node_info.transitive_firewall_callees);
+
+            current_node_info
+        });
+
+        {
+            let tx = self.database.write_transaction();
+
+            for callee in clean_edges.iter().copied() {
+                let edge = Edge { from: *query_id, to: callee };
+
+                tx.delete::<DirtySetColumn>(&edge);
+            }
+
+            tx.put::<LastVerifiedColumn>(query_id, &current_timestamp);
+
+            if let Some(node_info) = &new_node_info {
+                tx.put::<NodeInfoColumn>(query_id, node_info);
+            }
+
+            tx.commit();
+        }
+
+        {
+            for callee in clean_edges.iter().copied() {
+                let edge = Edge { from: *query_id, to: callee };
+
+                self.computation_graph.computed.dirty_edge_set.put(edge, None);
+            }
+
+            if let Some(node_info) = new_node_info {
+                self.computation_graph
+                    .computed
+                    .node_info
+                    .put(*query_id, Some(node_info));
+            }
+
+            self.computation_graph
+                .computed
+                .last_verifieds
+                .put(*query_id, Some(current_timestamp));
+        }
+    }
+
+    pub(super) fn is_edge_dirty(&self, from: QueryID, to: QueryID) -> bool {
+        self.computation_graph
+            .computed
+            .dirty_edge_set
+            .get_normal(&Edge { from, to })
+            .is_some()
+    }
+
+    pub(super) fn get_query_input<Q: Query>(
+        &self,
+        query_id: &Compact128,
+    ) -> Option<Q> {
+        self.computation_graph.computed.query_store.get_input::<Q>(query_id)
     }
 }

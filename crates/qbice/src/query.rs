@@ -462,6 +462,10 @@ impl QueryID {
     /// ensuring consistency across program runs.
     #[must_use]
     pub fn hash_128(&self) -> u128 { self.hash_128.to_u128() }
+
+    /// Returns the compact representation of the 128-bit content hash.
+    #[must_use]
+    pub const fn compact_hash_128(&self) -> Compact128 { self.hash_128 }
 }
 
 /// Type-erased boxed query value.

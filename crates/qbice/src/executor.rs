@@ -115,12 +115,13 @@ use std::{
     any::Any, collections::HashMap, mem::MaybeUninit, pin::Pin, sync::Arc,
 };
 
+use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::StableTypeID;
 
 use crate::{
-    TrackedEngine,
+    Engine, TrackedEngine,
     config::Config,
-    query::{ExecutionStyle, Query},
+    query::{ExecutionStyle, Query, QueryID},
 };
 
 /// Error indicating that a cyclic query dependency was detected.
@@ -412,6 +413,14 @@ type InvokeExecutorFn<C> =
         result: &'a mut (dyn Any + Send + Sync),
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
+type RepairQueryFn<C> = for<'a> fn(
+    engine: &'a Arc<Engine<C>>,
+    query_id: Compact128,
+    called_from: QueryID,
+) -> Pin<
+    Box<dyn Future<Output = Result<(), CyclicError>> + Send + 'a>,
+>;
+
 // type InvokeQueryForFn<C> = for<'a> fn(
 //     engine: &'a Arc<Engine<C>>,
 //     key: &'a dyn Any,
@@ -455,6 +464,7 @@ fn obtain_execution_style<
 pub(crate) struct Entry<C: Config> {
     executor: Arc<dyn Any + Send + Sync>,
     invoke_executor: InvokeExecutorFn<C>,
+    repair_query: RepairQueryFn<C>,
     obtain_scc_value: ObtainSccValueFn,
     obtain_execution_style: ObtainExecutionStyleFn,
 }
@@ -466,6 +476,7 @@ impl<C: Config> Entry<C> {
         Self {
             executor,
             invoke_executor: invoke_executor::<C, E, Q>,
+            repair_query: Engine::<C>::repair_query_from_query_id::<Q>,
             obtain_scc_value: obtain_scc_value::<C, E, Q>,
             obtain_execution_style: obtain_execution_style::<C, E, Q>,
         }
@@ -491,14 +502,14 @@ impl<C: Config> Entry<C> {
         unsafe { result_buffer.assume_init() }
     }
 
-    // pub async fn invoke_query_for(
-    //     &self,
-    //     engine: &Arc<Engine<C>>,
-    //     query_key: &(dyn Any + Send + Sync),
-    //     called_from: &CallerInformation,
-    // ) -> Result<QueryResult<DynValueBox<C>>, CyclicError> {
-    //     // (self.invoke_query_for)(engine, query_key, called_from).await
-    // }
+    pub async fn repair_query_from_query_id(
+        &self,
+        engine: &Arc<Engine<C>>,
+        query_id: Compact128,
+        called_from: QueryID,
+    ) -> Result<(), CyclicError> {
+        (self.repair_query)(engine, query_id, called_from).await
+    }
 
     pub fn obtain_scc_value<Q: Query>(&self) -> Q::Value {
         let mut buffer = MaybeUninit::<Q::Value>::uninit();
