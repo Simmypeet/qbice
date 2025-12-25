@@ -131,6 +131,9 @@ pub trait WriteTransaction {
         value: &<C as Column>::Value,
     );
 
+    /// Delete a key-value pair from a [`Normal`] column.
+    fn delete<C: Column<Mode = Normal>>(&self, key: &<C as Column>::Key);
+
     /// Insert a value into the set associated with the given key in a
     /// [`KeyOfSet`] column.
     fn insert_member<C: Column>(

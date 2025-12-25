@@ -272,6 +272,18 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
         self.db.buffer_pool.return_buffer(value_buffer);
     }
 
+    fn delete<C: Column<Mode = Normal>>(&self, key: &<C as Column>::Key) {
+        let cf = self.db.get_or_create_cf::<C>();
+
+        let mut key_buffer = self.db.buffer_pool.get_buffer();
+
+        self.db.encode_value(key, &mut key_buffer);
+
+        self.batch.lock().delete_cf(&cf, key_buffer.as_slice());
+
+        self.db.buffer_pool.return_buffer(key_buffer);
+    }
+
     fn insert_member<C: Column>(
         &self,
         key: &<C as Column>::Key,
