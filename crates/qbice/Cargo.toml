@@ -30,6 +30,7 @@ tracing-test.workspace = true
 bimap.workspace = true
 crossbeam-utils.workspace = true
 fxhash.workspace = true
+rayon.workspace = true
 
 
 [lints]

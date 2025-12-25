@@ -205,6 +205,7 @@ pub struct Engine<C: Config> {
     interner: SharedInterner,
     computation_graph: ComputationGraph<C>,
     executor_registry: Registry<C>,
+    rayon_thread_pool: rayon::ThreadPool,
     build_stable_hasher: C::BuildStableHasher,
 }
 
@@ -312,6 +313,9 @@ impl<C: Config> Engine<C> {
             interner: shared_interner,
             executor_registry: Registry::default(),
             build_stable_hasher: stable_hasher,
+            rayon_thread_pool: C::rayon_thread_pool_builder()
+                .build()
+                .expect("failed to build rayon thread pool"),
         })
     }
 

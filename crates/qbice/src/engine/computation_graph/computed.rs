@@ -12,6 +12,7 @@ use qbice_storage::{
     kv_database::{Column, KeyOfSet, KvDatabase, Normal, WriteTransaction},
     sieve::RemoveElementFromSet,
 };
+use rayon::iter::IntoParallelRefIterator;
 
 mod query_store;
 
@@ -34,6 +35,12 @@ impl QueryKind {
 }
 
 pub struct BackwardEdge<C: Config>(Arc<DashSet<QueryID, C::BuildHasher>>);
+
+impl<C: Config> BackwardEdge<C> {
+    pub fn par_iter(&self) -> dashmap::rayon::set::Iter<'_, QueryID> {
+        self.0.par_iter()
+    }
+}
 
 impl<C: Config> std::fmt::Debug for BackwardEdge<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -476,5 +483,18 @@ impl<C: Config> Engine<C> {
                 .query_store
                 .insert::<Q>(query_id.hash_128().into(), query_entry);
         }
+    }
+
+    pub(super) fn mark_dirty_forward_edge(
+        &self,
+        from: QueryID,
+        to: QueryID,
+        tx: &<C::Database as KvDatabase>::WriteTransaction<'_>,
+    ) {
+        let edge = Edge { from, to };
+
+        tx.put::<DirtySetColumn>(&edge, &());
+
+        self.computation_graph.computed.dirty_edge_set.put(edge, Some(()));
     }
 }

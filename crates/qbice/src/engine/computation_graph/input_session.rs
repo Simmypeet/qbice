@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use qbice_storage::kv_database::{KvDatabase, WriteTransaction};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{Engine, Query, config::Config, query::QueryID};
 
@@ -14,6 +15,13 @@ pub struct InputSession<'x, C: Config> {
 impl<C: Config> Drop for InputSession<'_, C> {
     fn drop(&mut self) {
         let tx = self.transaction.take().unwrap();
+
+        self.engine.rayon_thread_pool.install(|| {
+            self.dirty_batch.par_iter().for_each(|x| {
+                self.engine.dirty_propagate(*x, &tx);
+            });
+        });
+
         tx.commit();
     }
 }

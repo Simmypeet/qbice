@@ -84,6 +84,12 @@ pub trait Config:
 
     /// The standard hasher builder used by the engine.
     type BuildHasher: BuildHasher + Default + Clone + Send + Sync + 'static;
+
+    /// Creates a Rayon thread pool builder for parallel query execution.
+    #[must_use]
+    fn rayon_thread_pool_builder() -> rayon::ThreadPoolBuilder {
+        rayon::ThreadPoolBuilder::new()
+    }
 }
 
 /// The default configuration for QBICE.

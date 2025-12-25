@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHasher};
 
@@ -55,6 +55,7 @@ pub enum QueryKind {
 pub struct ComputationGraph<C: Config> {
     computed: Computed<C>,
     computing_lock: ComputingLock,
+    dirtied_queries: DashSet<QueryID>,
 
     timestamp_manager: TimestampManager,
 }
@@ -68,6 +69,7 @@ impl<C: Config> ComputationGraph<C> {
         Self {
             timestamp_manager: TimestampManager::new(&*db),
             computed: Computed::new(db, shard_amount, build_hasher),
+            dirtied_queries: DashSet::new(),
             computing_lock: ComputingLock::new(),
         }
     }
