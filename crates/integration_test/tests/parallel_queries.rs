@@ -14,21 +14,32 @@ use std::{
 };
 
 use qbice::{
-    config::{Config, DefaultConfig},
-    engine::{Engine, TrackedEngine},
+    Decode, Encode, TrackedEngine,
+    config::Config,
     executor::{CyclicError, Executor},
     query::Query,
 };
-use qbice_integration_test::Variable;
+use qbice_integration_test::{Variable, create_test_engine};
 use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
+use tempfile::tempdir;
 
 // ============================================================================
 // Collect Variables Query Types
 // ============================================================================
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable, StableHash,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Identifiable,
+    StableHash,
+    Encode,
+    Decode,
 )]
 pub struct CollectVariables {
     pub vars: Arc<[Variable]>,
@@ -80,6 +91,8 @@ impl<C: Config> Executor<CollectVariables, C> for CollectVariablesExecutor {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct ReadVariableMap(pub Variable);
 
@@ -116,7 +129,8 @@ impl<C: Config> Executor<ReadVariableMap, C> for ReadVariableMapExecutor {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::cast_possible_wrap)]
 async fn parallel_read_variable_map() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let collect_ex = Arc::new(CollectVariablesExecutor::default());
     let read_map_ex = Arc::new(ReadVariableMapExecutor::default());
