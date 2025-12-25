@@ -146,6 +146,7 @@ impl<C: Config> ComputationGraph<C> {
 ///
 /// let result = tracked.query(&MyQuery(42)).await;
 /// assert_eq!(result, Ok(42));
+/// ```
 ///
 /// # Thread Safety
 ///
