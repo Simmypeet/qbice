@@ -2,235 +2,266 @@
 
 use std::sync::Arc;
 
-use qbice::{config::DefaultConfig, engine::Engine};
 use qbice_integration_test::{
     AbsoluteExecutor, AddTwoAbsolutes, AddTwoAbsolutesExecutor, Division,
     DivisionExecutor, SafeDivision, SafeDivisionExecutor, Variable,
+    create_test_engine,
 };
+use tempfile::tempdir;
 
 #[tokio::test]
 async fn division_input_change() {
-    let mut engine = Engine::<DefaultConfig>::default();
-
+    let tempdir = tempdir().unwrap();
     let division_ex = Arc::new(DivisionExecutor::default());
 
-    engine.register_executor(division_ex.clone());
-
-    let mut input_session = engine.input_session();
-
-    input_session.set_input(Variable(0), 40);
-    input_session.set_input(Variable(1), 4);
-
-    drop(input_session);
-
-    let mut engine = Arc::new(engine);
-    let tracked_engine = engine.clone().tracked();
-
-    assert_eq!(
-        tracked_engine.query(&Division::new(Variable(0), Variable(1))).await,
-        Ok(10)
-    );
-
-    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
-
-    // drop tracked engine to release references
-    drop(tracked_engine);
-
+    // session 1: initial inputs and query
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut engine = create_test_engine(&tempdir);
 
-        input_session.set_input(Variable(1), 2);
+        engine.register_executor(division_ex.clone());
+
+        let mut input_session = engine.input_session();
+
+        input_session.set_input(Variable(0), 40);
+        input_session.set_input(Variable(1), 4);
+
+        drop(input_session);
+
+        let engine = Arc::new(engine);
+        let tracked_engine = engine.clone().tracked();
+
+        assert_eq!(
+            tracked_engine
+                .query(&Division::new(Variable(0), Variable(1)))
+                .await,
+            Ok(10)
+        );
+
+        assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
-    let tracked_engine = engine.tracked();
+    // session 2: change input and re-query
+    {
+        let mut engine = create_test_engine(&tempdir);
 
-    assert_eq!(
-        tracked_engine.query(&Division::new(Variable(0), Variable(1))).await,
-        Ok(20)
-    );
+        engine.register_executor(division_ex.clone());
 
-    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+        let mut input_session = engine.input_session();
+
+        input_session.set_input(Variable(1), 2);
+        drop(input_session);
+
+        let tracked_engine = Arc::new(engine).tracked();
+
+        assert_eq!(
+            tracked_engine
+                .query(&Division::new(Variable(0), Variable(1)))
+                .await,
+            Ok(20)
+        );
+
+        assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
 }
 
 #[tokio::test]
 async fn safe_division_input_changes() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
 
     let division_ex = Arc::new(DivisionExecutor::default());
     let safe_division_ex = Arc::new(SafeDivisionExecutor::default());
 
-    engine.register_executor(division_ex.clone());
-    engine.register_executor(safe_division_ex.clone());
-
-    let mut input_session = engine.input_session();
-
-    input_session.set_input(Variable(0), 42);
-    input_session.set_input(Variable(1), 2);
-
-    drop(input_session);
-
-    let mut engine = Arc::new(engine);
-    let tracked_engine = engine.clone().tracked();
-
-    assert_eq!(
-        tracked_engine
-            .query(&SafeDivision::new(Variable(0), Variable(1)))
-            .await,
-        Ok(Some(21))
-    );
-
-    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(
-        safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-
-    // drop tracked engine to release references
-    drop(tracked_engine);
-
-    // now make it divide by zero
+    // session 1: initial inputs and query
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut engine = create_test_engine(&tempdir);
 
-        input_session.set_input(Variable(1), 0);
-    }
+        engine.register_executor(division_ex.clone());
+        engine.register_executor(safe_division_ex.clone());
 
-    let tracked_engine = engine.clone().tracked();
+        let mut input_session = engine.input_session();
 
-    assert_eq!(
-        tracked_engine
-            .query(&SafeDivision::new(Variable(0), Variable(1)))
-            .await,
-        Ok(None)
-    );
-
-    // division executor should not have been called again, but safe division
-    // should have
-    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(
-        safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
-        2
-    );
-
-    // now restore to original value
-    drop(tracked_engine);
-    {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
-
+        input_session.set_input(Variable(0), 42);
         input_session.set_input(Variable(1), 2);
+
+        drop(input_session);
+
+        let engine = Arc::new(engine);
+        let tracked_engine = engine.clone().tracked();
+
+        assert_eq!(
+            tracked_engine
+                .query(&SafeDivision::new(Variable(0), Variable(1)))
+                .await,
+            Ok(Some(21))
+        );
+
+        assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
-    let tracked_engine = engine.tracked();
-    assert_eq!(
-        tracked_engine
-            .query(&SafeDivision::new(Variable(0), Variable(1)))
-            .await,
-        Ok(Some(21))
-    );
+    // session 2: divide by zero
+    {
+        let mut engine = create_test_engine(&tempdir);
 
-    // this time divisor executor reused the cached value but safe division
-    // had to run again
-    assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(
-        safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
-        3
-    );
+        engine.register_executor(division_ex.clone());
+        engine.register_executor(safe_division_ex.clone());
+
+        let mut input_session = engine.input_session();
+        input_session.set_input(Variable(1), 0);
+        drop(input_session);
+
+        let tracked_engine = Arc::new(engine).tracked();
+
+        assert_eq!(
+            tracked_engine
+                .query(&SafeDivision::new(Variable(0), Variable(1)))
+                .await,
+            Ok(None)
+        );
+
+        // division executor should not have been called again, but safe
+        // division should have
+        assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+    }
+
+    // session 3: restore to original inputs
+    {
+        let mut engine = create_test_engine(&tempdir);
+
+        engine.register_executor(division_ex.clone());
+        engine.register_executor(safe_division_ex.clone());
+
+        let mut input_session = engine.input_session();
+        input_session.set_input(Variable(1), 2);
+        drop(input_session);
+
+        let tracked_engine = Arc::new(engine).tracked();
+
+        assert_eq!(
+            tracked_engine
+                .query(&SafeDivision::new(Variable(0), Variable(1)))
+                .await,
+            Ok(Some(21))
+        );
+
+        // this time divisor executor reused the cached value but safe division
+        // had to run again
+        assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+    }
 }
 
 #[tokio::test]
 async fn add_two_absolutes_sign_change() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
 
     let absolute_ex = Arc::new(AbsoluteExecutor::default());
     let add_two_absolutes_ex = Arc::new(AddTwoAbsolutesExecutor::default());
 
-    engine.register_executor(absolute_ex.clone());
-    engine.register_executor(add_two_absolutes_ex.clone());
-
-    let mut input_session = engine.input_session();
-
-    input_session.set_input(Variable(0), 200);
-    input_session.set_input(Variable(1), 150);
-
-    drop(input_session);
-
-    let mut engine = Arc::new(engine);
-    let tracked_engine = engine.clone().tracked();
-
-    // Initial query: abs(200) + abs(150) = 350
-    assert_eq!(
-        tracked_engine
-            .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
-            .await,
-        Ok(350)
-    );
-
-    // Both absolute executors should run once, and add_two_absolutes once
-    assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 2);
-    assert_eq!(
-        add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-
-    // Drop tracked engine to release references
-    drop(tracked_engine);
-
-    // Change Variable(0) from 200 to -200
+    // session 1: initial inputs and query
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut engine = create_test_engine(&tempdir);
 
+        engine.register_executor(absolute_ex.clone());
+        engine.register_executor(add_two_absolutes_ex.clone());
+
+        let mut input_session = engine.input_session();
+
+        input_session.set_input(Variable(0), 200);
+        input_session.set_input(Variable(1), 150);
+
+        drop(input_session);
+
+        let engine = Arc::new(engine);
+        let tracked_engine = engine.clone().tracked();
+
+        // Initial query: abs(200) + abs(150) = 350
+        assert_eq!(
+            tracked_engine
+                .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
+                .await,
+            Ok(350)
+        );
+
+        // Both absolute executors should run once, and add_two_absolutes once
+        assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(
+            add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    // session 2: change sign of inputs
+    {
+        let mut engine = create_test_engine(&tempdir);
+
+        engine.register_executor(absolute_ex.clone());
+        engine.register_executor(add_two_absolutes_ex.clone());
+
+        // Change Variable(0) from 200 to -200
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), -200);
+        drop(input_session);
+
+        let tracked_engine = Arc::new(engine).tracked();
+
+        // Result should still be 350: abs(-200) + abs(150) = 200 + 150 = 350
+        assert_eq!(
+            tracked_engine
+                .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
+                .await,
+            Ok(350)
+        );
+
+        // Only the Absolute query for Variable(0) should re-execute (3 total)
+        // The result is the same (200), so AddTwoAbsolutes should NOT
+        // re-execute
+        assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 3);
+        assert_eq!(
+            add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
-    let tracked_engine = engine.clone().tracked();
-
-    // Result should still be 350: abs(-200) + abs(150) = 200 + 150 = 350
-    assert_eq!(
-        tracked_engine
-            .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
-            .await,
-        Ok(350)
-    );
-
-    // Only the Absolute query for Variable(0) should re-execute (3 total)
-    // The result is the same (200), so AddTwoAbsolutes should NOT re-execute
-    assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 3);
-    assert_eq!(
-        add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-
-    // Drop tracked engine
-    drop(tracked_engine);
-
-    // Change Variable(1) from 150 to -150
+    // session 3: change sign of other input
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut engine = create_test_engine(&tempdir);
 
+        engine.register_executor(absolute_ex.clone());
+        engine.register_executor(add_two_absolutes_ex.clone());
+
+        // Change Variable(1) from 150 to -150
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(1), -150);
+        drop(input_session);
+
+        let tracked_engine = Arc::new(engine).tracked();
+
+        // Result should still be 350: abs(-200) + abs(-150) = 200 + 150 = 350
+        assert_eq!(
+            tracked_engine
+                .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
+                .await,
+            Ok(350)
+        );
+
+        // Only the Absolute query for Variable(1) should re-execute (4 total)
+        // The result is still the same (150), so AddTwoAbsolutes should still
+        // NOT re-execute
+        assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 4);
+        assert_eq!(
+            add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
-
-    let tracked_engine = engine.tracked();
-
-    // Result should still be 350: abs(-200) + abs(-150) = 200 + 150 = 350
-    assert_eq!(
-        tracked_engine
-            .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
-            .await,
-        Ok(350)
-    );
-
-    // Only the Absolute query for Variable(1) should re-execute (4 total)
-    // The result is still the same (150), so AddTwoAbsolutes should still NOT
-    // re-execute
-    assert_eq!(absolute_ex.0.load(std::sync::atomic::Ordering::Relaxed), 4);
-    assert_eq!(
-        add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
 }
