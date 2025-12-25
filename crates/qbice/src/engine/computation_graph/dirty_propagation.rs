@@ -2,10 +2,8 @@ use qbice_storage::kv_database::KvDatabase;
 use rayon::prelude::ParallelIterator;
 
 use crate::{
-    Engine, ExecutionStyle,
-    config::{self, Config},
-    engine::computation_graph::QueryKind,
-    query::QueryID,
+    Engine, ExecutionStyle, config::Config,
+    engine::computation_graph::QueryKind, query::QueryID,
 };
 
 impl<C: Config> Engine<C> {
