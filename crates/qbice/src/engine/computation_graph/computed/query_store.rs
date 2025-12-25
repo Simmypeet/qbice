@@ -113,15 +113,45 @@ impl<C: Config> QueryStore<C> {
         entry.put(query_input_hash_128, Some(query_entry));
     }
 
+    pub(super) fn get_input<Q: Query>(
+        &self,
+        query_input_hash_128: &Compact128,
+    ) -> Option<Q> {
+        let mut entry =
+            self.map.entry(TypeId::of::<Q>()).or_insert_with(|| {
+                Box::new(Sieve::<QueryColumn<Q>, C>::new(
+                    self.total_capacity,
+                    self.shard_amount,
+                    self.backing_db.clone(),
+                    self.hasher_builder.clone(),
+                ))
+            });
+
+        let entry =
+            (**entry).downcast_mut::<Sieve<QueryColumn<Q>, C>>().unwrap();
+
+        entry
+            .get_normal(query_input_hash_128)
+            .map(|x| x.original_query_input.clone())
+    }
+
     pub(super) fn get_value<Q: Query>(
         &self,
         query_input_hash_128: &Compact128,
     ) -> Option<Q::Value> {
-        let entry = self.map.get(&TypeId::of::<Q>())?;
+        let mut entry =
+            self.map.entry(TypeId::of::<Q>()).or_insert_with(|| {
+                Box::new(Sieve::<QueryColumn<Q>, C>::new(
+                    self.total_capacity,
+                    self.shard_amount,
+                    self.backing_db.clone(),
+                    self.hasher_builder.clone(),
+                ))
+            });
 
-        let sieve =
-            (**entry).downcast_ref::<Sieve<QueryColumn<Q>, C>>().unwrap();
+        let entry =
+            (**entry).downcast_mut::<Sieve<QueryColumn<Q>, C>>().unwrap();
 
-        sieve.get_normal(query_input_hash_128).map(|x| x.query_result.clone())
+        entry.get_normal(query_input_hash_128).map(|x| x.query_result.clone())
     }
 }
