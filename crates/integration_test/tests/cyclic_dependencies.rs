@@ -9,13 +9,15 @@ use std::sync::{
 };
 
 use qbice::{
-    config::{Config, DefaultConfig},
-    engine::{Engine, TrackedEngine},
+    Decode, Encode, TrackedEngine,
+    config::Config,
     executor::{CyclicError, Executor},
     query::Query,
 };
+use qbice_integration_test::create_test_engine;
 use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
+use tempfile::tempdir;
 
 // ============================================================================
 // Basic Cyclic Query Types
@@ -32,6 +34,8 @@ use qbice_stable_type_id::Identifiable;
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct CyclicQueryA;
 
@@ -50,6 +54,8 @@ impl Query for CyclicQueryA {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct CyclicQueryB;
 
@@ -68,6 +74,8 @@ impl Query for CyclicQueryB {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct DependentQuery;
 
@@ -160,7 +168,9 @@ impl<C: Config> Executor<DependentQuery, C> for DependentExecutor {
 
 #[tokio::test]
 async fn cyclic_dependency_returns_default_values() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+
+    let mut engine = create_test_engine(&tempdir);
 
     let executor_a = Arc::new(CyclicExecutorA::default());
     let executor_b = Arc::new(CyclicExecutorB::default());
@@ -193,7 +203,9 @@ async fn cyclic_dependency_returns_default_values() {
 
 #[tokio::test]
 async fn dependent_query_uses_cyclic_default_values() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+
+    let mut engine = create_test_engine(&tempdir);
 
     let executor_a = Arc::new(CyclicExecutorA::default());
     let executor_b = Arc::new(CyclicExecutorB::default());
@@ -250,6 +262,8 @@ async fn dependent_query_uses_cyclic_default_values() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct ConditionalCyclicQueryA;
 
@@ -268,6 +282,8 @@ impl Query for ConditionalCyclicQueryA {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct ConditionalCyclicQueryB;
 
@@ -286,6 +302,8 @@ impl Query for ConditionalCyclicQueryB {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct CycleControlVariable;
 
@@ -409,7 +427,9 @@ impl<C: Config> Executor<DependentQuery, C> for ConditionalDependentExecutor {
 #[tokio::test]
 #[allow(clippy::similar_names)]
 async fn conditional_cyclic_dependency() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+
+    let mut engine = create_test_engine(&tempdir);
 
     let executor_a = Arc::new(ConditionalCyclicExecutorA::default());
     let executor_b = Arc::new(ConditionalCyclicExecutorB::default());
@@ -531,7 +551,9 @@ async fn conditional_cyclic_dependency() {
 
 #[tokio::test]
 async fn conditional_cyclic_with_dependent_query() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+
+    let mut engine = create_test_engine(&tempdir);
 
     let executor_a = Arc::new(ConditionalCyclicExecutorA::default());
     let executor_b = Arc::new(ConditionalCyclicExecutorB::default());
