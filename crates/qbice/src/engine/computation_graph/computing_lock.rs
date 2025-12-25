@@ -8,10 +8,7 @@ use dashmap::{
     mapref::one::{Ref, RefMut},
 };
 use qbice_stable_hash::Compact128;
-use qbice_storage::{
-    intern::Interned,
-    kv_database::{KvDatabase, WriteTransaction},
-};
+use qbice_storage::intern::Interned;
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
@@ -19,28 +16,17 @@ use crate::{
     config::Config,
     engine::computation_graph::{
         QueryKind, QueryWithID,
-        computed::{
-            BackwardEdgeColumn, ForwardEdgeColumn, LastVerifiedColumn,
-            NodeInfo, NodeInfoColumn,
-        },
-        query_store::{QueryColumn, QueryEntry},
+        computed::{ForwardEdges, NodeInfo, Observation},
         tfc_achetype::TransitiveFirewallCallees,
     },
     executor::CyclicError,
     query::QueryID,
 };
 
-#[derive(Debug)]
-pub struct Observation {
-    seen_value_fingerprint: Compact128,
-    seen_transitive_firewall_callees_fingerprint: Compact128,
-}
-
 #[derive(Debug, Default)]
-pub struct CalleeInfo {
-    callee_queries: HashMap<QueryID, Option<Observation>>,
-    callee_order: Vec<QueryID>,
-    query_kind: QueryKind,
+pub struct ComputingForwardEdges {
+    pub callee_queries: HashMap<QueryID, Option<Observation>>,
+    pub callee_order: Vec<QueryID>,
 }
 
 impl Computing {
@@ -65,8 +51,6 @@ impl Computing {
             self.callee_info.callee_order.remove(pos);
         }
     }
-
-    pub const fn query_kind(&self) -> QueryKind { self.callee_info.query_kind }
 
     pub fn mark_scc(&self) {
         self.is_in_scc.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -101,6 +85,8 @@ impl Computing {
             seen_transitive_firewall_callees_fingerprint,
         });
     }
+
+    pub const fn query_kind(&self) -> QueryKind { self.query_kind }
 }
 
 impl<C: Config> Engine<C> {
@@ -146,9 +132,10 @@ pub enum ComputingMode {
 
 pub struct Computing {
     notify: Arc<Notify>,
-    callee_info: CalleeInfo,
+    callee_info: ComputingForwardEdges,
     is_in_scc: AtomicBool,
     tfc_archetype: Option<Interned<TransitiveFirewallCallees>>,
+    query_kind: QueryKind,
     mode: ComputingMode,
 }
 
@@ -229,16 +216,11 @@ impl<C: Config> Engine<C> {
 
             dashmap::Entry::Vacant(vacant_entry) => {
                 // second check, if the value has already been up-to-date
-                let last_verified = self
-                    .computation_graph
-                    .last_verifieds()
-                    .get_normal(query_id);
+                let last_verified =
+                    self.computation_graph.get_last_verified(query_id);
 
                 if last_verified.as_ref().is_some_and(|x| {
-                    **x == self
-                        .computation_graph
-                        .timestamp_manager
-                        .get_current()
+                    *x == self.computation_graph.timestamp_manager.get_current()
                 }) {
                     return None;
                 }
@@ -256,15 +238,16 @@ impl<C: Config> Engine<C> {
 
                 vacant_entry.insert(Computing {
                     notify: Arc::new(Notify::new()),
-                    callee_info: CalleeInfo {
+                    callee_info: ComputingForwardEdges {
                         callee_queries: HashMap::new(),
                         callee_order: Vec::new(),
-                        query_kind: QueryKind::Executable(style),
                     },
 
                     // if has some prior node info, then we are repairing the
                     // node.
                     mode,
+
+                    query_kind: QueryKind::Executable(style),
                     is_in_scc: AtomicBool::new(false),
                     tfc_archetype: None,
                 });
@@ -296,69 +279,26 @@ impl<C: Config> Engine<C> {
 
             (
                 computing.notify.clone(),
-                computing.callee_info.query_kind,
+                computing.query_kind,
                 std::mem::take(&mut computing.callee_info),
                 computing.tfc_archetype.take(),
             )
         };
 
-        let forward_edges: Arc<[QueryID]> = Arc::from(callee_info.callee_order);
-
-        let input_hash_128 = self.hash(query_id.query);
-
-        let node_info = NodeInfo::new(
+        self.set_computed(
+            query_id,
+            value,
             query_kind,
-            self.hash(&value),
-            self.hash(&tfc_archetype),
+            ForwardEdges {
+                callee_observation: callee_info
+                    .callee_queries
+                    .into_iter()
+                    .map(|(k, v)| (k, v.unwrap()))
+                    .collect(),
+                callee_order: callee_info.callee_order,
+            },
             tfc_archetype,
         );
-
-        let query_entry = QueryEntry::new(query_id.query.clone(), value);
-        let current_timestamp =
-            self.computation_graph.timestamp_manager.get_current();
-
-        // durable, write to db first
-        {
-            let tx = self.database.write_transaction();
-
-            tx.put::<LastVerifiedColumn>(&query_id.id, &current_timestamp);
-
-            for edge in forward_edges.iter() {
-                tx.insert_member::<BackwardEdgeColumn>(edge, &query_id.id);
-            }
-
-            tx.put::<ForwardEdgeColumn>(&query_id.id, &forward_edges);
-
-            tx.put::<NodeInfoColumn>(&query_id.id, &node_info);
-
-            tx.put::<QueryColumn<Q>>(&input_hash_128, &query_entry);
-
-            tx.commit();
-        }
-
-        {
-            self.computation_graph
-                .last_verifieds()
-                .put(query_id.id, Some(current_timestamp));
-
-            for edge in forward_edges.iter() {
-                self.computation_graph
-                    .backward_edges()
-                    .insert_set(edge, std::iter::once(query_id.id));
-            }
-
-            self.computation_graph
-                .forward_edges()
-                .put(query_id.id, Some(forward_edges));
-
-            self.computation_graph
-                .node_info()
-                .put(query_id.id, Some(node_info));
-
-            self.computation_graph
-                .query_store
-                .insert(input_hash_128, query_entry);
-        }
 
         lock_guard.defuse();
 

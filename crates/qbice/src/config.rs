@@ -32,6 +32,7 @@ use fxhash::FxBuildHasher;
 use qbice_stable_hash::{
     BuildStableHasher, SeededStableHasherBuilder, Sip128Hasher,
 };
+use qbice_stable_type_id::Identifiable;
 use qbice_storage::kv_database::{KvDatabase, rocksdb::RocksDB};
 
 /// Configuration trait for QBICE engine, allowing customization of various
@@ -55,7 +56,9 @@ use qbice_storage::kv_database::{KvDatabase, rocksdb::RocksDB};
 ///     type Storage = [u8; 32]; // 32 bytes of inline storage
 /// }
 /// ```
-pub trait Config: Default + Debug + Send + Sync + 'static {
+pub trait Config:
+    Identifiable + Default + Debug + Send + Sync + 'static
+{
     /// The size of static storage allocated for query keys and values.
     ///
     /// This determines how much data can be stored inline (on the stack)
@@ -80,7 +83,7 @@ pub trait Config: Default + Debug + Send + Sync + 'static {
         + 'static;
 
     /// The standard hasher builder used by the engine.
-    type BuildHasher: BuildHasher + Clone + Send + Sync + 'static;
+    type BuildHasher: BuildHasher + Default + Clone + Send + Sync + 'static;
 }
 
 /// The default configuration for QBICE.
@@ -96,7 +99,18 @@ pub trait Config: Default + Debug + Send + Sync + 'static {
 /// // Create an engine with default configuration
 /// let engine = Engine::<DefaultConfig>::new();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Identifiable,
+)]
 pub struct DefaultConfig;
 
 impl Config for DefaultConfig {

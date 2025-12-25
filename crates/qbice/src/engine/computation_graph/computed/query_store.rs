@@ -11,7 +11,6 @@ use qbice_stable_type_id::Identifiable;
 use qbice_storage::kv_database::{Column, Normal};
 
 use crate::{Query, config::Config, engine::computation_graph::Sieve};
-
 pub struct QueryStore<C: Config> {
     map: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
     total_capacity: usize,
@@ -77,7 +76,7 @@ impl<Q: Query> QueryEntry<Q> {
 }
 
 impl<C: Config> QueryStore<C> {
-    pub fn new(
+    pub(super) fn new(
         total_capacity: usize,
         shard_amount: usize,
         backing_db: Arc<C::Database>,
@@ -93,7 +92,7 @@ impl<C: Config> QueryStore<C> {
         }
     }
 
-    pub fn insert<Q: Query>(
+    pub(super) fn insert<Q: Query>(
         &self,
         query_input_hash_128: Compact128,
         query_entry: QueryEntry<Q>,
@@ -114,7 +113,7 @@ impl<C: Config> QueryStore<C> {
         entry.put(query_input_hash_128, Some(query_entry));
     }
 
-    pub fn get_value<Q: Query>(
+    pub(super) fn get_value<Q: Query>(
         &self,
         query_input_hash_128: &Compact128,
     ) -> Option<Q::Value> {

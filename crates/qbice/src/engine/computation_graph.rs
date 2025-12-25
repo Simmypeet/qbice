@@ -10,7 +10,7 @@ use crate::{
     engine::computation_graph::{
         caller::CallerInformation, computed::Computed,
         computing_lock::ComputingLock, fast_path::FastPathResult,
-        query_store::QueryStore, timestamp::TimestampManager,
+        timestamp::TimestampManager,
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, QueryID},
@@ -19,9 +19,9 @@ use crate::{
 mod caller;
 mod computed;
 mod computing_lock;
+mod dirty_propagation;
 mod fast_path;
 mod input_session;
-mod query_store;
 mod register_callee;
 mod slow_path;
 mod tfc_achetype;
@@ -54,10 +54,8 @@ pub enum QueryKind {
 
 pub struct ComputationGraph<C: Config> {
     computed: Computed<C>,
-    query_store: QueryStore<C>,
     computing_lock: ComputingLock,
 
-    database: Arc<C::Database>,
     timestamp_manager: TimestampManager,
 }
 
@@ -67,23 +65,10 @@ impl<C: Config> ComputationGraph<C> {
         shard_amount: usize,
         build_hasher: C::BuildHasher,
     ) -> Self {
-        const CAPACITY: usize = 10_000;
         Self {
-            computed: Computed::new(
-                db.clone(),
-                shard_amount,
-                build_hasher.clone(),
-            ),
-            query_store: QueryStore::new(
-                CAPACITY,
-                shard_amount,
-                db.clone(),
-                build_hasher,
-            ),
-            computing_lock: ComputingLock::new(),
-
             timestamp_manager: TimestampManager::new(&*db),
-            database: db,
+            computed: Computed::new(db, shard_amount, build_hasher),
+            computing_lock: ComputingLock::new(),
         }
     }
 }
@@ -375,7 +360,9 @@ impl<C: Config> Engine<C> {
         let value = loop {
             match self.fast_path::<Q>(&query.id, caller).await {
                 // try again
-                Ok(FastPathResult::TryAgain) => continue,
+                Ok(FastPathResult::TryAgain) => {
+                    continue;
+                }
 
                 // go to slow path
                 Ok(FastPathResult::ToSlowPath) => {}

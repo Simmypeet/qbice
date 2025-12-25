@@ -1,25 +1,21 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::collections::VecDeque;
 
 use qbice_storage::kv_database::{KvDatabase, WriteTransaction};
 
-use crate::{
-    Engine, Query,
-    config::Config,
-    engine::computation_graph::{
-        QueryKind,
-        computed::{
-            ForwardEdgeColumn, LastVerifiedColumn, NodeInfo, NodeInfoColumn,
-        },
-        query_store::{QueryColumn, QueryEntry},
-    },
-    query::QueryID,
-};
+use crate::{Engine, Query, config::Config, query::QueryID};
 
 pub struct InputSession<'x, C: Config> {
     engine: &'x Engine<C>,
     incremented: bool,
     dirty_batch: VecDeque<QueryID>,
-    transaction: <C::Database as KvDatabase>::WriteTransaction<'x>,
+    transaction: Option<<C::Database as KvDatabase>::WriteTransaction<'x>>,
+}
+
+impl<C: Config> Drop for InputSession<'_, C> {
+    fn drop(&mut self) {
+        let tx = self.transaction.take().unwrap();
+        tx.commit();
+    }
 }
 
 impl<C: Config> std::fmt::Debug for InputSession<'_, C> {
@@ -63,7 +59,7 @@ impl<C: Config> Engine<C> {
         InputSession {
             incremented: false,
             dirty_batch: VecDeque::new(),
-            transaction: self.database.write_transaction(),
+            transaction: Some(self.database.write_transaction()),
             engine: self,
         }
     }
@@ -75,22 +71,11 @@ impl<C: Config> InputSession<'_, C> {
         let query_id = QueryID::new::<Q>(query_hash);
 
         let query_value_fingerprint = self.engine.hash(&new_value);
-        let transitive_firewall_callees = None;
-        let transitive_firewall_callees_fingerprint =
-            self.engine.hash(&transitive_firewall_callees);
 
-        let node_info = NodeInfo::new(
-            QueryKind::Input,
-            query_value_fingerprint,
-            transitive_firewall_callees_fingerprint,
-            transitive_firewall_callees,
-        );
-
-        let empty_edges: Arc<[QueryID]> = Arc::from([]);
-        let query_entry = QueryEntry::new(query, new_value);
-
+        // has prior node infos, check for fingerprint diff
+        // also, unwire the backward edges (if any)
         if let Some(node_info) =
-            self.engine.computation_graph.node_info().get_normal(&query_id)
+            self.engine.computation_graph.get_node_info(&query_id)
         {
             let fingerprint_diff =
                 node_info.value_fingerprint() != query_value_fingerprint;
@@ -99,7 +84,7 @@ impl<C: Config> InputSession<'_, C> {
                 self.engine
                     .computation_graph
                     .timestamp_manager
-                    .increment(&self.transaction);
+                    .increment(self.transaction.as_ref().unwrap());
 
                 self.incremented = true;
             }
@@ -114,50 +99,18 @@ impl<C: Config> InputSession<'_, C> {
                 self.engine
                     .computation_graph
                     .timestamp_manager
-                    .increment(&self.transaction);
+                    .increment(self.transaction.as_ref().unwrap());
 
                 self.incremented = true;
             }
         }
 
-        let timestamp =
-            self.engine.computation_graph.timestamp_manager.get_current();
-
-        // durable, write to db first
-        {
-            self.transaction.put::<LastVerifiedColumn>(&query_id, &timestamp);
-
-            self.transaction.put::<ForwardEdgeColumn>(&query_id, &empty_edges);
-
-            self.transaction.put::<NodeInfoColumn>(&query_id, &node_info);
-
-            self.transaction.put::<QueryColumn<Q>>(
-                &query_id.hash_128().into(),
-                &query_entry,
-            );
-        }
-
-        // write to in-memory structures
-        {
-            self.engine
-                .computation_graph
-                .last_verifieds()
-                .put(query_id, Some(timestamp));
-
-            self.engine
-                .computation_graph
-                .forward_edges()
-                .put(query_id, Some(empty_edges));
-
-            self.engine
-                .computation_graph
-                .node_info()
-                .put(query_id, Some(node_info));
-
-            self.engine
-                .computation_graph
-                .query_store
-                .insert(query_id.hash_128().into(), query_entry);
-        }
+        self.engine.set_computed_input(
+            query,
+            query_hash,
+            new_value,
+            query_value_fingerprint,
+            self.transaction.as_ref().unwrap(),
+        );
     }
 }

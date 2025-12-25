@@ -116,13 +116,11 @@ impl<C: Config> Engine<C> {
             Ok(FastPathResult::TryAgain)
         } else {
             // check if we have the existing query info
-            let (Some(query_info), Some(last_verified)) = (
-                self.computation_graph.node_info().get_normal(query_id),
-                self.computation_graph
-                    .last_verifieds()
-                    .get_normal(query_id)
-                    .map(|x| *x),
-            ) else {
+
+            let (Some(query_info), Some(last_verified)) = dbg!((
+                self.computation_graph.get_node_info(query_id),
+                self.computation_graph.get_last_verified(query_id),
+            )) else {
                 return Ok(FastPathResult::ToSlowPath);
             };
 
@@ -137,7 +135,6 @@ impl<C: Config> Engine<C> {
             let query_result = if caller.require_value() {
                 let Some(query_result) = self
                     .computation_graph
-                    .query_store
                     .get_value::<Q>(&query_id.hash_128().into())
                 else {
                     return Ok(FastPathResult::ToSlowPath);
