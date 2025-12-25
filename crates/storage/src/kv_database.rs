@@ -183,7 +183,7 @@ pub trait KvDatabaseFactory {
 /// All operations are async to support non-blocking I/O.
 pub trait KvDatabase: 'static + Send + Sync {
     /// The type of write transaction provided by this database implementation.
-    type WriteTransaction<'a>: WriteTransaction + Send
+    type WriteTransaction<'a>: WriteTransaction + Send + Sync
     where
         Self: 'a;
 
