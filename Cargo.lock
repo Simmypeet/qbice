@@ -548,6 +548,7 @@ dependencies = [
 name = "qbice_serialize"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "qbice_serialize_derive",
 ]
 

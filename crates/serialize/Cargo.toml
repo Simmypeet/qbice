@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 qbice_serialize_derive = { version = "0.1.0", path = "../serialize_derive" }
+dashmap.workspace = true
 
 [lints]
 workspace = true

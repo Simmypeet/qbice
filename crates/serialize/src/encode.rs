@@ -12,6 +12,8 @@ use std::{
     sync::Arc,
 };
 
+use dashmap::DashMap;
+
 use crate::{plugin::Plugin, session::Session};
 
 /// A trait for types that can serialize primitive values to a binary format.
@@ -959,5 +961,42 @@ impl<T: Encode> Encode for std::ops::Bound<T> {
                 v.encode(encoder, plugin, session)
             }
         }
+    }
+}
+
+// =============================================================================
+
+impl<K: Encode + Eq + std::hash::Hash, V: Encode, S: BuildHasher + Clone> Encode
+    for DashMap<K, V, S>
+{
+    fn encode<E: Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<()> {
+        encoder.emit_usize(self.len())?;
+        for r in self {
+            r.key().encode(encoder, plugin, session)?;
+            r.value().encode(encoder, plugin, session)?;
+        }
+        Ok(())
+    }
+}
+
+impl<K: Encode + Eq + std::hash::Hash, S: BuildHasher + Clone> Encode
+    for dashmap::DashSet<K, S>
+{
+    fn encode<E: Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<()> {
+        encoder.emit_usize(self.len())?;
+        for r in self.iter() {
+            r.key().encode(encoder, plugin, session)?;
+        }
+        Ok(())
     }
 }

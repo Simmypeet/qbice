@@ -12,6 +12,8 @@ use std::{
     sync::Arc,
 };
 
+use dashmap::DashMap;
+
 use crate::{plugin::Plugin, session::Session};
 
 /// A trait for types that can deserialize primitive values from a binary
@@ -960,5 +962,48 @@ impl<T: Decode> Decode for std::ops::Bound<T> {
                 format!("invalid Bound tag: {tag}"),
             )),
         }
+    }
+}
+
+// =============================================================================
+
+impl<K: Decode + Eq + Hash, V: Decode, S: BuildHasher + Default + Clone> Decode
+    for DashMap<K, V, S>
+{
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<Self> {
+        let len = decoder.read_usize()?;
+        let map = Self::with_capacity_and_hasher(len, S::default());
+
+        for _ in 0..len {
+            let key = K::decode(decoder, plugin, session)?;
+            let value = V::decode(decoder, plugin, session)?;
+            map.insert(key, value);
+        }
+
+        Ok(map)
+    }
+}
+
+impl<T: Decode + Eq + Hash, S: BuildHasher + Default + Clone> Decode
+    for dashmap::DashSet<T, S>
+{
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<Self> {
+        let len = decoder.read_usize()?;
+        let set = Self::with_capacity_and_hasher(len, S::default());
+
+        for _ in 0..len {
+            let value = T::decode(decoder, plugin, session)?;
+            set.insert(value);
+        }
+
+        Ok(set)
     }
 }
