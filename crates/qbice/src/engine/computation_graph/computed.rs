@@ -325,6 +325,7 @@ impl<C: Config> ComputationGraph<C> {
 }
 
 impl<C: Config> Engine<C> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn set_computed<'s, Q: Query>(
         &'s self,
         query_id: &QueryWithID<'_, Q>,
