@@ -14,6 +14,9 @@ pub struct InputSession<'x, C: Config> {
 
 impl<C: Config> Drop for InputSession<'_, C> {
     fn drop(&mut self) {
+        self.engine.computation_graph.reset_statistic();
+        self.engine.clear_dirtied_queries();
+
         let tx = self.transaction.take().unwrap();
 
         self.engine.rayon_thread_pool.install(|| {
@@ -59,8 +62,12 @@ impl<C: Config> Engine<C> {
     ///
     /// let mut engine = Engine::<DefaultConfig>::new();
     ///
-    /// // Create a session and set inputs /// { ///     let mut session = engine.input_session(); ///     session.set_input(Input(0), 42);
+    /// // Create a session and set inputs
+    /// {
+    ///     let mut session = engine.input_session();
+    ///     session.set_input(Input(0), 42);
     ///     session.set_input(Input(1), 100);
+    /// }
     /// ```
     #[must_use]
     pub fn input_session(&mut self) -> InputSession<'_, C> {

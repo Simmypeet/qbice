@@ -10,7 +10,7 @@ use crate::{
     engine::computation_graph::{
         caller::CallerInformation, computed::Computed,
         computing_lock::ComputingLock, fast_path::FastPathResult,
-        timestamp::TimestampManager,
+        statistic::Statistic, timestamp::TimestampManager,
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, QueryID},
@@ -25,6 +25,7 @@ mod input_session;
 mod register_callee;
 mod repair;
 mod slow_path;
+mod statistic;
 mod tfc_achetype;
 mod timestamp;
 
@@ -66,8 +67,8 @@ impl QueryKind {
 pub struct ComputationGraph<C: Config> {
     computed: Computed<C>,
     computing_lock: ComputingLock,
-    dirtied_queries: DashSet<QueryID>,
-
+    dirtied_queries: DashSet<QueryID, C::BuildHasher>,
+    statistic: Statistic,
     timestamp_manager: TimestampManager,
 }
 
@@ -79,8 +80,9 @@ impl<C: Config> ComputationGraph<C> {
     ) -> Self {
         Self {
             timestamp_manager: TimestampManager::new(&*db),
-            computed: Computed::new(db, shard_amount, build_hasher),
-            dirtied_queries: DashSet::new(),
+            computed: Computed::new(db, shard_amount, build_hasher.clone()),
+            dirtied_queries: DashSet::with_hasher(build_hasher),
+            statistic: Statistic::default(),
             computing_lock: ComputingLock::new(),
         }
     }
