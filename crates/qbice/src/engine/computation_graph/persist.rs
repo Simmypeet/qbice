@@ -129,10 +129,34 @@ impl<C: Config> RemoveElementFromSet for BackwardEdge<C> {
     }
 }
 
-pub type LastVerifiedColumn = (QueryID, Timestamp);
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+struct LastVerifiedColumn;
+
+impl Column for LastVerifiedColumn {
+    type Key = QueryID;
+
+    type Value = Timestamp;
+
+    type Mode = Normal;
+}
+
 pub type ForwardEdgeColumn<C> = (QueryID, Arc<ForwardEdges<C>>);
 pub type NodeInfoColumn = (QueryID, NodeInfo);
-pub type PendingBackwardProjectionColumn = (QueryID, Timestamp);
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+struct PendingBackwardProjectionColumn;
+
+impl Column for PendingBackwardProjectionColumn {
+    type Key = QueryID;
+
+    type Value = Timestamp;
+
+    type Mode = Normal;
+}
 
 #[derive(Identifiable)]
 pub struct DirtySetColumn;
