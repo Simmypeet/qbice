@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+// re-export
+pub(crate) use caller::CallerInformation;
 use dashmap::{DashMap, DashSet};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHasher};
@@ -8,9 +10,9 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::{Config, DefaultConfig},
     engine::computation_graph::{
-        caller::CallerInformation, computed::Computed,
-        computing_lock::ComputingLock, fast_path::FastPathResult,
-        statistic::Statistic, timestamp::TimestampManager,
+        computed::Computed, computing_lock::ComputingLock,
+        fast_path::FastPathResult, statistic::Statistic,
+        timestamp::TimestampManager,
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, QueryID},

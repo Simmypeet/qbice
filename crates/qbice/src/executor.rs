@@ -121,7 +121,8 @@ use qbice_stable_type_id::StableTypeID;
 use crate::{
     Engine, TrackedEngine,
     config::Config,
-    query::{ExecutionStyle, Query, QueryID},
+    engine::computation_graph::CallerInformation,
+    query::{ExecutionStyle, Query},
 };
 
 /// Error indicating that a cyclic query dependency was detected.
@@ -416,7 +417,7 @@ type InvokeExecutorFn<C> =
 type RepairQueryFn<C> = for<'a> fn(
     engine: &'a Arc<Engine<C>>,
     query_id: Compact128,
-    called_from: QueryID,
+    called_from: CallerInformation,
 ) -> Pin<
     Box<dyn Future<Output = Result<(), CyclicError>> + Send + 'a>,
 >;
@@ -506,9 +507,9 @@ impl<C: Config> Entry<C> {
         &self,
         engine: &Arc<Engine<C>>,
         query_id: Compact128,
-        called_from: QueryID,
+        caller_information: CallerInformation,
     ) -> Result<(), CyclicError> {
-        (self.repair_query)(engine, query_id, called_from).await
+        (self.repair_query)(engine, query_id, caller_information).await
     }
 
     pub fn obtain_scc_value<Q: Query>(&self) -> Q::Value {

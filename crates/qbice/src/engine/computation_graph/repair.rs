@@ -58,7 +58,10 @@ impl<C: Config> Engine<C> {
                     .repair_query_from_query_id(
                         self,
                         callee.compact_hash_128(),
-                        query.id,
+                        CallerInformation::Query(QueryCaller::new(
+                            query.id,
+                            CallerReason::Repair,
+                        )),
                     )
                     .await;
             }
@@ -111,6 +114,58 @@ impl<C: Config> Engine<C> {
         }
     }
 
+    pub(super) async fn repair_transitive_firewall_callees<Q: Query>(
+        self: &Arc<Self>,
+        query: &QueryWithID<'_, Q>,
+    ) {
+        let node_info =
+            self.computation_graph.get_node_info(&query.id).unwrap();
+
+        let tfcs = node_info.transitive_firewall_callees();
+
+        let tfcs = tfcs
+            .into_iter()
+            .flat_map(|x| x.iter())
+            .copied()
+            .collect::<Vec<_>>();
+
+        let chunk_size = std::cmp::max(
+            tfcs.len()
+                / std::thread::available_parallelism()
+                    .map(std::num::NonZero::get)
+                    .unwrap_or(1),
+            1,
+        );
+
+        let mut handles = Vec::new();
+
+        // run all repairs in parallel
+        for tfc_chunk in tfcs.chunks(chunk_size).map(<[_]>::to_vec) {
+            let engine = Arc::clone(self);
+
+            handles.push(tokio::spawn(async move {
+                for tfc in tfc_chunk {
+                    let executor = engine
+                        .executor_registry
+                        .get_executor_entry_by_type_id(&tfc.stable_type_id());
+
+                    let _ = executor
+                        .repair_query_from_query_id(
+                            &engine,
+                            tfc.compact_hash_128(),
+                            CallerInformation::RepairFirewall,
+                        )
+                        .await;
+                }
+            }));
+        }
+
+        // join all handles
+        for handle in handles {
+            handle.await.unwrap();
+        }
+    }
+
     pub(super) async fn should_recompute_query<'x, Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
@@ -131,11 +186,7 @@ impl<C: Config> Engine<C> {
         // repair transitive firewall callees first before deciding whether to
         // recompute, since the transitive firewall callees might affect the
         // decision by propagating dirtiness.
-        // self.repair_transitive_firewall_callees(
-        //     &query_id.id,
-        //     &mut lock_computing,
-        // )
-        // .await;
+        self.repair_transitive_firewall_callees(query).await;
 
         let recompute =
             self.recompute_decision_based_on_forward_edges(query).await;
@@ -170,7 +221,10 @@ impl<C: Config> Engine<C> {
                     .repair_query_from_query_id(
                         self,
                         callee.compact_hash_128(),
-                        query.id,
+                        CallerInformation::Query(QueryCaller::new(
+                            query.id,
+                            CallerReason::Repair,
+                        )),
                     )
                     .await;
             }
@@ -227,7 +281,7 @@ impl<C: Config> Engine<C> {
     pub(crate) fn repair_query_from_query_id<'x, Q: Query>(
         self: &'x Arc<Self>,
         query_id: Compact128,
-        called_from: QueryID,
+        called_from: CallerInformation,
     ) -> Pin<Box<dyn Future<Output = Result<(), CyclicError>> + Send + 'x>>
     {
         Box::pin(async move {
@@ -237,15 +291,7 @@ impl<C: Config> Engine<C> {
                 query: &query_input,
             };
 
-            self.query_for(
-                &query_for,
-                &CallerInformation::Query(QueryCaller::new(
-                    called_from,
-                    CallerReason::Repair,
-                )),
-            )
-            .await
-            .map(|_| ())
+            self.query_for(&query_for, &called_from).await.map(|_| ())
         })
     }
 }

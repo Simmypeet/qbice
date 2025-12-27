@@ -25,7 +25,6 @@ impl<C: Config> Engine<C> {
                 let caller_query_id = *id;
 
                 self.mark_dirty_forward_edge(caller_query_id, query_id, tx);
-                self.computation_graph.add_dirtied_edge_count();
 
                 let node_info = self
                     .computation_graph
