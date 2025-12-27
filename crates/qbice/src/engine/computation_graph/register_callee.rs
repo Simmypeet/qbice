@@ -35,8 +35,7 @@ impl<C: Config> Drop for UndoRegisterCallee<'_, C> {
         }
 
         if let Some(caller) = self.caller_source {
-            let mut caller_meta =
-                self.graph.lock.get_lock_mut(&caller);
+            let mut caller_meta = self.graph.lock.get_lock_mut(&caller);
 
             caller_meta.abort_callee(&self.callee_target);
         }
@@ -56,8 +55,8 @@ impl<C: Config> Engine<C> {
                 let mut computing =
                     self.computation_graph.lock.get_lock_mut(caller);
 
-                // Invariant Check: projection query can only requires
-                // projection or firewall queries.
+                // Invariant Check: projection query can only requires firewall
+                // queries.
                 if computing.query_kind().is_projection() {
                     // get the kind of query about to be registerd by looking
                     // up from the executor registry
@@ -67,15 +66,10 @@ impl<C: Config> Engine<C> {
                         );
                     let exec_style = entry.obtain_execution_style();
 
-                    if !matches!(
-                        exec_style,
-                        ExecutionStyle::Projection | ExecutionStyle::Firewall
-                    ) {
-                        panic!(
-                            "Projection query can only depend on projection \
-                             or firewall queries"
-                        );
-                    }
+                    assert!(
+                        matches!(exec_style, ExecutionStyle::Firewall),
+                        "Projection query can only depend on firewall queries"
+                    );
                 }
 
                 computing.register_calee(calee_target);
