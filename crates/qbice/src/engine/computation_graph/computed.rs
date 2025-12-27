@@ -325,15 +325,20 @@ impl<C: Config> ComputationGraph<C> {
 }
 
 impl<C: Config> Engine<C> {
-    pub(super) fn set_computed<Q: Query>(
-        &self,
+    pub(super) fn set_computed<'s, Q: Query>(
+        &'s self,
         query_id: &QueryWithID<'_, Q>,
         query_value: Q::Value,
+        query_value_fingerprint: Option<Compact128>,
         query_kind: QueryKind,
         forward_edges: ForwardEdges<C>,
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
+        continuting_tx: Option<
+            <C::Database as KvDatabase>::WriteTransaction<'s>,
+        >,
     ) {
-        let query_value_fingerprint = self.hash(&query_value);
+        let query_value_fingerprint =
+            query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
         let transitive_firewall_callees_fingerprint = self.hash(&tfc_achetype);
 
         let forward_edges = Arc::new(forward_edges);
@@ -352,7 +357,8 @@ impl<C: Config> Engine<C> {
             self.computation_graph.get_forward_edges(&query_id.id);
 
         {
-            let tx = self.database.write_transaction();
+            let tx = continuting_tx
+                .unwrap_or_else(|| self.database.write_transaction());
 
             // remove prior backward edges
             if let Some(forward_edges) = &existing_forward_edges {
@@ -512,6 +518,7 @@ impl<C: Config> Engine<C> {
         tx.put::<DirtySetColumn>(&edge, &());
 
         self.computation_graph.computed.dirty_edge_set.put(edge, Some(()));
+        self.computation_graph.add_dirtied_edge_count();
     }
 
     #[allow(clippy::option_option)]

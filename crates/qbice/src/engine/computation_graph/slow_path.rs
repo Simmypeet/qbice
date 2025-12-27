@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use qbice_storage::kv_database::KvDatabase;
 
 use crate::{
     Engine, Query, TrackedEngine,
@@ -12,6 +13,7 @@ use crate::{
     },
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExecuteQueryFor {
     FreshQuery,
     RecomputeQuery,
@@ -22,7 +24,7 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
-        _execute_query_for: ExecuteQueryFor,
+        execute_query_for: ExecuteQueryFor,
         lock_guard: ComputingLockGuard<'_>,
     ) {
         // create a new tracked engine
@@ -92,7 +94,38 @@ impl<C: Config> Engine<C> {
 
         let value = result.unwrap_or_else(|_| entry.obtain_scc_value::<Q>());
 
-        self.computing_lock_to_computed(query, value, lock_guard);
+        let old_node_info = self.computation_graph.get_node_info(&query.id);
+
+        // if the old node info is a firewall or projection node, we compare
+        // the old and new value fingerprints to determine if we need to
+        // do dirty propagation.
+        let (continuing_tx, query_value_fingerprint) =
+            if let Some(old_node_info) = old_node_info
+                && (old_node_info.query_kind().is_firewall()
+                    || old_node_info.query_kind().is_projection())
+                && execute_query_for == ExecuteQueryFor::RecomputeQuery
+            {
+                let tx = self.database.write_transaction();
+
+                let fingerprint = self.hash(&value);
+
+                // if fingerprint has changed, we do dirty propagation
+                if old_node_info.value_fingerprint() != fingerprint {
+                    self.dirty_propagate(query.id, &tx);
+                }
+
+                (Some(tx), Some(fingerprint))
+            } else {
+                (None, None)
+            };
+
+        self.computing_lock_to_computed(
+            query,
+            value,
+            query_value_fingerprint,
+            lock_guard,
+            continuing_tx,
+        );
     }
 
     pub(super) async fn continuation<Q: Query>(

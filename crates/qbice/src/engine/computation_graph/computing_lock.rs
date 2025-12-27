@@ -9,7 +9,7 @@ use dashmap::{
     mapref::one::{Ref, RefMut},
 };
 use qbice_stable_hash::Compact128;
-use qbice_storage::intern::Interned;
+use qbice_storage::{intern::Interned, kv_database::KvDatabase};
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
@@ -295,11 +295,15 @@ impl<C: Config> Engine<C> {
         notify.notify_waiters();
     }
 
-    pub(super) fn computing_lock_to_computed<Q: Query>(
-        &self,
+    pub(super) fn computing_lock_to_computed<'s, Q: Query>(
+        &'s self,
         query_id: &QueryWithID<'_, Q>,
         value: Q::Value,
+        query_value_fingerprint: Option<Compact128>,
         lock_guard: ComputingLockGuard<'_>,
+        continuing_tx: Option<
+            <C::Database as KvDatabase>::WriteTransaction<'s>,
+        >,
     ) {
         let dashmap::Entry::Occupied(mut entry_lock) =
             self.computation_graph.computing_lock.lock.entry(query_id.id)
@@ -321,6 +325,7 @@ impl<C: Config> Engine<C> {
         self.set_computed(
             query_id,
             value,
+            query_value_fingerprint,
             query_kind,
             ForwardEdges {
                 callee_observations: callee_info
@@ -333,6 +338,7 @@ impl<C: Config> Engine<C> {
                 callee_order: callee_info.callee_order,
             },
             tfc_archetype,
+            continuing_tx,
         );
 
         lock_guard.defuse();
