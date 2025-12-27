@@ -7,14 +7,14 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use flexstr::SharedStr;
 use qbice::{
-    Engine, Identifiable, StableHash, TrackedEngine,
-    config::{Config, DefaultConfig},
+    Decode, Encode, Identifiable, StableHash, TrackedEngine,
+    config::Config,
     executor::{CyclicError, Executor},
     query::Query,
 };
-use qbice_integration_test::Variable;
+use qbice_integration_test::{Variable, create_test_engine};
+use tempfile::tempdir;
 use tracing_test::traced_test;
 
 #[derive(
@@ -28,6 +28,8 @@ use tracing_test::traced_test;
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct Square(pub Variable);
 
@@ -67,6 +69,8 @@ impl<C: Config> Executor<Square, C> for SquareExecutor {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct NegativeSquare(pub Variable);
 
@@ -102,11 +106,13 @@ impl<C: Config> Executor<NegativeSquare, C> for NegativeSquareExecutor {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct NegativeSquareToString(pub Variable);
 
 impl Query for NegativeSquareToString {
-    type Value = SharedStr;
+    type Value = String;
 }
 
 #[derive(Debug, Default)]
@@ -119,19 +125,20 @@ impl<C: Config> Executor<NegativeSquareToString, C>
         &self,
         query: &NegativeSquareToString,
         engine: &TrackedEngine<C>,
-    ) -> Result<SharedStr, CyclicError> {
+    ) -> Result<String, CyclicError> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let value = engine.query(&NegativeSquare(query.0)).await?;
 
-        Ok(SharedStr::from(value.to_string()))
+        Ok(value.to_string())
     }
 }
 
 #[tokio::test]
 #[traced_test]
 async fn firewall() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let square_ex = Arc::new(SquareExecutor::default());
     let negative_square_ex = Arc::new(NegativeSquareExecutor::default());
@@ -235,6 +242,8 @@ async fn firewall() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct AbsoluteFirewall(pub Variable);
 
@@ -273,6 +282,8 @@ impl<C: Config> Executor<AbsoluteFirewall, C> for AbsoluteFirewallExecutor {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct ClampFirewall(pub Variable);
 
@@ -311,6 +322,8 @@ impl<C: Config> Executor<ClampFirewall, C> for ClampFirewallExecutor {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct DoubleClampedValue(pub Variable);
 
@@ -341,7 +354,8 @@ impl<C: Config> Executor<DoubleClampedValue, C> for DoubleClampedValueExecutor {
 #[tokio::test]
 #[traced_test]
 async fn chained_firewalls() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let abs_ex = Arc::new(AbsoluteFirewallExecutor::default());
     let clamp_ex = Arc::new(ClampFirewallExecutor::default());
@@ -498,6 +512,8 @@ async fn chained_firewalls() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct SumOfSquares {
     pub a: Variable,
@@ -539,7 +555,8 @@ impl<C: Config> Executor<SumOfSquares, C> for SumOfSquaresExecutor {
 #[tokio::test]
 #[traced_test]
 async fn diamond_dependency_with_firewalls() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let square_ex = Arc::new(SquareExecutor::default());
     let sum_ex = Arc::new(SumOfSquaresExecutor::default());
@@ -650,6 +667,8 @@ async fn diamond_dependency_with_firewalls() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct SquareTimesTwo(pub Variable);
 
@@ -684,6 +703,8 @@ impl<C: Config> Executor<SquareTimesTwo, C> for SquareTimesTwoExecutor {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct SquarePlusOne(pub Variable);
 
@@ -721,7 +742,8 @@ impl<C: Config> Executor<SquarePlusOne, C> for SquarePlusOneExecutor {
 #[tokio::test]
 #[traced_test]
 async fn firewall_multiple_callers() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let square_ex = Arc::new(SquareExecutor::default());
     let times_two_ex = Arc::new(SquareTimesTwoExecutor::default());
@@ -819,6 +841,8 @@ async fn firewall_multiple_callers() {
     Hash,
     Identifiable,
     StableHash,
+    Encode,
+    Decode,
 )]
 pub struct ConditionalSquare {
     pub condition: Variable,
@@ -857,7 +881,8 @@ impl<C: Config> Executor<ConditionalSquare, C> for ConditionalSquareExecutor {
 #[tokio::test]
 #[traced_test]
 async fn firewall_conditional_dependency() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let square_ex = Arc::new(SquareExecutor::default());
     let conditional_ex = Arc::new(ConditionalSquareExecutor::default());
@@ -986,7 +1011,8 @@ async fn firewall_conditional_dependency() {
 #[tokio::test]
 #[traced_test]
 async fn firewall_dirty_propagation_on_change() {
-    let mut engine = Engine::<DefaultConfig>::default();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let square_ex = Arc::new(SquareExecutor::default());
     let negative_square_ex = Arc::new(NegativeSquareExecutor::default());
