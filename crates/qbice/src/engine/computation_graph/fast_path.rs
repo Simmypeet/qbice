@@ -131,12 +131,7 @@ impl<C: Config> Engine<C> {
 
             // check if the query was called with repairing firewall and
             // has pending backward projection to do
-            if caller == &CallerInformation::RepairFirewall
-                && self
-                    .computation_graph
-                    .get_pending_backward_projection(query_id)
-                    .is_some_and(|x| x == current_timestamp)
-            {
+            if caller == &CallerInformation::RepairFirewall {
                 if let Some(pending_lock) = self
                     .computation_graph
                     .lock
@@ -148,11 +143,15 @@ impl<C: Config> Engine<C> {
                     notified_owned.await;
 
                     return Ok(FastPathResult::TryAgain);
+                } else if self
+                    .computation_graph
+                    .get_pending_backward_projection(query_id)
+                    .is_some_and(|x| x == current_timestamp)
+                {
+                    return Ok(FastPathResult::ToSlowPath(
+                        SlowPath::BaackwardProjection,
+                    ));
                 }
-
-                return Ok(FastPathResult::ToSlowPath(
-                    SlowPath::BaackwardProjection,
-                ));
             }
 
             // gets the result
