@@ -4,23 +4,6 @@ use crate::query::QueryID;
 pub enum CallerReason {
     RequireValue,
     Repair,
-
-    /// This occurs when a projection got invoked with
-    /// `BackwardProjectionPropagation` and now the projection itself has to
-    /// recompute and in the process it has to call another query with this
-    /// flag.
-    ///
-    /// ```txt
-    ///       Firewall1                Firewall2
-    ///          ^                        ^
-    ///          |                        |
-    ///          +------- Projection  ----+
-    ///                    ^^^^^^^
-    ///                    Got backward propagated and now have to recompute
-    ///                    itself and call Firewall1 and Firewall2 with
-    ///                    this flag.
-    /// ```
-    ProjectionRecomputingDueToBackwardPropagation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,9 +56,7 @@ impl CallerInformation {
             Self::RepairFirewall | Self::BackwardProjectionPropagation => false,
 
             Self::User => true,
-            Self::Query(q) => matches!(q.reason, CallerReason::RequireValue
-                | CallerReason::ProjectionRecomputingDueToBackwardPropagation
-            ),
+            Self::Query(q) => matches!(q.reason, CallerReason::RequireValue),
         }
     }
 
@@ -86,12 +67,8 @@ impl CallerInformation {
             | Self::User
             | Self::BackwardProjectionPropagation => None,
 
-            Self::Query(q) => {
-                matches!(q.reason,
-                    CallerReason::RequireValue
-                    | CallerReason::ProjectionRecomputingDueToBackwardPropagation
-                ).then_some(&q.query_id)
-            }
+            Self::Query(q) => matches!(q.reason, CallerReason::RequireValue)
+                .then_some(&q.query_id),
         }
     }
 }

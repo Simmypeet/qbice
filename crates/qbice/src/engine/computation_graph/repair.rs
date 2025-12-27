@@ -8,7 +8,7 @@ use crate::{
     engine::computation_graph::{
         QueryWithID,
         caller::{CallerInformation, CallerReason, QueryCaller},
-        computing_lock::ComputingLockGuard,
+        lock::ComputingLockGuard,
     },
     executor::CyclicError,
     query::QueryID,
@@ -170,8 +170,8 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
-        lock_guard: ComputingLockGuard<'x>,
-    ) -> Option<ComputingLockGuard<'x>> {
+        lock_guard: ComputingLockGuard<'x, C>,
+    ) -> Option<ComputingLockGuard<'x, C>> {
         // if the caller is backward projection propagation, we always
         // recompute since the projection query have already told us
         // that the value is required to be recomputed.
@@ -259,7 +259,7 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
-        lock_guard: ComputingLockGuard<'_>,
+        lock_guard: ComputingLockGuard<'_, C>,
     ) {
         let Some(lock_guard) = self
             .should_recompute_query(query, caller_information, lock_guard)

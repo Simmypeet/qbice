@@ -21,7 +21,8 @@ use crate::{
     config::Config,
     engine::computation_graph::{
         ComputationGraph, QueryKind, QueryWithID, Sieve,
-        computed::query_store::{QueryColumn, QueryStore},
+        lock::BackwardProjectionLockGuard,
+        persist::query_store::{QueryColumn, QueryStore},
         tfc_achetype::TransitiveFirewallCallees,
         timestamp::Timestamp,
     },
@@ -39,6 +40,17 @@ pub struct BackwardEdge<C: Config>(Arc<DashSet<QueryID, C::BuildHasher>>);
 impl<C: Config> BackwardEdge<C> {
     pub fn par_iter(&self) -> dashmap::rayon::set::Iter<'_, QueryID> {
         self.0.par_iter()
+    }
+
+    pub fn iter(
+        &self,
+    ) -> dashmap::iter_set::Iter<
+        '_,
+        QueryID,
+        C::BuildHasher,
+        DashMap<QueryID, (), C::BuildHasher>,
+    > {
+        self.0.iter()
     }
 }
 
@@ -120,6 +132,7 @@ impl<C: Config> RemoveElementFromSet for BackwardEdge<C> {
 pub type LastVerifiedColumn = (QueryID, Timestamp);
 pub type ForwardEdgeColumn<C> = (QueryID, Arc<ForwardEdges<C>>);
 pub type NodeInfoColumn = (QueryID, NodeInfo);
+pub type PendingBackwardProjectionColumn = (QueryID, Timestamp);
 
 #[derive(Identifiable)]
 pub struct DirtySetColumn;
@@ -191,17 +204,18 @@ impl<C: Config> Column for BackwardEdgeColumn<C> {
     type Mode = KeyOfSet<QueryID>;
 }
 
-pub struct Computed<C: Config> {
+pub struct Persist<C: Config> {
     last_verifieds: Sieve<LastVerifiedColumn, C>,
     forward_edges: Sieve<ForwardEdgeColumn<C>, C>,
     node_info: Sieve<NodeInfoColumn, C>,
     dirty_edge_set: Sieve<DirtySetColumn, C>,
     backward_edges: Sieve<BackwardEdgeColumn<C>, C>,
+    pending_backward_projections: Sieve<PendingBackwardProjectionColumn, C>,
 
     query_store: query_store::QueryStore<C>,
 }
 
-impl<C: Config> Computed<C> {
+impl<C: Config> Persist<C> {
     pub fn new(
         db: Arc<C::Database>,
         shard_amount: usize,
@@ -235,6 +249,12 @@ impl<C: Config> Computed<C> {
                 build_hasher.clone(),
             ),
             backward_edges: Sieve::<_, C>::new(
+                CAPACITY,
+                shard_amount,
+                db.clone(),
+                build_hasher.clone(),
+            ),
+            pending_backward_projections: Sieve::<_, C>::new(
                 CAPACITY,
                 shard_amount,
                 db.clone(),
@@ -301,26 +321,36 @@ impl<C: Config> ComputationGraph<C> {
         &self,
         query_id: &QueryID,
     ) -> Option<Arc<ForwardEdges<C>>> {
-        self.computed.forward_edges.get_normal(query_id).map(|x| x.clone())
+        self.persist.forward_edges.get_normal(query_id).map(|x| x.clone())
     }
 
     pub fn get_node_info(&self, query_id: &QueryID) -> Option<NodeInfo> {
-        self.computed.node_info.get_normal(query_id).map(|x| x.clone())
+        self.persist.node_info.get_normal(query_id).map(|x| x.clone())
     }
 
     pub fn get_last_verified(&self, query_id: &QueryID) -> Option<Timestamp> {
-        self.computed.last_verifieds.get_normal(query_id).map(|x| *x)
+        self.persist.last_verifieds.get_normal(query_id).map(|x| *x)
     }
 
     pub fn get_backward_edges(&self, query_id: &QueryID) -> BackwardEdge<C> {
-        self.computed.backward_edges.get_set(query_id).clone()
+        self.persist.backward_edges.get_set(query_id).clone()
     }
 
     pub fn get_value<Q: Query>(
         &self,
         query_input_hash_128: &Compact128,
     ) -> Option<Q::Value> {
-        self.computed.query_store.get_value::<Q>(query_input_hash_128)
+        self.persist.query_store.get_value::<Q>(query_input_hash_128)
+    }
+
+    pub fn get_pending_backward_projection(
+        &self,
+        query_id: &QueryID,
+    ) -> Option<Timestamp> {
+        self.persist
+            .pending_backward_projections
+            .get_normal(query_id)
+            .map(|x| *x)
     }
 }
 
@@ -334,6 +364,7 @@ impl<C: Config> Engine<C> {
         query_kind: QueryKind,
         forward_edges: ForwardEdges<C>,
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
+        has_pending_backward_projection: bool,
         continuting_tx: Option<
             <C::Database as KvDatabase>::WriteTransaction<'s>,
         >,
@@ -360,6 +391,14 @@ impl<C: Config> Engine<C> {
         {
             let tx = continuting_tx
                 .unwrap_or_else(|| self.database.write_transaction());
+
+            // mark pending backward projection if needed
+            if has_pending_backward_projection {
+                tx.put::<PendingBackwardProjectionColumn>(
+                    &query_id.id,
+                    &current_timestamp,
+                );
+            }
 
             // remove prior backward edges
             if let Some(forward_edges) = &existing_forward_edges {
@@ -394,36 +433,44 @@ impl<C: Config> Engine<C> {
             if let Some(forward_edges) = &existing_forward_edges {
                 for edge in &forward_edges.callee_order {
                     self.computation_graph
-                        .computed
+                        .persist
                         .backward_edges
                         .remove_set_element(edge, &query_id.id);
                 }
             }
 
+            // set pending backward projection if needed
+            if has_pending_backward_projection {
+                self.computation_graph
+                    .persist
+                    .pending_backward_projections
+                    .put(query_id.id, Some(current_timestamp));
+            }
+
             self.computation_graph
-                .computed
+                .persist
                 .last_verifieds
                 .put(query_id.id, Some(current_timestamp));
 
             for edge in &forward_edges.callee_order {
                 self.computation_graph
-                    .computed
+                    .persist
                     .backward_edges
                     .insert_set_element(edge, std::iter::once(query_id.id));
             }
 
             self.computation_graph
-                .computed
+                .persist
                 .forward_edges
                 .put(query_id.id, Some(forward_edges));
 
             self.computation_graph
-                .computed
+                .persist
                 .node_info
                 .put(query_id.id, Some(node_info));
 
             self.computation_graph
-                .computed
+                .persist
                 .query_store
                 .insert::<Q>(query_id.id.hash_128().into(), query_entry);
         }
@@ -480,29 +527,29 @@ impl<C: Config> Engine<C> {
             if let Some(forward_edges) = existing_forward_edges {
                 for edge in &forward_edges.callee_order {
                     self.computation_graph
-                        .computed
+                        .persist
                         .backward_edges
                         .remove_set_element(edge, &query_id);
                 }
             }
 
             self.computation_graph
-                .computed
+                .persist
                 .last_verifieds
                 .put(query_id, Some(timestamp));
 
             self.computation_graph
-                .computed
+                .persist
                 .forward_edges
                 .put(query_id, Some(empty_forward_edges));
 
             self.computation_graph
-                .computed
+                .persist
                 .node_info
                 .put(query_id, Some(node_info));
 
             self.computation_graph
-                .computed
+                .persist
                 .query_store
                 .insert::<Q>(query_id.hash_128().into(), query_entry);
         }
@@ -518,7 +565,7 @@ impl<C: Config> Engine<C> {
 
         tx.put::<DirtySetColumn>(&edge, &());
 
-        self.computation_graph.computed.dirty_edge_set.put(edge, Some(()));
+        self.computation_graph.persist.dirty_edge_set.put(edge, Some(()));
         self.computation_graph.add_dirtied_edge_count();
     }
 
@@ -565,18 +612,18 @@ impl<C: Config> Engine<C> {
             for callee in clean_edges.iter().copied() {
                 let edge = Edge { from: *query_id, to: callee };
 
-                self.computation_graph.computed.dirty_edge_set.put(edge, None);
+                self.computation_graph.persist.dirty_edge_set.put(edge, None);
             }
 
             if let Some(node_info) = new_node_info {
                 self.computation_graph
-                    .computed
+                    .persist
                     .node_info
                     .put(*query_id, Some(node_info));
             }
 
             self.computation_graph
-                .computed
+                .persist
                 .last_verifieds
                 .put(*query_id, Some(current_timestamp));
         }
@@ -584,7 +631,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) fn is_edge_dirty(&self, from: QueryID, to: QueryID) -> bool {
         self.computation_graph
-            .computed
+            .persist
             .dirty_edge_set
             .get_normal(&Edge { from, to })
             .is_some()
@@ -594,6 +641,25 @@ impl<C: Config> Engine<C> {
         &self,
         query_id: &Compact128,
     ) -> Option<Q> {
-        self.computation_graph.computed.query_store.get_input::<Q>(query_id)
+        self.computation_graph.persist.query_store.get_input::<Q>(query_id)
+    }
+
+    pub(super) fn done_backward_projection(
+        &self,
+        query_id: &QueryID,
+        backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
+    ) {
+        let tx = self.database.write_transaction();
+
+        tx.delete::<PendingBackwardProjectionColumn>(query_id);
+
+        tx.commit();
+
+        self.computation_graph
+            .persist
+            .pending_backward_projections
+            .put(*query_id, None);
+
+        backward_projection_lock_guard.done();
     }
 }

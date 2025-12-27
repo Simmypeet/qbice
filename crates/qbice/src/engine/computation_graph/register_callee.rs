@@ -36,7 +36,7 @@ impl<C: Config> Drop for UndoRegisterCallee<'_, C> {
 
         if let Some(caller) = self.caller_source {
             let mut caller_meta =
-                self.graph.computing_lock.get_lock_mut(&caller);
+                self.graph.lock.get_lock_mut(&caller);
 
             caller_meta.abort_callee(&self.callee_target);
         }
@@ -54,7 +54,7 @@ impl<C: Config> Engine<C> {
             || None,
             |caller| {
                 let mut computing =
-                    self.computation_graph.computing_lock.get_lock_mut(caller);
+                    self.computation_graph.lock.get_lock_mut(caller);
 
                 // Invariant Check: projection query can only requires
                 // projection or firewall queries.

@@ -10,20 +10,20 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::{Config, DefaultConfig},
     engine::computation_graph::{
-        computed::Computed, computing_lock::ComputingLock,
-        fast_path::FastPathResult, statistic::Statistic,
-        timestamp::TimestampManager,
+        fast_path::FastPathResult, lock::Lock, persist::Persist,
+        statistic::Statistic, timestamp::TimestampManager,
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, QueryID},
 };
 
+mod backward_projection;
 mod caller;
-mod computed;
-mod computing_lock;
 mod dirty_propagation;
 mod fast_path;
 mod input_session;
+mod lock;
+mod persist;
 mod register_callee;
 mod repair;
 mod slow_path;
@@ -67,8 +67,8 @@ impl QueryKind {
 }
 
 pub struct ComputationGraph<C: Config> {
-    computed: Computed<C>,
-    computing_lock: ComputingLock,
+    persist: Persist<C>,
+    lock: Lock<C>,
     dirtied_queries: DashSet<QueryID, C::BuildHasher>,
     statistic: Statistic,
     timestamp_manager: TimestampManager,
@@ -82,10 +82,10 @@ impl<C: Config> ComputationGraph<C> {
     ) -> Self {
         Self {
             timestamp_manager: TimestampManager::new(&*db),
-            computed: Computed::new(db, shard_amount, build_hasher.clone()),
+            persist: Persist::new(db, shard_amount, build_hasher.clone()),
             dirtied_queries: DashSet::with_hasher(build_hasher),
             statistic: Statistic::default(),
-            computing_lock: ComputingLock::new(),
+            lock: Lock::new(),
         }
     }
 }
@@ -376,14 +376,14 @@ impl<C: Config> Engine<C> {
 
         // pulling the value
         let value = loop {
-            match self.fast_path::<Q>(&query.id, caller).await {
+            let slow_path = match self.fast_path::<Q>(&query.id, caller).await {
                 // try again
                 Ok(FastPathResult::TryAgain) => {
                     continue;
                 }
 
                 // go to slow path
-                Ok(FastPathResult::ToSlowPath) => {}
+                Ok(FastPathResult::ToSlowPath(slow_path)) => slow_path,
 
                 // hit
                 Ok(FastPathResult::Hit(value)) => {
@@ -408,18 +408,17 @@ impl<C: Config> Engine<C> {
 
                     return Err(e);
                 }
-            }
+            };
 
             // now the `query` state is held in computing state.
             // if `lock_computing` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
-            let Some(lock_computing) = self.computing_lock_guard(&query.id)
-            else {
+            let Some(guard) = self.get_lock_guard(&query.id, slow_path) else {
                 // try the fast path again
                 continue;
             };
 
-            self.continuation(query, caller, lock_computing).await;
+            self.continuation(query, caller, guard).await;
 
             checked = QueryRepairation::Repaired;
 

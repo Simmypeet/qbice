@@ -4,8 +4,8 @@ use crate::{
     Engine, Query,
     config::Config,
     engine::computation_graph::{
-        caller::CallerInformation, computed::NodeInfo,
-        computing_lock::Computing,
+        caller::CallerInformation, lock::Computing, persist::NodeInfo,
+        slow_path::SlowPath,
     },
     executor::CyclicError,
     query::QueryID,
@@ -14,7 +14,7 @@ use crate::{
 /// The result of attempting a fast-path query execution.
 pub enum FastPathResult<V> {
     TryAgain,
-    ToSlowPath,
+    ToSlowPath(SlowPath),
     Hit(Option<V>),
 }
 
@@ -28,7 +28,7 @@ impl<C: Config> Engine<C> {
     ) {
         // add dependency for the caller
         let mut caller_computing =
-            self.computation_graph.computing_lock.get_lock_mut(caller_source);
+            self.computation_graph.lock.get_lock_mut(caller_source);
 
         caller_computing.observe_callee(
             callee_target,
@@ -55,8 +55,7 @@ impl<C: Config> Engine<C> {
 
         // OPTIMIZE: this can be parallelized
         for dep in computing.registered_callees() {
-            let Some(state) =
-                self.computation_graph.computing_lock.try_get_lcok(dep)
+            let Some(state) = self.computation_graph.lock.try_get_lcok(dep)
             else {
                 continue;
             };
@@ -86,8 +85,7 @@ impl<C: Config> Engine<C> {
 
         // mark the caller as being in scc
         if is_in_scc {
-            let computing =
-                self.computation_graph.computing_lock.get_lock(called_from);
+            let computing = self.computation_graph.lock.get_lock(called_from);
 
             computing.mark_scc();
 
@@ -103,7 +101,7 @@ impl<C: Config> Engine<C> {
         caller: &CallerInformation,
     ) -> Result<FastPathResult<Q::Value>, CyclicError> {
         if let Some(computing) =
-            self.computation_graph.computing_lock.try_get_lcok(query_id)
+            self.computation_graph.lock.try_get_lcok(query_id)
         {
             // exit out of the scc query to avoid circular waits
             self.exit_scc(caller.get_caller(), &computing)?;
@@ -116,19 +114,45 @@ impl<C: Config> Engine<C> {
             Ok(FastPathResult::TryAgain)
         } else {
             // check if we have the existing query info
+            let current_timestamp =
+                self.computation_graph.timestamp_manager.get_current();
 
             let (Some(query_info), Some(last_verified)) = (
                 self.computation_graph.get_node_info(query_id),
                 self.computation_graph.get_last_verified(query_id),
             ) else {
-                return Ok(FastPathResult::ToSlowPath);
+                return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
             };
 
             // check if the query is up-to-date
-            if last_verified
-                != self.computation_graph.timestamp_manager.get_current()
+            if last_verified != current_timestamp {
+                return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
+            }
+
+            // check if the query was called with repairing firewall and
+            // has pending backward projection to do
+            if caller == &CallerInformation::RepairFirewall
+                && self
+                    .computation_graph
+                    .get_pending_backward_projection(query_id)
+                    .is_some_and(|x| x == current_timestamp)
             {
-                return Ok(FastPathResult::ToSlowPath);
+                if let Some(pending_lock) = self
+                    .computation_graph
+                    .lock
+                    .try_get_pending_backward_projection_lock(query_id)
+                {
+                    let notified_owned = pending_lock.notified_owned();
+                    drop(pending_lock);
+
+                    notified_owned.await;
+
+                    return Ok(FastPathResult::TryAgain);
+                }
+
+                return Ok(FastPathResult::ToSlowPath(
+                    SlowPath::BaackwardProjection,
+                ));
             }
 
             // gets the result
@@ -137,7 +161,7 @@ impl<C: Config> Engine<C> {
                     .computation_graph
                     .get_value::<Q>(&query_id.hash_128().into())
                 else {
-                    return Ok(FastPathResult::ToSlowPath);
+                    return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
                 };
 
                 Some(query_result)

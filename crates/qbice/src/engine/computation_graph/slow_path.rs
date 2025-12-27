@@ -9,9 +9,15 @@ use crate::{
     engine::computation_graph::{
         QueryWithID,
         caller::{CallerInformation, CallerReason, QueryCaller},
-        computing_lock::{ComputingLockGuard, ComputingMode},
+        lock::{ComputingLockGuard, ComputingMode, LockGuard},
     },
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlowPath {
+    Computing,
+    BaackwardProjection,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExecuteQueryFor {
@@ -25,24 +31,17 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
         execute_query_for: ExecuteQueryFor,
-        lock_guard: ComputingLockGuard<'_>,
+        lock_guard: ComputingLockGuard<'_, C>,
     ) {
         // create a new tracked engine
         let cache = Arc::new(DashMap::default());
-
-        let reason = if *caller_information
-            == CallerInformation::BackwardProjectionPropagation
-        {
-            CallerReason::ProjectionRecomputingDueToBackwardPropagation
-        } else {
-            CallerReason::RequireValue
-        };
 
         let mut tracked_engine = TrackedEngine {
             engine: self.clone(),
             cache: cache.clone(),
             caller: CallerInformation::Query(QueryCaller::new(
-                query.id, reason,
+                query.id,
+                CallerReason::RequireValue,
             )),
         };
 
@@ -75,7 +74,7 @@ impl<C: Config> Engine<C> {
 
         let is_in_scc = self
             .computation_graph
-            .computing_lock
+            .lock
             .get_lock(&query.id)
             .is_in_scc();
 
@@ -99,51 +98,80 @@ impl<C: Config> Engine<C> {
         // if the old node info is a firewall or projection node, we compare
         // the old and new value fingerprints to determine if we need to
         // do dirty propagation.
-        let (continuing_tx, query_value_fingerprint) =
-            if let Some(old_node_info) = old_node_info
-                && (old_node_info.query_kind().is_firewall()
-                    || old_node_info.query_kind().is_projection())
-                && execute_query_for == ExecuteQueryFor::RecomputeQuery
-            {
-                let tx = self.database.write_transaction();
+        let (
+            continuing_tx,
+            query_value_fingerprint,
+            need_backward_projection_propagation,
+        ) = if let Some(old_node_info) = old_node_info
+            && (old_node_info.query_kind().is_firewall()
+                || old_node_info.query_kind().is_projection())
+            && execute_query_for == ExecuteQueryFor::RecomputeQuery
+        {
+            let tx = self.database.write_transaction();
 
-                let fingerprint = self.hash(&value);
+            let fingerprint = self.hash(&value);
+            let updated = old_node_info.value_fingerprint() != fingerprint;
 
-                // if fingerprint has changed, we do dirty propagation
-                if old_node_info.value_fingerprint() != fingerprint {
-                    self.dirty_propagate(query.id, &tx);
-                }
+            // if fingerprint has changed, we do dirty propagation
+            if updated {
+                self.dirty_propagate(query.id, &tx);
+            }
 
-                (Some(tx), Some(fingerprint))
-            } else {
-                (None, None)
-            };
+            (
+                Some(tx),
+                Some(fingerprint),
+                // if the query is a firewall and its value has changed, it
+                // needs to invoke projection queries in the backward direction
+                // and propagate dirtiness as needed.
+                old_node_info.query_kind().is_firewall() && updated,
+            )
+        } else {
+            (None, None, false)
+        };
 
         self.computing_lock_to_computed(
             query,
             value,
             query_value_fingerprint,
             lock_guard,
+            need_backward_projection_propagation,
             continuing_tx,
         );
+
+        // if the firewall is being repaired, and it has pending backward
+        // projections, we need to do backward projections now.
+        if *caller_information == CallerInformation::RepairFirewall
+            && need_backward_projection_propagation
+        {
+            self.try_do_backward_projections(&query.id).await;
+        }
     }
 
     pub(super) async fn continuation<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
-        lock_guard: ComputingLockGuard<'_>,
+        lock_guard: LockGuard<'_, C>,
     ) {
-        if lock_guard.computing_mode() == ComputingMode::Execute {
-            self.execute_query(
-                query,
-                caller_information,
-                ExecuteQueryFor::FreshQuery,
-                lock_guard,
-            )
-            .await;
-        } else {
-            self.repair_query(query, caller_information, lock_guard).await;
+        match lock_guard {
+            LockGuard::ComputingLockGuard(lock_guard) => {
+                if lock_guard.computing_mode() == ComputingMode::Execute {
+                    self.execute_query(
+                        query,
+                        caller_information,
+                        ExecuteQueryFor::FreshQuery,
+                        lock_guard,
+                    )
+                    .await;
+                } else {
+                    self.repair_query(query, caller_information, lock_guard)
+                        .await;
+                }
+            }
+
+            LockGuard::BackwardProjectionLockGuard(lock_guard) => {
+                self.invoke_backward_projections(query.id, lock_guard).await;
+            }
         }
     }
 }
