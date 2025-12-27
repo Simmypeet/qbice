@@ -188,10 +188,14 @@ impl<C: Config> Drop for BackwardProjectionLockGuard<'_, C> {
             return;
         }
 
-        let removed = self.computing_lock.lock.remove(&self.query_id).expect(
-            "the pending backward projection lock guard has dropped and tried \
-             to remove existing lock, but no entry found",
-        );
+        let removed = self
+            .computing_lock
+            .backward_projection_lock
+            .remove(&self.query_id)
+            .expect(
+                "the pending backward projection lock guard has dropped and \
+                 tried to remove existing lock, but no entry found",
+            );
 
         // wake up all threads
         removed.1.notify.notify_waiters();
