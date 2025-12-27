@@ -33,8 +33,10 @@ impl<C: Config> Engine<C> {
             .map_or_else(|_| 1, std::num::NonZero::get)
             * 4;
 
-        let chunk_size =
-            (backward_projections.len()).div_ceil(expected_parallelism);
+        let chunk_size = std::cmp::max(
+            (backward_projections.len()) / expected_parallelism,
+            1,
+        );
 
         let mut handles = Vec::new();
 
