@@ -43,8 +43,6 @@ pub use qbice_stable_hash::StableHash;
 /// ## Basic Usage
 ///
 /// ```ignore
-/// use qbice_stable_type_id::StableTypeID;
-///
 /// // Create from a unique type name
 /// let id = StableTypeID::from_unique_type_name("myapp@1.0.0::models::User");
 ///
@@ -57,8 +55,6 @@ pub use qbice_stable_hash::StableHash;
 /// ## Combining IDs
 ///
 /// ```ignore
-/// use qbice_stable_type_id::StableTypeID;
-///
 /// let base_id = StableTypeID::from_unique_type_name("Container");
 /// let param_id = StableTypeID::from_unique_type_name("String");
 /// let combined = base_id.combine(param_id);
@@ -71,8 +67,6 @@ pub use qbice_stable_hash::StableHash;
 /// ## Using with the Derive Macro
 ///
 /// ```ignore
-/// use qbice_stable_type_id::Identifiable;
-///
 /// #[derive(Identifiable)]
 /// struct MyType {
 ///     field: i32,
@@ -103,8 +97,6 @@ impl StableTypeID {
     /// # Examples
     ///
     /// ```ignore
-    /// use qbice_stable_type_id::StableTypeID;
-    ///
     /// // Only use if you have pre-computed hash values
     /// let id = unsafe {
     ///     StableTypeID::from_raw_parts(
@@ -410,8 +402,6 @@ impl StableTypeID {
 /// ## Manual Implementation
 ///
 /// ```ignore
-/// use qbice_stable_type_id::{Identifiable, StableTypeID};
-///
 /// struct MyType;
 ///
 /// impl Identifiable for MyType {
@@ -443,11 +433,6 @@ impl StableTypeID {
 /// For generic types, the stable ID includes information about the concrete
 /// type parameters. This means `Vec<i32>` and `Vec<String>` will have
 /// different stable IDs.
-///
-/// # Thread Safety
-///
-/// This trait is inherently thread-safe as it only provides a constant value.
-/// The [`StableTypeID`] itself is [`Send`] and [`Sync`].
 #[diagnostic::on_unimplemented(
     message = "The type `{Self}` does not implement `Identifiable`",
     note = "You can derive `Identifiable` using the `#[derive(Identifiable)]` \
