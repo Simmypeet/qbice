@@ -1,0 +1,29 @@
+[package]
+name = "qbice_benchmark"
+version.workspace = true
+authors.workspace = true
+description = "Benchmarking for QBICE"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+qbice = { path = "../qbice" }
+qbice_stable_hash = { path = "../stable_hash" }
+qbice_stable_type_id = { path = "../stable_type_id" }
+qbice_serialize = { path = "../serialize" }
+qbice_storage = { path = "../storage" }
+dashmap.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+tokio.workspace = true
+
+[[bench]]
+name = "firewall"
+path = "benches/firewall.rs"
+harness = false
+
+
+[lints]
+workspace = true
