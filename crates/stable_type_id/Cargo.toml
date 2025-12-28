@@ -1,6 +1,6 @@
 [package]
 name = "qbice_stable_type_id"
-version = "0.1.0"
+version = "0.1.1"
 license.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -8,8 +8,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-qbice_stable_hash = { version = "0.1.0", path = "../stable_hash" }
-qbice_identifiable_derive = { version = "0.1.0", path = "../identifiable_derive" }
+qbice_stable_hash = { version = "0.1.2", path = "../stable_hash" }
+qbice_identifiable_derive = { version = "0.1.1", path = "../identifiable_derive" }
 
 [lints]
 workspace = true

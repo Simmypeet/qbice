@@ -13,8 +13,6 @@
 //! # Usage
 //!
 //! ```ignore
-//! use qbice_stable_type_id::Identifiable;
-//!
 //! #[derive(Identifiable)]
 //! struct MyType {
 //!     field: i32,
@@ -65,7 +63,6 @@
 //! ## Simple Types
 //!
 //! ```ignore
-//! # use qbice_stable_type_id::Identifiable;
 //! #[derive(Identifiable)]
 //! struct Point {
 //!     x: f64,
@@ -79,7 +76,6 @@
 //! ## Generic Types
 //!
 //! ```ignore
-//! # use qbice_stable_type_id::Identifiable;
 //! #[derive(Identifiable)]
 //! struct Container<T: Identifiable> {
 //!     value: T,
@@ -144,7 +140,6 @@ use proc_macro::TokenStream;
 /// ## Simple Struct
 ///
 /// ```ignore
-/// # use qbice_stable_type_id::Identifiable;
 /// #[derive(Identifiable)]
 /// struct User {
 ///     id: u64,
@@ -160,7 +155,6 @@ use proc_macro::TokenStream;
 /// ## Generic Struct
 ///
 /// ```ignore
-/// # use qbice_stable_type_id::Identifiable;
 /// #[derive(Identifiable)]
 /// struct Pair<T: Identifiable, U: Identifiable> {
 ///     first: T,
@@ -187,7 +181,6 @@ use proc_macro::TokenStream;
 /// The following will produce compile-time errors:
 ///
 /// ```compile_fail
-/// # use qbice_stable_type_id::Identifiable;
 /// #[derive(Identifiable)]
 /// struct BadLifetime<'a> {  // ❌ Lifetime parameters not allowed
 ///     data: &'a str,
@@ -195,7 +188,6 @@ use proc_macro::TokenStream;
 /// ```
 ///
 /// ```compile_fail
-/// # use qbice_stable_type_id::Identifiable;
 /// #[derive(Identifiable)]
 /// struct BadConst<const N: usize> {  // ❌ Const parameters not allowed
 ///     buffer: [u8; N],
@@ -219,12 +211,6 @@ use proc_macro::TokenStream;
 ///
 /// This ensures that `Vec<i32>` and `Vec<String>` have different stable IDs
 /// while maintaining deterministic generation.
-///
-/// # Performance
-///
-/// The stable ID computation happens entirely at compile time and has zero
-/// runtime cost. The generated constant can be used directly without any
-/// function calls or allocations.
 #[proc_macro_derive(Identifiable, attributes(stable_type_id_crate))]
 #[allow(clippy::too_many_lines)]
 pub fn derive_identifiable(input: TokenStream) -> TokenStream {
