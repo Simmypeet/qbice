@@ -1,9 +1,9 @@
 //! # Stable Hash Library
 //!
-//! This crate provides a stable hashing system that produces consistent hash
-//! values across different program runs and platforms. Unlike standard hash
-//! functions that may vary between runs for security reasons, stable hashes are
-//! designed to be reproducible and deterministic.
+//! This crate provides a hashing mechanism intended to be used in
+//! Content-Addressable Storage (CAS) systems. The library provides hashing
+//! that is stable accross different run and is intended for use cases where
+//! hashing is used to identify content rather than for security purposes.
 //!
 //! The main components of this library are:
 //!
@@ -64,23 +64,10 @@ pub trait Value: Default + StableHash + Send + Sync + 'static {
 
 /// A trait for stable hash functions.
 ///
-/// This trait defines the interface for hash functions that produce consistent,
-/// stable hash values. Unlike standard hash functions that may vary between
-/// runs for security reasons, stable hashers are designed to be reproducible.
-///
-/// The hasher works by accepting data through various `write_*` methods and
-/// producing a final hash value through the `finish` method.
-///
-/// ## Example
-///
-/// ```ignore
-/// use qbice_stable_hash::{StableHash, StableHasher, StableSipHasher};
-///
-/// let mut hasher = StableSipHasher::new();
-/// hasher.write_u32(42);
-/// hasher.write_str("hello");
-/// let hash = hasher.finish();
-/// ```
+/// This trait has similar interface to the standard library's `Hasher` trait,
+/// except it has associated type `Hash` representing the output hash value and
+/// the `sub_hash` method enabling hashing of unordered collections in a stable
+/// way.
 pub trait StableHasher: Send + Sync + 'static {
     /// The type of hash value produced by this hasher.
     ///
@@ -292,18 +279,12 @@ pub trait StableHasher: Send + Sync + 'static {
 
 /// A trait for types that can be hashed in a stable manner.
 ///
-/// Types implementing this trait can produce consistent hash values across
-/// different program runs and platforms. This is essential for reproducible
-/// builds, serialization, and testing scenarios where hash consistency matters.
-///
 /// The trait provides a single method that takes a mutable reference to a
 /// [`StableHasher`] and feeds the type's data into the hasher.
 ///
 /// ## Example
 ///
 /// ```ignore
-/// use qbice_stable_hash::{StableHash, StableHasher, StableSipHasher};
-///
 /// #[derive(Debug)]
 /// struct Point {
 ///     x: i32,

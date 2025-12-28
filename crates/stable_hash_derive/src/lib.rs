@@ -1,16 +1,14 @@
 //! Derive macro for the `StableHash` trait.
 //!
 //! This crate provides a derive macro for automatically implementing the
-//! `StableHash` trait from the `qbice_stable_hash` crate. The derive macro
-//! can be used on structs and enums to generate stable hash implementations.
+//! `StableHash` trait. The derive macro can be used on structs and enums to
+//! generate stable hash implementations.
 //!
 //! # Examples
 //!
 //! ## Struct
 //!
 //! ```ignore
-//! use qbice_stable_hash::StableHash;
-//!
 //! #[derive(StableHash)]
 //! struct Point {
 //!     x: i32,
@@ -21,8 +19,6 @@
 //! ## Enum
 //!
 //! ```ignore
-//! use qbice_stable_hash::StableHash;
-//!
 //! #[derive(StableHash)]
 //! enum Message {
 //!     Quit,
@@ -45,13 +41,10 @@ use syn::{
 ///
 /// - For structs: all fields are hashed in declaration order
 /// - For enums: the discriminant is hashed first, followed by any variant data
-/// - The hash is stable across different program runs and platforms
 ///
 /// # Struct Example
 ///
 /// ```ignore
-/// use qbice_stable_hash_derive::StableHash;
-///
 /// #[derive(StableHash)]
 /// struct Person {
 ///     name: String,
@@ -62,8 +55,6 @@ use syn::{
 /// # Enum Example
 ///
 /// ```ignore
-/// use qbice_stable_hash_derive::StableHash;
-///
 /// #[derive(StableHash)]
 /// enum Color {
 ///     Red,
