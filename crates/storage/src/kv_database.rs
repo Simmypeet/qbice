@@ -95,7 +95,7 @@ impl<T: Encode + Decode + Hash + Eq + Clone + Send + Sync + 'static>
 /// for serialization.
 pub trait Column: 'static + Send + Sync + Identifiable {
     /// The type of keys used in this column.
-    type Key: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;
+    type Key: Encode + Hash + Eq + Clone + 'static + Send + Sync;
 
     /// The type of values stored in this column.
     type Value: Encode + Decode + Clone + 'static + Send + Sync;
