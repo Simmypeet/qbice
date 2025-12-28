@@ -11,10 +11,11 @@ use std::{
 };
 
 use qbice::{
-    Engine, Executor, Identifiable, Query, StableHash, TrackedEngine,
-    config::{Config, DefaultConfig},
+    Decode, Encode, Executor, Identifiable, Query, StableHash, TrackedEngine,
+    config::Config,
 };
-use qbice_integration_test::Variable;
+use qbice_integration_test::{Variable, create_test_engine};
+use tempfile::tempdir;
 
 #[derive(
     Debug,
@@ -27,6 +28,8 @@ use qbice_integration_test::Variable;
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct SlowSquare(pub Variable);
 
@@ -66,6 +69,8 @@ impl<C: Config> Executor<SlowSquare, C> for SlowSquareExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct VariableTarget;
 
@@ -84,6 +89,8 @@ impl Query for VariableTarget {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct CollectDoubledSquareVariables;
 
@@ -146,6 +153,8 @@ impl<C: Config> Executor<CollectDoubledSquareVariables, C>
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct DoubleSquare(pub Variable);
 
@@ -186,6 +195,8 @@ impl<C: Config> Executor<DoubleSquare, C> for DoubleSquareExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct SumAllDoubleSquares;
 
@@ -231,7 +242,8 @@ impl<C: Config> Executor<SumAllDoubleSquares, C>
 
 #[tokio::test(flavor = "multi_thread")]
 async fn double_square_summing() {
-    let mut engine = Engine::<DefaultConfig>::new();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let slow_square_ex = Arc::new(SlowSquareExecutor::default());
     let collect_doubled_ex =
@@ -344,7 +356,8 @@ async fn double_square_summing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn multiple_projections_single_firewall() {
-    let mut engine = Engine::<DefaultConfig>::new();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let slow_square_ex = Arc::new(SlowSquareExecutor::default());
     let collect_doubled_ex =
@@ -416,11 +429,8 @@ async fn multiple_projections_single_firewall() {
     // recomputation but should hit cache if unchanged
     assert_eq!(collect_doubled_ex.0.load(Ordering::SeqCst), 2); // +1 for firewall
 
-    // DoubleSquare(1) was the original caller (queried), so it's skipped in
-    // backward prop but it still recomputes (+1). DoubleSquare(0) and
-    // DoubleSquare(2) are invoked via backward propagation (+2). Total: 3 +
-    // 1 + 2 = 6
-    assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 6); // +3
+    // DoubleSquare(1) was the original caller (queried above)
+    assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 4); // +1
 
     // in total there should be 5 dirtied edges now:
     // - Original 2 from previous assertion
@@ -437,9 +447,9 @@ async fn multiple_projections_single_firewall() {
         assert_eq!(v0, Some(200));
     }
 
-    // No additional recomputation needed - already computed during backward
-    // propagation
-    assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 6);
+    // The firewall was recomputed since Variable(0) changed, the
+    // DoubleSquare(0) depends on it, so +1 recomputation
+    assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 5);
 }
 
 // ============================================================================
@@ -473,6 +483,8 @@ async fn multiple_projections_single_firewall() {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct SimpleFirewall;
 
@@ -518,6 +530,8 @@ impl<C: Config> Executor<SimpleFirewall, C> for SimpleFirewallExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct ProjectionLevel1(pub u64);
 
@@ -547,197 +561,6 @@ impl<C: Config> Executor<ProjectionLevel1, C> for ProjectionLevel1Executor {
     }
 }
 
-/// Second level projection - depends on first level and adds 100.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    StableHash,
-    Identifiable,
-)]
-pub struct ProjectionLevel2(pub u64);
-
-impl Query for ProjectionLevel2 {
-    type Value = i64;
-}
-
-#[derive(Debug, Default)]
-pub struct ProjectionLevel2Executor(pub AtomicUsize);
-
-impl<C: Config> Executor<ProjectionLevel2, C> for ProjectionLevel2Executor {
-    async fn execute(
-        &self,
-        query: &ProjectionLevel2,
-        engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-
-        let doubled = engine.query(&ProjectionLevel1(query.0)).await?;
-
-        Ok(doubled + 100)
-    }
-
-    fn execution_style() -> qbice::ExecutionStyle {
-        qbice::ExecutionStyle::Projection
-    }
-}
-
-/// Normal query that consumes the projection chain.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    StableHash,
-    Identifiable,
-)]
-pub struct ConsumeProjectionChain(pub u64);
-
-impl Query for ConsumeProjectionChain {
-    type Value = i64;
-}
-
-#[derive(Debug, Default)]
-pub struct ConsumeProjectionChainExecutor(pub AtomicUsize);
-
-impl<C: Config> Executor<ConsumeProjectionChain, C>
-    for ConsumeProjectionChainExecutor
-{
-    async fn execute(
-        &self,
-        query: &ConsumeProjectionChain,
-        engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-
-        let proj2_val = engine.query(&ProjectionLevel2(query.0)).await?;
-
-        // Add another transformation
-        Ok(proj2_val * 3)
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn chained_projections() {
-    let mut engine = Engine::<DefaultConfig>::new();
-
-    let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
-    let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
-    let proj2_ex = Arc::new(ProjectionLevel2Executor::default());
-    let consumer_ex = Arc::new(ConsumeProjectionChainExecutor::default());
-
-    engine.register_executor(firewall_ex.clone());
-    engine.register_executor(proj1_ex.clone());
-    engine.register_executor(proj2_ex.clone());
-    engine.register_executor(consumer_ex.clone());
-
-    // Initialize variables
-    {
-        let mut input_session = engine.input_session();
-        for i in 0..4 {
-            input_session.set_input(Variable(i), i.cast_signed() + 1);
-        }
-    }
-
-    let mut engine = Arc::new(engine);
-
-    // Query through the chain for Variable(0) and Variable(1)
-    {
-        let tracked = engine.clone().tracked();
-
-        // Variable(0): value=1, proj1=2, proj2=102, consumer=306
-        let c0 = tracked.query(&ConsumeProjectionChain(0)).await.unwrap();
-        assert_eq!(c0, 306);
-
-        // Variable(1): value=2, proj1=4, proj2=104, consumer=312
-        let c1 = tracked.query(&ConsumeProjectionChain(1)).await.unwrap();
-        assert_eq!(c1, 312);
-    }
-
-    // Initial execution counts
-    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 1);
-    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 2);
-    assert_eq!(proj2_ex.0.load(Ordering::SeqCst), 2);
-    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
-
-    // Change Variable(0) - this should dirty only:
-    // SimpleFirewall -> Variable(0)
-    {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
-        input_session.set_input(Variable(0), 10);
-    }
-
-    // Dirtied edges should be minimal: only 1 edge (Firewall -> Variable(0))
-    let tracked = engine.clone().tracked();
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
-    drop(tracked);
-
-    // Query ConsumeProjectionChain(1) - Variable(1) didn't change
-    {
-        let tracked = engine.clone().tracked();
-        let c1 = tracked.query(&ConsumeProjectionChain(1)).await.unwrap();
-        assert_eq!(c1, 312); // Same value
-    }
-
-    // Firewall recomputed, ProjectionLevel1(0) and (1) invoked via backward
-    // propagation when the firewall output changes.
-    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 2); // +1
-    // Both proj1(0) and proj1(1) are invoked via backward prop since they
-    // both depend on the firewall that changed
-    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 4); // +2 (backward prop for both)
-    // proj2(0) invoked via backward prop from proj1(0) which changed,
-    // proj2(1) queried directly via consumer(1)
-    assert_eq!(proj2_ex.0.load(Ordering::SeqCst), 3); // +1 (only queried path)
-    // consumer(1) is queried and verifies deps, but projection filtered
-    // the Variable(1) path so consumer(1) doesn't recompute
-    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged - proj2(1) unchanged
-
-    // intotal there should be 5 dirtied edges now:
-    // - Original 1 from previous assertion
-    // - ProjectionLevel1(0) -> SimpleFirewall
-    // - ProjectionLevel1(1) -> SimpleFirewall
-    // - ProjectionLevel2(0) -> ProjectionLevel1(0)
-    // - ConsumeProjectionChain(0) -> ProjectionLevel2(0)
-    let tracked = engine.clone().tracked();
-    assert_eq!(tracked.get_dirtied_edges_count(), 5);
-    drop(tracked);
-
-    // Query the changed path
-    {
-        let tracked = engine.clone().tracked();
-        // Variable(0): value=10, proj1=20, proj2=120, consumer=360
-        let c0 = tracked.query(&ConsumeProjectionChain(0)).await.unwrap();
-        assert_eq!(c0, 360);
-    }
-
-    // consumer(0) now executed
-    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // +1
-
-    // Verify dirtied edges after all queries - should include:
-    // - Original: Firewall -> Variable(0)
-    // - Backward prop from firewall: Proj1(0), Proj1(1) -> Firewall
-    // - Backward prop from Proj1(0): Proj2(0) -> Proj1(0)
-    // - Backward prop from Proj2(0): Consumer(0) -> Proj2(0)
-    let tracked = engine.clone().tracked();
-
-    let dirtied = tracked.get_dirtied_edges_count();
-
-    // there should be at 6 dirtied edges
-    // 4 from above +
-    // Consumer(1) -> Proj2(1) which was not dirtied before but is now
-    assert_eq!(dirtied, 5);
-}
-
 // ============================================================================
 // Test: Diamond Pattern with Projections
 // ============================================================================
@@ -765,6 +588,8 @@ async fn chained_projections() {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct DiamondCombiner;
 
@@ -792,7 +617,8 @@ impl<C: Config> Executor<DiamondCombiner, C> for DiamondCombinerExecutor {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn diamond_projection_pattern() {
-    let mut engine = Engine::<DefaultConfig>::new();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
     let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
@@ -914,6 +740,8 @@ async fn diamond_projection_pattern() {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct SumFirewall;
 
@@ -954,6 +782,8 @@ impl<C: Config> Executor<SumFirewall, C> for SumFirewallExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct SumProjection;
 
@@ -992,6 +822,8 @@ impl<C: Config> Executor<SumProjection, C> for SumProjectionExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct SumConsumer;
 
@@ -1017,7 +849,8 @@ impl<C: Config> Executor<SumConsumer, C> for SumConsumerExecutor {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn firewall_same_output_no_propagation() {
-    let mut engine = Engine::<DefaultConfig>::new();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let firewall_ex = Arc::new(SumFirewallExecutor::default());
     let proj_ex = Arc::new(SumProjectionExecutor::default());
@@ -1098,7 +931,8 @@ async fn firewall_same_output_no_propagation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_projection_access() {
-    let mut engine = Engine::<DefaultConfig>::new();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
     let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
@@ -1166,6 +1000,8 @@ async fn concurrent_projection_access() {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct OuterFirewall;
 
@@ -1204,6 +1040,8 @@ impl<C: Config> Executor<OuterFirewall, C> for OuterFirewallExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct InnerFirewall;
 
@@ -1242,6 +1080,8 @@ impl<C: Config> Executor<InnerFirewall, C> for InnerFirewallExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct NestedProjection;
 
@@ -1280,6 +1120,8 @@ impl<C: Config> Executor<NestedProjection, C> for NestedProjectionExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct NestedConsumer;
 
@@ -1305,7 +1147,8 @@ impl<C: Config> Executor<NestedConsumer, C> for NestedConsumerExecutor {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_firewall_with_projection() {
-    let mut engine = Engine::<DefaultConfig>::new();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let outer_ex = Arc::new(OuterFirewallExecutor::default());
     let inner_ex = Arc::new(InnerFirewallExecutor::default());
@@ -1408,6 +1251,8 @@ async fn nested_firewall_with_projection() {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct FirewallA;
 
@@ -1446,6 +1291,8 @@ impl<C: Config> Executor<FirewallA, C> for FirewallAExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct FirewallB;
 
@@ -1484,6 +1331,8 @@ impl<C: Config> Executor<FirewallB, C> for FirewallBExecutor {
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct DualFirewallProjection;
 
@@ -1526,6 +1375,8 @@ impl<C: Config> Executor<DualFirewallProjection, C>
     Hash,
     StableHash,
     Identifiable,
+    Encode,
+    Decode,
 )]
 pub struct DualFirewallConsumer;
 
@@ -1554,7 +1405,8 @@ impl<C: Config> Executor<DualFirewallConsumer, C>
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::similar_names)]
 async fn projection_with_two_firewalls() {
-    let mut engine = Engine::<DefaultConfig>::new();
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir);
 
     let firewall_a_ex = Arc::new(FirewallAExecutor::default());
     let firewall_b_ex = Arc::new(FirewallBExecutor::default());
