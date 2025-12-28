@@ -28,9 +28,6 @@ use crate::{plugin::Plugin, session::Session};
 /// # Example
 ///
 /// ```ignore
-/// use qbice_serialize::encode::Encoder;
-/// use std::io::{self, Write};
-///
 /// struct VecEncoder {
 ///     buffer: Vec<u8>,
 /// }
@@ -166,18 +163,6 @@ pub trait Encoder {
     /// # Returns
     ///
     /// `Ok(())` on success, or an I/O error if encoding fails.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_serialize::{encode::Encoder, plugin::Plugin};
-    ///
-    /// fn encode_point<E: Encoder>(encoder: &mut E, plugin: &Plugin, x: i32, y: i32) -> std::io::Result<()> {
-    ///     encoder.encode(&x, plugin)?;
-    ///     encoder.encode(&y, plugin)?;
-    ///     Ok(())
-    /// }
-    /// ```
     fn encode<E: Encode>(
         &mut self,
         value: &E,
@@ -194,30 +179,6 @@ pub trait Encoder {
 /// Types implementing [`Encode`] can serialize themselves using an [`Encoder`].
 /// The [`Plugin`] parameter allows passing additional context for custom
 /// serialization strategies.
-///
-/// # Example
-///
-/// ```ignore
-/// use qbice_serialize::{encode::{Encode, Encoder}, plugin::Plugin};
-/// use std::io;
-///
-/// struct Point {
-///     x: i32,
-///     y: i32,
-/// }
-///
-/// impl Encode for Point {
-///     fn encode<E: Encoder + ?Sized>(
-///         &self,
-///         encoder: &mut E,
-///         plugin: &Plugin,
-///     ) -> io::Result<()> {
-///         self.x.encode(encoder, plugin)?;
-///         self.y.encode(encoder, plugin)?;
-///         Ok(())
-///     }
-/// }
-/// ```
 pub trait Encode {
     /// Encodes this value using the provided encoder.
     ///
@@ -225,6 +186,7 @@ pub trait Encode {
     ///
     /// * `encoder` - The encoder to write to
     /// * `plugin` - Plugin context for custom serialization strategies
+    /// * `session` - Session state for managing serialization context
     ///
     /// # Errors
     ///

@@ -23,8 +23,6 @@
 //! `Encode` and `Decode`:
 //!
 //! ```ignore
-//! use qbice_serialize::{Encode, Decode};
-//!
 //! #[derive(Encode, Decode)]
 //! struct Point { x: i32, y: i32 }
 //!
@@ -48,8 +46,6 @@
 //! must implement `Default` for deserialization:
 //!
 //! ```ignore
-//! use qbice_serialize::{Encode, Decode};
-//!
 //! #[derive(Encode, Decode)]
 //! struct Config {
 //!     name: String,
@@ -61,8 +57,6 @@
 //! # Example
 //!
 //! ```ignore
-//! use qbice_serialize::{Encode, Decode, Encoder, Decoder, Plugin};
-//!
 //! // Implement Encode/Decode for custom types
 //! struct Point { x: i32, y: i32 }
 //!

@@ -8,8 +8,6 @@
 //! # Example
 //!
 //! ```ignore
-//! use qbice_serialize::plugin::Plugin;
-//!
 //! struct MyContext {
 //!     compression_level: u32,
 //! }
@@ -44,14 +42,6 @@ pub struct Plugin {
 
 impl Plugin {
     /// Creates a new empty plugin container.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_serialize::plugin::Plugin;
-    ///
-    /// let plugin = Plugin::new();
-    /// ```
     #[must_use]
     pub fn new() -> Self { Self { plugins: HashMap::new() } }
 
@@ -67,18 +57,6 @@ impl Plugin {
     /// # Returns
     ///
     /// The previous value if one existed, or `None` otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_serialize::plugin::Plugin;
-    ///
-    /// struct Config { level: u32 }
-    ///
-    /// let mut plugin = Plugin::new();
-    /// assert!(plugin.insert(Config { level: 5 }).is_none());
-    /// assert!(plugin.insert(Config { level: 10 }).is_some());
-    /// ```
     pub fn insert<T: Any + Send + Sync>(&mut self, value: T) -> Option<T> {
         self.plugins
             .insert(TypeId::of::<T>(), Box::new(value))
@@ -94,19 +72,6 @@ impl Plugin {
     /// # Returns
     ///
     /// A reference to the plugin value if it exists, or `None` otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_serialize::plugin::Plugin;
-    ///
-    /// struct Config { level: u32 }
-    ///
-    /// let mut plugin = Plugin::new();
-    /// plugin.insert(Config { level: 5 });
-    ///
-    /// assert_eq!(plugin.get::<Config>().map(|c| c.level), Some(5));
-    /// ```
     #[must_use]
     pub fn get<T: Any + Send + Sync>(&self) -> Option<&T> {
         self.plugins
@@ -124,21 +89,6 @@ impl Plugin {
     ///
     /// A mutable reference to the plugin value if it exists, or `None`
     /// otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_serialize::plugin::Plugin;
-    ///
-    /// struct Config { level: u32 }
-    ///
-    /// let mut plugin = Plugin::new();
-    /// plugin.insert(Config { level: 5 });
-    ///
-    /// if let Some(config) = plugin.get_mut::<Config>() {
-    ///     config.level = 10;
-    /// }
-    /// ```
     pub fn get_mut<T: Any + Send + Sync>(&mut self) -> Option<&mut T> {
         self.plugins
             .get_mut(&TypeId::of::<T>())
@@ -154,21 +104,6 @@ impl Plugin {
     /// # Returns
     ///
     /// The removed plugin value if it existed, or `None` otherwise.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_serialize::plugin::Plugin;
-    ///
-    /// struct Config { level: u32 }
-    ///
-    /// let mut plugin = Plugin::new();
-    /// plugin.insert(Config { level: 5 });
-    ///
-    /// let config = plugin.remove::<Config>();
-    /// assert!(config.is_some());
-    /// assert!(plugin.get::<Config>().is_none());
-    /// ```
     pub fn remove<T: Any + Send + Sync>(&mut self) -> Option<T> {
         self.plugins
             .remove(&TypeId::of::<T>())
@@ -180,19 +115,6 @@ impl Plugin {
     /// # Type Parameters
     ///
     /// * `T` - The type of plugin to check for
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_serialize::plugin::Plugin;
-    ///
-    /// struct Config { level: u32 }
-    ///
-    /// let mut plugin = Plugin::new();
-    /// assert!(!plugin.contains::<Config>());
-    /// plugin.insert(Config { level: 5 });
-    /// assert!(plugin.contains::<Config>());
-    /// ```
     #[must_use]
     pub fn contains<T: Any + Send + Sync>(&self) -> bool {
         self.plugins.contains_key(&TypeId::of::<T>())

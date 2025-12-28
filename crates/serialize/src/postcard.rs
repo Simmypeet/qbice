@@ -21,9 +21,6 @@
 //! # Example
 //!
 //! ```ignore
-//! use qbice_serialize::{Encode, Decode, Plugin};
-//! use qbice_serialize::postcard::{PostcardEncoder, PostcardDecoder};
-//!
 //! let plugin = Plugin::new();
 //!
 //! // Encoding to a Vec<u8>
@@ -196,9 +193,6 @@ const fn zigzag_decode_i128(value: u128) -> i128 {
 /// # Example
 ///
 /// ```ignore
-/// use qbice_serialize::postcard::PostcardEncoder;
-/// use std::io::Cursor;
-///
 /// // Write to a Vec<u8>
 /// let encoder = PostcardEncoder::new(Vec::new());
 ///
@@ -330,9 +324,6 @@ impl<W: Write> Encoder for PostcardEncoder<W> {
 /// # Example
 ///
 /// ```ignore
-/// use qbice_serialize::postcard::PostcardDecoder;
-/// use std::io::Cursor;
-///
 /// // Read from a slice
 /// let data = [42u8];
 /// let decoder = PostcardDecoder::new(&data[..]);
@@ -573,9 +564,6 @@ impl<R: Read> Decoder for PostcardDecoder<R> {
 /// # Example
 ///
 /// ```ignore
-/// use qbice_serialize::{Encode, Plugin};
-/// use qbice_serialize::postcard::encode;
-///
 /// let plugin = Plugin::new();
 /// let bytes = encode(&42u32, &plugin).unwrap();
 /// ```
@@ -596,9 +584,6 @@ pub fn encode<T: crate::Encode>(
 /// # Example
 ///
 /// ```ignore
-/// use qbice_serialize::{Decode, Plugin};
-/// use qbice_serialize::postcard::decode;
-///
 /// let plugin = Plugin::new();
 /// let bytes = [42]; // varint-encoded 42
 /// let value: u32 = decode(&bytes, &plugin).unwrap();

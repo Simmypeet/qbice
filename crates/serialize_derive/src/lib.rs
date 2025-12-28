@@ -1,7 +1,7 @@
 //! Derive macros for the `Encode` and `Decode` traits.
 //!
 //! This crate provides derive macros for automatically implementing the
-//! [`Encode`] and [`Decode`] traits from the `qbice_serialize` crate.
+//! [`Encode`] and [`Decode`] traits.
 //!
 //! # Supported Types
 //!
@@ -16,8 +16,6 @@
 //! ## Struct with Named Fields
 //!
 //! ```ignore
-//! use qbice_serialize_derive::{Encode, Decode};
-//!
 //! #[derive(Encode, Decode)]
 //! struct Point {
 //!     x: i32,
@@ -28,8 +26,6 @@
 //! ## Tuple Struct
 //!
 //! ```ignore
-//! use qbice_serialize_derive::{Encode, Decode};
-//!
 //! #[derive(Encode, Decode)]
 //! struct Id(u64);
 //! ```
@@ -37,8 +33,6 @@
 //! ## Unit Struct
 //!
 //! ```ignore
-//! use qbice_serialize_derive::{Encode, Decode};
-//!
 //! #[derive(Encode, Decode)]
 //! struct Marker;
 //! ```
@@ -46,8 +40,6 @@
 //! ## Enum
 //!
 //! ```ignore
-//! use qbice_serialize_derive::{Encode, Decode};
-//!
 //! #[derive(Encode, Decode)]
 //! enum Message {
 //!     Quit,
@@ -64,8 +56,6 @@
 //! deserialization.
 //!
 //! ```ignore
-//! use qbice_serialize_derive::{Encode, Decode};
-//!
 //! #[derive(Encode, Decode)]
 //! struct Config {
 //!     name: String,
@@ -110,8 +100,6 @@ fn should_skip(field: &Field) -> bool {
 /// # Struct Example
 ///
 /// ```ignore
-/// use qbice_serialize_derive::Encode;
-///
 /// #[derive(Encode)]
 /// struct Person {
 ///     name: String,
@@ -122,8 +110,6 @@ fn should_skip(field: &Field) -> bool {
 /// # Enum Example
 ///
 /// ```ignore
-/// use qbice_serialize_derive::Encode;
-///
 /// #[derive(Encode)]
 /// enum Color {
 ///     Red,
@@ -364,8 +350,6 @@ fn impl_encode_enum(
 /// # Struct Example
 ///
 /// ```ignore
-/// use qbice_serialize_derive::Decode;
-///
 /// #[derive(Decode)]
 /// struct Person {
 ///     name: String,
@@ -376,8 +360,6 @@ fn impl_encode_enum(
 /// # Enum Example
 ///
 /// ```ignore
-/// use qbice_serialize_derive::Decode;
-///
 /// #[derive(Decode)]
 /// enum Color {
 ///     Red,

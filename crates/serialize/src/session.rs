@@ -18,8 +18,6 @@
 //! # Example
 //!
 //! ```ignore
-//! use qbice_serialize::session::{Session, SessionKey};
-//!
 //! // Define a session key for tracking serialization depth
 //! struct DepthKey;
 //!
@@ -51,8 +49,6 @@ use std::{any::TypeId, collections::HashMap};
 /// # Example
 ///
 /// ```ignore
-/// use qbice_serialize::session::SessionKey;
-///
 /// /// Key for storing visited object IDs during serialization.
 /// struct VisitedObjectsKey;
 ///
@@ -84,10 +80,6 @@ pub struct Session {
 
 impl Session {
     /// Creates a new, empty session.
-    ///
-    /// The session starts with no stored state. Values will be created
-    /// on-demand when accessed via
-    /// [`get_mut_or_default`](Self::get_mut_or_default).
     pub(crate) fn new() -> Self { Self { states: HashMap::new() } }
 
     /// Returns a mutable reference to the value associated with the given key,
@@ -109,8 +101,6 @@ impl Session {
     /// # Example
     ///
     /// ```ignore
-    /// use qbice_serialize::session::{Session, SessionKey};
-    ///
     /// struct CounterKey;
     /// impl SessionKey for CounterKey {
     ///     type Value = u32;

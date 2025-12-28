@@ -29,9 +29,6 @@ use crate::{plugin::Plugin, session::Session};
 /// # Example
 ///
 /// ```ignore
-/// use qbice_serialize::decode::Decoder;
-/// use std::io;
-///
 /// struct SliceDecoder<'a> {
 ///     data: &'a [u8],
 ///     position: usize,
@@ -201,18 +198,6 @@ pub trait Decoder {
     /// # Returns
     ///
     /// The decoded value of type `D`, or an I/O error if decoding fails.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_serialize::{decode::Decoder, plugin::Plugin};
-    ///
-    /// fn decode_point<D: Decoder>(decoder: &mut D, plugin: &Plugin) -> std::io::Result<(i32, i32)> {
-    ///     let x: i32 = decoder.decode(plugin)?;
-    ///     let y: i32 = decoder.decode(plugin)?;
-    ///     Ok((x, y))
-    /// }
-    /// ```
     fn decode<D: Decode>(&mut self, plugin: &Plugin) -> io::Result<D> {
         let mut session = Session::new();
 
@@ -229,9 +214,6 @@ pub trait Decoder {
 /// # Example
 ///
 /// ```ignore
-/// use qbice_serialize::{decode::{Decode, Decoder}, plugin::Plugin};
-/// use std::io;
-///
 /// struct Point {
 ///     x: i32,
 ///     y: i32,
@@ -255,6 +237,7 @@ pub trait Decode: Sized {
     ///
     /// * `decoder` - The decoder to read from
     /// * `plugin` - Plugin context for custom deserialization strategies
+    /// * `session` - Session state for managing deserialization context
     ///
     /// # Errors
     ///
