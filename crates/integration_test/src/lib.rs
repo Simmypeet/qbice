@@ -7,10 +7,7 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::missing_const_for_fn)]
 
-use std::{
-    hash::BuildHasherDefault,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use qbice::{
     Decode, Encode, Engine, TrackedEngine,
@@ -310,7 +307,6 @@ pub fn create_test_engine(tempdir: &TempDir) -> Engine<DefaultConfig> {
         Plugin::default(),
         RocksDB::factory(tempdir.path()),
         SeededStableHasherBuilder::<Sip128Hasher>::new(0),
-        BuildHasherDefault::default(),
     )
     .unwrap()
 }

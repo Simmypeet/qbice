@@ -240,53 +240,49 @@ pub struct Persist<C: Config> {
 }
 
 impl<C: Config> Persist<C> {
-    pub fn new(
-        db: Arc<C::Database>,
-        shard_amount: usize,
-        build_hasher: C::BuildHasher,
-    ) -> Self {
+    pub fn new(db: Arc<C::Database>, shard_amount: usize) -> Self {
         Self {
             last_verifieds: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
-                build_hasher.clone(),
+                C::BuildHasher::default(),
             ),
             forward_edges: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
-                build_hasher.clone(),
+                C::BuildHasher::default(),
             ),
             node_info: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
-                build_hasher.clone(),
+                C::BuildHasher::default(),
             ),
             dirty_edge_set: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
-                build_hasher.clone(),
+                C::BuildHasher::default(),
             ),
             backward_edges: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
-                build_hasher.clone(),
+                C::BuildHasher::default(),
             ),
             pending_backward_projections: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
-                build_hasher.clone(),
+                C::BuildHasher::default(),
             ),
             query_store: QueryStore::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db,
-                build_hasher,
+                C::BuildHasher::default(),
             ),
         }
     }

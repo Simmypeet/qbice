@@ -291,7 +291,6 @@ impl<C: Config> Engine<C> {
         mut serialization_plugin: Plugin,
         database_factory: F,
         stable_hasher: C::BuildStableHasher,
-        hasher: C::BuildHasher,
     ) -> Result<Self, F::Error> {
         let shared_interner =
             SharedInterner::new(default_shard_amount(), stable_hasher.clone());
@@ -307,7 +306,6 @@ impl<C: Config> Engine<C> {
             computation_graph: ComputationGraph::new(
                 database.clone(),
                 default_shard_amount(),
-                hasher,
             ),
             database,
             interner: shared_interner,

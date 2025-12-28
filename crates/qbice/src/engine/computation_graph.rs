@@ -75,15 +75,11 @@ pub struct ComputationGraph<C: Config> {
 }
 
 impl<C: Config> ComputationGraph<C> {
-    pub fn new(
-        db: Arc<<C as Config>::Database>,
-        shard_amount: usize,
-        build_hasher: C::BuildHasher,
-    ) -> Self {
+    pub fn new(db: Arc<<C as Config>::Database>, shard_amount: usize) -> Self {
         Self {
             timestamp_manager: TimestampManager::new(&*db),
-            persist: Persist::new(db, shard_amount, build_hasher.clone()),
-            dirtied_queries: DashSet::with_hasher(build_hasher),
+            persist: Persist::new(db, shard_amount),
+            dirtied_queries: DashSet::default(),
             statistic: Statistic::default(),
             lock: Lock::new(),
         }
