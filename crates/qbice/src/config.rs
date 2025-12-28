@@ -85,6 +85,11 @@ pub trait Config:
     /// The standard hasher builder used by the engine.
     type BuildHasher: BuildHasher + Default + Clone + Send + Sync + 'static;
 
+    /// The number of query entries the engine's cache can hold before dropping
+    /// them for memory cache.
+    #[must_use]
+    fn cache_entry_capacity() -> usize { 2usize.pow(16) }
+
     /// Creates a Rayon thread pool builder for parallel query execution.
     #[must_use]
     fn rayon_thread_pool_builder() -> rayon::ThreadPoolBuilder {

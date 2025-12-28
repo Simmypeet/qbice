@@ -245,47 +245,45 @@ impl<C: Config> Persist<C> {
         shard_amount: usize,
         build_hasher: C::BuildHasher,
     ) -> Self {
-        const CAPACITY: usize = 10_000;
-
         Self {
             last_verifieds: Sieve::<_, C>::new(
-                CAPACITY,
+                C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 build_hasher.clone(),
             ),
             forward_edges: Sieve::<_, C>::new(
-                CAPACITY,
+                C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 build_hasher.clone(),
             ),
             node_info: Sieve::<_, C>::new(
-                CAPACITY,
+                C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 build_hasher.clone(),
             ),
             dirty_edge_set: Sieve::<_, C>::new(
-                CAPACITY,
+                C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 build_hasher.clone(),
             ),
             backward_edges: Sieve::<_, C>::new(
-                CAPACITY,
+                C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 build_hasher.clone(),
             ),
             pending_backward_projections: Sieve::<_, C>::new(
-                CAPACITY,
+                C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 build_hasher.clone(),
             ),
             query_store: QueryStore::new(
-                CAPACITY,
+                C::cache_entry_capacity(),
                 shard_amount,
                 db,
                 build_hasher,
