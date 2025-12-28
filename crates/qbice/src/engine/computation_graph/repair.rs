@@ -201,7 +201,12 @@ impl<C: Config> Engine<C> {
         // repair transitive firewall callees first before deciding whether to
         // recompute, since the transitive firewall callees might affect the
         // decision by propagating dirtiness.
-        self.repair_transitive_firewall_callees(query).await;
+        if matches!(
+            caller_information,
+            CallerInformation::User | CallerInformation::RepairFirewall { .. }
+        ) {
+            self.repair_transitive_firewall_callees(query).await;
+        }
 
         let recompute =
             self.recompute_decision_based_on_forward_edges(query).await;
