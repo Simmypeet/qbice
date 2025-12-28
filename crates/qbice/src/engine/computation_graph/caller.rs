@@ -37,13 +37,15 @@ pub enum CallerInformation {
     /// ```
     BackwardProjectionPropagation,
 
-    RepairFirewall,
+    RepairFirewall {
+        invoke_backward_projection: bool,
+    },
 }
 
 impl CallerInformation {
     pub const fn get_caller(&self) -> Option<&QueryID> {
         match self {
-            Self::RepairFirewall
+            Self::RepairFirewall { .. }
             | Self::BackwardProjectionPropagation
             | Self::User => None,
 
@@ -53,7 +55,8 @@ impl CallerInformation {
 
     pub const fn require_value(&self) -> bool {
         match self {
-            Self::RepairFirewall | Self::BackwardProjectionPropagation => false,
+            Self::RepairFirewall { .. }
+            | Self::BackwardProjectionPropagation => false,
 
             Self::User => true,
             Self::Query(q) => matches!(q.reason, CallerReason::RequireValue),
@@ -63,7 +66,7 @@ impl CallerInformation {
     pub fn has_a_caller_requiring_value(&self) -> Option<&QueryID> {
         match self {
             // it does require value, but the caller is not another query
-            Self::RepairFirewall
+            Self::RepairFirewall { .. }
             | Self::User
             | Self::BackwardProjectionPropagation => None,
 

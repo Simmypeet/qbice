@@ -131,7 +131,9 @@ impl<C: Config> Engine<C> {
 
             // check if the query was called with repairing firewall and
             // has pending backward projection to do
-            if caller == &CallerInformation::RepairFirewall {
+            if matches!(caller, CallerInformation::RepairFirewall {
+                invoke_backward_projection: true
+            }) {
                 if let Some(pending_lock) = self
                     .computation_graph
                     .lock

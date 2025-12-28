@@ -51,6 +51,7 @@ impl<C: Config> Engine<C> {
                             &query_id.stable_type_id(),
                         );
 
+
                     let _ = entry
                         .repair_query_from_query_id(
                             &engine,

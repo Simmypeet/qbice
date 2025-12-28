@@ -72,11 +72,8 @@ impl<C: Config> Engine<C> {
             std::any::type_name::<Q>()
         );
 
-        let is_in_scc = self
-            .computation_graph
-            .lock
-            .get_lock(&query.id)
-            .is_in_scc();
+        let is_in_scc =
+            self.computation_graph.lock.get_lock(&query.id).is_in_scc();
 
         // if `is_in_scc` is `true`, it means that the query is part of
         // a strongly connected component (SCC) and the
@@ -140,8 +137,9 @@ impl<C: Config> Engine<C> {
 
         // if the firewall is being repaired, and it has pending backward
         // projections, we need to do backward projections now.
-        if *caller_information == CallerInformation::RepairFirewall
-            && need_backward_projection_propagation
+        if matches!(caller_information, CallerInformation::RepairFirewall {
+            invoke_backward_projection: true
+        }) && need_backward_projection_propagation
         {
             self.try_do_backward_projections(&query.id).await;
         }

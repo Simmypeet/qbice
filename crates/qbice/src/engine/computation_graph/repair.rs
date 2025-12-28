@@ -121,6 +121,13 @@ impl<C: Config> Engine<C> {
         let node_info =
             self.computation_graph.get_node_info(&query.id).unwrap();
 
+        let is_current_query_projection = self
+            .computation_graph
+            .get_node_info(&query.id)
+            .unwrap()
+            .query_kind()
+            .is_projection();
+
         let tfcs = node_info.transitive_firewall_callees();
 
         let tfcs = tfcs
@@ -153,7 +160,15 @@ impl<C: Config> Engine<C> {
                         .repair_query_from_query_id(
                             &engine,
                             tfc.compact_hash_128(),
-                            CallerInformation::RepairFirewall,
+                            CallerInformation::RepairFirewall {
+                                // if current query is projection, then
+                                // repairing the firewalls should not invoke
+                                // backward projection, since it will
+                                // immediately request this query again, causing
+                                // deadlock.
+                                invoke_backward_projection:
+                                    !is_current_query_projection,
+                            },
                         )
                         .await;
                 }
