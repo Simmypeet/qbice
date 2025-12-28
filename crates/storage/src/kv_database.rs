@@ -121,8 +121,6 @@ impl<
 /// Write transactions provide atomicity: either all operations succeed, or none
 /// are applied.
 ///
-/// - No "read your own writes" guarantee: reads in the same transaction may not
-///   see uncommitted writes.
 /// - Changes are only visible after `commit` is called.
 /// - If dropped without `commit`, all changes must be rolled back.
 pub trait WriteTransaction {
@@ -184,8 +182,6 @@ pub trait KvDatabaseFactory {
 /// This trait abstracts over different key-value storage implementations,
 /// allowing the system to work with various backends (e.g., `RocksDB`, `LMDB`,
 /// in-memory, etc.).
-///
-/// All operations are async to support non-blocking I/O.
 pub trait KvDatabase: 'static + Send + Sync {
     /// The type of write transaction provided by this database implementation.
     type WriteTransaction<'a>: WriteTransaction + Send + Sync
@@ -204,7 +200,7 @@ pub trait KvDatabase: 'static + Send + Sync {
     /// Scans all members of the set associated with the given key in the
     /// specified column.
     ///
-    /// Returns a stream of values in the set.
+    /// Returns an iterator over all values in the set.
     fn scan_members<'s, C: Column>(
         &'s self,
         key: &'s C::Key,

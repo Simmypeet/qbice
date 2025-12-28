@@ -15,20 +15,6 @@
 //! - [`Interned<T>`]: A reference-counted handle to an interned value.
 //! - [`Interner<S>`]: The main interner that manages interned values using
 //!   sharding for concurrent access.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use qbice_storage::intern::Interner;
-//!
-//! let interner = Interner::new(16, SipHasher128Builder::default());
-//!
-//! let a = interner.intern("hello".to_string());
-//! let b = interner.intern("hello".to_string());
-//!
-//! // Both `a` and `b` point to the same allocation
-//! assert!(Arc::ptr_eq(&a.0, &b.0));
-//! ```
 
 use std::{
     any::Any,
@@ -293,12 +279,6 @@ impl SharedInterner {
     ///
     /// - `shard_amount`: The number of shards to use for concurrent access.
     /// - `hasher_builder`: The hasher builder used to create stable hashers.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let interner = SharedInterner::new(16, SipHasher128Builder::default());
-    /// ```
     pub fn new<S: BuildStableHasher<Hash = u128> + Send + Sync + 'static>(
         shard_amount: usize,
         hasher_builder: S,
@@ -341,12 +321,6 @@ impl Interner {
     ///   32.
     /// - `hasher_builder`: The hasher builder used to create stable hashers for
     ///   computing value hashes.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let interner = Interner::new(16, SipHasher128Builder::default());
-    /// ```
     pub fn new<S: BuildStableHasher + Send + Sync + 'static>(
         shard_amount: usize,
         hasher_builder: S,
@@ -370,10 +344,6 @@ impl Interner {
     /// # Parameters
     ///
     /// - `value`: A reference to the value to hash.
-    ///
-    /// # Returns
-    ///
-    /// A [`Compact128`] representing the 128-bit hash of the value.
     pub fn hash_128<T: StableHash>(&self, value: &T) -> Compact128 {
         let hash_u128 =
             (self.stable_hash_fn)(&*self.hasher_builder_erased, value);
@@ -426,18 +396,6 @@ impl Interner {
     /// threads. If two threads attempt to intern the same value simultaneously,
     /// only one allocation will be created and both threads will receive
     /// handles to it.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let interner = Interner::new(16, hasher_builder);
-    ///
-    /// let a = interner.intern("hello".to_string());
-    /// let b = interner.intern("hello".to_string());
-    ///
-    /// // Both handles point to the same allocation
-    /// assert!(std::ptr::eq(&*a, &*b));
-    /// ```
     pub fn intern<T: StableHash + Identifiable + Send + Sync + 'static>(
         &self,
         value: T,
