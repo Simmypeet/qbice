@@ -1,4 +1,28 @@
-//! A sharded cache implementation using the SIEVE eviction algorithm.
+//! A sharded, concurrent cache implementation using the SIEVE eviction
+//! algorithm.
+//!
+//! This module provides [`Sieve`], a high-performance cache that integrates
+//! with key-value databases to provide transparent caching with lazy loading.
+//!
+//! # SIEVE Algorithm
+//!
+//! SIEVE (Simple and Efficient Cache) is a modern eviction algorithm that
+//! provides excellent hit rates comparable to LRU (Least Recently Used) with
+//! significantly lower overhead. Unlike LRU, SIEVE uses a single "visited" bit
+//! per entry and a hand pointer that sweeps through entries, giving unvisited
+//! entries a "second chance" before eviction.
+//!
+//! Key benefits of SIEVE:
+//! - Lower overhead than LRU (no list reordering on access)
+//! - Better hit rates than simple FIFO
+//! - Scan-resistant (one-time accesses don't pollute the cache)
+//!
+//! # Sharding
+//!
+//! The cache is divided into multiple shards to reduce lock contention during
+//! concurrent access. Each shard maintains its own SIEVE state and capacity,
+//! allowing parallel operations on different keys to proceed without blocking
+//! each other.
 
 use core::fmt;
 use std::{
@@ -21,8 +45,22 @@ use crate::{
 };
 
 /// A marker trait representing the storage mode of a column.
+///
+/// This trait connects a column's storage mode ([`Normal`] or [`KeyOfSet`]) to
+/// the type of value stored in the cache backing storage. Different storage
+/// modes may wrap values differently for caching purposes.
+///
+/// # Implementations
+///
+/// - For [`Normal`] mode: Values are wrapped in `Option<V>` to distinguish
+///   between "not in cache" and "known to not exist in database".
+/// - For [`KeyOfSet<T>`] mode: Values are stored directly as the collection
+///   type (e.g., `HashSet<T>`) since sets always have a valid empty state.
 pub trait BackingStorage<V> {
     /// The type of value stored in the backing storage for this mode.
+    ///
+    /// This may differ from the column's value type to accommodate caching
+    /// semantics (e.g., wrapping in `Option`).
     type Value;
 }
 
@@ -36,12 +74,24 @@ impl<ColumnValue, V> BackingStorage<ColumnValue> for KeyOfSet<V> {
 
 /// A trait for removing an element from a set-like collection.
 ///
-/// This trait is used by sieve cache to remove elements from set values.
+/// This trait provides a uniform interface for removing elements from various
+/// set implementations (e.g., `HashSet`, `DashSet`) used in the SIEVE cache.
+/// It enables the cache to work with different set types while providing
+/// consistent element removal semantics.
+///
+/// # Type Parameters
+///
+/// - `Element`: The type of elements stored in the set.
 pub trait RemoveElementFromSet {
     /// The type of elements stored in the set.
     type Element;
 
     /// Removes an element from the set.
+    ///
+    /// # Returns
+    ///
+    /// - `true` if the element was present and removed
+    /// - `false` if the element was not found in the set
     fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
     where
         Self::Element: Borrow<Q>;
@@ -249,17 +299,17 @@ where
     ///
     /// # Cancellation Safety
     ///
-    /// The function is designed to be cancellation-safe. When the database
-    /// fetch is in progress, if cancellation occurs, the internal state remains
-    /// consistent. However, other possible other callers waiting for the same
-    /// key may be woken up and will retry fetching the value.
+    /// This function is designed to be cancellation-safe. If the function is
+    /// dropped while a database fetch is in progress, the internal state
+    /// remains consistent. However, other threads waiting for the same key
+    /// may be woken up and will retry fetching the value.
     ///
     /// # Deadlocks
     ///
-    /// This function **can deadlock** if held another [`ReadGuard`] while
-    /// calling this function. Even though, the function returns read lock,
-    /// however, its internal state mutates the cache by inserting new
-    /// values on cache misses.
+    /// This function **can deadlock** if you hold another read guard from this
+    /// cache while calling this function. Even though this function returns a
+    /// read lock, its internal implementation may acquire write locks to insert
+    /// new values on cache misses.
     #[allow(clippy::cast_possible_truncation)] // from u64 to usize
     pub fn get_normal(
         &self,
@@ -305,12 +355,6 @@ where
     /// database using [`KvDatabase::collect_key_of_set`], inserts the
     /// result into the cache, and returns the collection.
     ///
-    /// # Type Parameters
-    ///
-    /// * `V` - The element type stored in the set. Must implement [`Encode`],
-    ///   [`Decode`], [`Clone`], [`Send`], [`Sync`], and have a `'static`
-    ///   lifetime.
-    ///
     /// # Arguments
     ///
     /// * `key` - The key to look up in the cache.
@@ -330,17 +374,17 @@ where
     ///
     /// # Cancellation Safety
     ///
-    /// The function is designed to be cancellation-safe. When the database
-    /// fetch is in progress, if cancellation occurs, the internal state remains
-    /// consistent. However, other possible callers waiting for the same
-    /// key may be woken up and will retry fetching the value.
+    /// This function is designed to be cancellation-safe. If the function is
+    /// dropped while a database fetch is in progress, the internal state
+    /// remains consistent. However, other threads waiting for the same key
+    /// may be woken up and will retry fetching the value.
     ///
     /// # Deadlocks
     ///
-    /// This function **can deadlock** if held another [`ReadGuard`] while
-    /// calling this function. Even though the function returns a read lock,
-    /// its internal state mutates the cache by inserting new values on cache
-    /// misses.
+    /// This function **can deadlock** if you hold another read guard from this
+    /// cache while calling this function. Even though this function returns a
+    /// read lock, its internal implementation may acquire write locks to insert
+    /// new values on cache misses.
     pub fn get_set(&self, key: &C::Key) -> MappedRwLockReadGuard<'_, C::Value>
     where
         C: Column,
@@ -388,8 +432,14 @@ where
     /// # Concurrency
     ///
     /// If another thread is currently fetching the value for the same key, this
-    /// method will take over the fetch lock and notify all waiters after
-    /// the insertion. Otherwise, it performs the insertion directly.
+    /// method will take over the fetch operation, perform the insertion, and
+    /// notify all waiting threads. Otherwise, it performs the insertion
+    /// directly.
+    ///
+    /// # Eviction
+    ///
+    /// If the cache shard is at capacity, this insertion may trigger eviction
+    /// of another entry according to the SIEVE algorithm.
     pub fn put(&self, key: C::Key, value: Option<C::Value>)
     where
         C: Column<Mode = Normal>,
@@ -420,46 +470,50 @@ where
         }
     }
 
-    /// Inserts an element into a set stored in the cache for the given key.
+    /// Inserts elements into a set stored in the cache for the given key.
     ///
-    /// This method is specifically designed for columns using the `KeyOfSet`
-    /// storage mode. It retrieves the set associated with the key (loading it
-    /// from the backing database if necessary) and adds a single element to it.
+    /// This method is designed for columns using the [`KeyOfSet`] storage mode.
+    /// It retrieves the set associated with the key (loading it from the
+    /// backing database if necessary) and adds the provided elements to it.
     ///
-    /// # Type Parameters
+    /// # Type Requirements
     ///
     /// This method requires that:
-    /// * `C` implements `Column` with a `KeyOfSetMode` storage mode
-    /// * `C::Value` implements `Extend` to allow adding elements to the set
-    /// * `C::Value` implements `Default` for creating empty sets on cache
-    ///   misses
+    /// - `C` implements [`Column`] with a [`KeyOfSetMode`] storage mode
+    /// - `C::Value` implements `Extend` to allow adding elements to the set
+    /// - `C::Value` implements `FromIterator` for loading from the database
     ///
     /// # Arguments
     ///
-    /// * `key` - A reference to the key identifying the set in the cache
-    /// * `element` - The element to insert into the set
+    /// - `key` - A reference to the key identifying the set in the cache
+    /// - `element` - An iterable of elements to insert into the set
     ///
     /// # Behavior
     ///
-    /// 1. If the key is already cached, the element is added to the existing
+    /// 1. If the key is already cached, the elements are added to the existing
     ///    set
     /// 2. If the key is not cached, the set is loaded from the backing database
-    ///    using `collect_key_of_set`, and then the element is added
+    ///    using [`KvDatabase::collect_key_of_set`], then the elements are added
     /// 3. The operation holds a write lock on the shard during insertion to
-    ///    ensure thread-safety
+    ///    ensure thread safety
+    ///
+    /// # Durability
+    ///
+    /// This method only updates the in-memory cache. The caller is responsible
+    /// for persisting changes to the backing database if needed.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// // Insert a value into a set associated with a key
-    /// cache.insert_set(&my_key, new_element).await;
+    /// // Insert values into a set associated with a key
+    /// cache.insert_set_element(&my_key, vec![elem1, elem2]);
     /// ```
     ///
     /// # Concurrency
     ///
-    /// This method uses `get_loop` internally to handle concurrent access,
-    /// ensuring that only one task fetches the data from the backing database
-    /// if multiple tasks attempt to access the same key simultaneously.
+    /// This method coordinates with other cache operations to ensure only one
+    /// thread fetches data from the backing database if multiple threads access
+    /// the same key simultaneously.
     pub fn insert_set_element(
         &self,
         key: &C::Key,
@@ -490,10 +544,44 @@ where
 
     /// Removes an element from a set stored in the cache for the given key.
     ///
-    /// This method is specifically designed for columns using the `KeyOfSet`
-    /// storage mode. It retrieves the set associated with the key (loading it
-    /// from the backing database if necessary) and removes a single element
+    /// This method is designed for columns using the [`KeyOfSet`] storage mode.
+    /// It retrieves the set associated with the key (loading it from the
+    /// backing database if necessary) and removes the specified element
     /// from it.
+    ///
+    /// # Type Requirements
+    ///
+    /// This method requires that:
+    /// - `C` implements [`Column`] with a [`KeyOfSetMode`] storage mode
+    /// - `C::Value` implements [`RemoveElementFromSet`] for element removal
+    /// - `C::Value` implements `FromIterator` for loading from the database
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - A reference to the key identifying the set in the cache
+    /// - `element` - A reference to the element to remove from the set
+    ///
+    /// # Behavior
+    ///
+    /// 1. If the key is already cached, attempts to remove the element from the
+    ///    existing set
+    /// 2. If the key is not cached, loads the set from the backing database
+    ///    using [`KvDatabase::collect_key_of_set`], then attempts to remove the
+    ///    element
+    /// 3. If the element is not in the set, the operation has no effect
+    /// 4. The operation holds a write lock on the shard during removal to
+    ///    ensure thread safety
+    ///
+    /// # Durability
+    ///
+    /// This method only updates the in-memory cache. The caller is responsible
+    /// for persisting changes to the backing database if needed.
+    ///
+    /// # Concurrency
+    ///
+    /// This method coordinates with other cache operations to ensure only one
+    /// thread fetches data from the backing database if multiple threads access
+    /// the same key simultaneously.
     pub fn remove_set_element<Q: ?Sized + Eq + Hash>(
         &self,
         key: &C::Key,

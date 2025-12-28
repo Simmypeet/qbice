@@ -8,13 +8,46 @@
 //!
 //! # Overview
 //!
-//! The interning system consists of three main components:
+//! The interning system consists of three main layers:
 //!
-//! - [`InternedID`]: A unique identifier for an interned value, combining the
-//!   type's stable ID and its 128-bit hash.
-//! - [`Interned<T>`]: A reference-counted handle to an interned value.
-//! - [`Interner<S>`]: The main interner that manages interned values using
-//!   sharding for concurrent access.
+//! - [`InternedID`]: A unique identifier combining a type's stable ID and
+//!   content hash.
+//! - [`Interned<T>`]: A reference-counted handle to an interned value that
+//!   provides transparent access via [`Deref`].
+//! - [`Interner`]: The core interner managing deduplicated values using sharded
+//!   concurrent access.
+//! - [`SharedInterner`]: A convenience wrapper around `Arc<Interner>` for easy
+//!   sharing across threads.
+//!
+//! # When to Use Interning
+//!
+//! Interning is beneficial when:
+//! - You have many duplicate values that are expensive to store
+//! - Values are immutable and compared frequently
+//! - You need deterministic serialization with deduplication
+//! - Memory usage is more important than allocation speed
+//!
+//! Use regular `Arc`/`Rc` when:
+//! - Values are rarely duplicated
+//! - You don't need cross-execution stability
+//! - Allocation performance is critical
+//!
+//! # Example
+//!
+//! ```ignore
+//! use qbice_storage::intern::{Interner, SharedInterner};
+//! use qbice_stable_hash::BuildStableHasher128;
+//!
+//! // Create a shared interner
+//! let interner = SharedInterner::new(16, BuildStableHasher128::default());
+//!
+//! // Intern some values
+//! let s1 = interner.intern("hello".to_string());
+//! let s2 = interner.intern("hello".to_string());
+//!
+//! // s1 and s2 point to the same allocation
+//! assert!(Arc::ptr_eq(&s1.0, &s2.0));
+//! ```
 
 use std::{
     any::Any,
@@ -43,8 +76,18 @@ use crate::sharded::Sharded;
 /// - A 128-bit hash ([`Compact128`]) of the value's content
 ///
 /// The combination of type ID and content hash ensures that values of
-/// different types with the same hash are still distinguishable, preventing
-/// type confusion.
+/// different types with the same hash are distinguishable, preventing type
+/// confusion. For example, a string "42" and an integer `42` would have
+/// different `InternedID`s even if their content hashes collided.
+///
+/// # Structure
+///
+/// ```text
+/// InternedID {
+///     stable_type_id: 0x1234_5678_...,  // Type's unique ID
+///     hash_128: 0xabcd_ef01_...,        // 128-bit content hash  
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InternedID {
     stable_type_id: StableTypeID,
@@ -55,19 +98,32 @@ pub struct InternedID {
 ///
 /// `Interned<T>` wraps an `Arc<T>` and provides transparent access to the
 /// underlying value through [`Deref`]. Multiple `Interned<T>` instances
-/// containing equal values will share the same underlying allocation when
-/// created through the same [`Interner`].
+/// containing equal values (as determined by their stable hash) will share
+/// the same underlying allocation when created through the same [`Interner`].
 ///
 /// # Memory Management
 ///
 /// The interned value is automatically deallocated when all `Interned<T>`
-/// handles to it are dropped. The interner only holds weak references to
-/// interned values, so it does not prevent deallocation.
+/// handles to it are dropped. The interner only holds weak references,
+/// allowing unused values to be garbage collected.
 ///
 /// # Cloning
 ///
-/// Cloning an `Interned<T>` is cheap as it only increments the reference
-/// count of the underlying `Arc`.
+/// Cloning an `Interned<T>` is cheap (O(1)) as it only increments the
+/// reference count of the underlying `Arc`. No data is copied.
+///
+/// # Comparison with Arc
+///
+/// Unlike `Arc<T>`, which creates a new allocation for each `Arc::new()` call,
+/// `Interned<T>` ensures that equal values (by stable hash) share a single
+/// allocation. This saves memory but requires hashing on creation.
+///
+/// # Serialization
+///
+/// When using the `Encode`/`Decode` traits, `Interned<T>` automatically
+/// deduplicates values during serialization. The first occurrence of a value
+/// is serialized in full; subsequent occurrences are serialized as references
+/// to the hash, significantly reducing serialized size for duplicate data.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash)]
 #[stable_hash_crate(qbice_stable_hash)]
 pub struct Interned<T>(Arc<T>);
@@ -237,24 +293,34 @@ impl<T: StableHash> DynStableHash for T {
 /// stable hash combined with their type ID, ensuring that equal values of
 /// the same type share a single allocation.
 ///
-/// # Type Parameters
+/// # How It Works
 ///
-/// - `S`: A [`BuildStableHasher`] implementation that produces 128-bit hashes.
-///   This hasher must be deterministic to ensure consistent interning across
-///   the interner's lifetime.
+/// 1. When you intern a value, the interner computes its stable hash
+/// 2. It checks if a value with that hash already exists
+/// 3. If found and still alive, it returns a handle to the existing value
+/// 4. Otherwise, it stores the new value and returns a handle to it
 ///
 /// # Weak References
 ///
-/// The interner stores weak references to interned values. This means that
-/// when all [`Interned<T>`] handles to a value are dropped, the value is
-/// deallocated and removed from the interner on the next lookup. This
-/// prevents memory leaks for values that are no longer in use.
+/// The interner stores weak references to interned values. When all
+/// [`Interned<T>`] handles to a value are dropped, the value is automatically
+/// deallocated. Subsequent intern calls for the same value will create a new
+/// allocation. This prevents memory leaks for values no longer in use.
 ///
 /// # Thread Safety
 ///
 /// The interner is fully thread-safe and can be shared across threads using
-/// `Arc<Interner<S>>`. Concurrent intern operations may block briefly on
-/// the same shard but will not deadlock.
+/// `Arc<Interner>` (or the convenience wrapper [`SharedInterner`]). Multiple
+/// threads can safely call [`intern`](Self::intern) concurrently. Sharding
+/// ensures that operations on different hash buckets don't block each other.
+///
+/// # Choosing Shard Count
+///
+/// More shards reduce lock contention but increase memory overhead. Good
+/// starting points:
+/// - Single-threaded: 1-4 shards
+/// - Multi-threaded: 16-32 shards (power of 2 recommended)
+/// - High contention: Number of CPU cores or more
 pub struct Interner {
     shards: Sharded<HashMap<InternedID, Weak<dyn Any + Send + Sync>>>,
 
@@ -262,23 +328,60 @@ pub struct Interner {
     stable_hash_fn: fn(&dyn Any, &dyn DynStableHash) -> u128,
 }
 
-/// A shared, reference-counted [`Interner<S>`].
+/// A shared, reference-counted interner.
 ///
-/// See [`Interner<S>`] for details.
+/// This is a convenience wrapper around `Arc<Interner>` that simplifies
+/// sharing an interner across threads and components. It implements [`Deref`]
+/// to provide transparent access to the underlying [`Interner`].
+///
+/// # When to Use
+///
+/// Use `SharedInterner` when:
+/// - You need to share an interner across multiple components or threads
+/// - You want a simpler API than manually wrapping in `Arc`
+/// - You're using the interner as a plugin in the serialization system
+///
+/// Use `Interner` directly when:
+/// - You're managing ownership manually
+/// - The interner doesn't need to be shared
+///
+/// # Example
+///
+/// ```ignore
+/// let interner = SharedInterner::new(16, hasher_builder);
+///
+/// // Clone is cheap - just increments reference count
+/// let interner2 = interner.clone();
+///
+/// // Both refer to the same underlying interner
+/// let v1 = interner.intern("test".to_string());
+/// let v2 = interner2.intern("test".to_string());
+/// assert!(Arc::ptr_eq(&v1.0, &v2.0));
+/// ```
 #[derive(Debug, Clone)]
 pub struct SharedInterner(Arc<Interner>);
 
 impl SharedInterner {
-    /// Creates a new shared interner with the specified number of shards and
-    /// hasher builder.
+    /// Creates a new shared interner with the specified sharding and hasher.
     ///
-    /// This is a convenience method that creates an [`Interner`] and wraps it
-    /// in an `Arc`.
+    /// This is a convenience method equivalent to creating an [`Interner`] and
+    /// wrapping it in an `Arc`.
     ///
     /// # Parameters
     ///
-    /// - `shard_amount`: The number of shards to use for concurrent access.
-    /// - `hasher_builder`: The hasher builder used to create stable hashers.
+    /// - `shard_amount`: The number of shards for concurrent access. More
+    ///   shards reduce contention but increase memory overhead. Recommended:
+    ///   16-32 for multi-threaded use, or the number of CPU cores.
+    /// - `hasher_builder`: The builder for creating stable hashers used to hash
+    ///   interned values. Must produce deterministic 128-bit hashes.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use qbice_stable_hash::BuildStableHasher128;
+    ///
+    /// let interner = SharedInterner::new(16, BuildStableHasher128::default());
+    /// ```
     pub fn new<S: BuildStableHasher<Hash = u128> + Send + Sync + 'static>(
         shard_amount: usize,
         hasher_builder: S,
@@ -286,11 +389,13 @@ impl SharedInterner {
         Self(Arc::new(Interner::new(shard_amount, hasher_builder)))
     }
 
-    /// Creates a shared interner from an existing [`Interner`].
+    /// Creates a shared interner from an existing interner.
+    ///
+    /// This wraps the provided [`Interner`] in an `Arc` to make it shareable.
     ///
     /// # Parameters
     ///
-    /// - `interner`: The interner to wrap in an `Arc`.
+    /// - `interner`: The interner to wrap.
     #[must_use]
     pub fn from_interner(interner: Interner) -> Self {
         Self(Arc::new(interner))
@@ -310,17 +415,28 @@ impl std::fmt::Debug for Interner {
 }
 
 impl Interner {
-    /// Creates a new interner with the specified number of shards and hasher
-    /// builder.
+    /// Creates a new interner with the specified sharding and hasher.
     ///
     /// # Parameters
     ///
-    /// - `shard_amount`: The number of shards to use for concurrent access.
-    ///   More shards reduce contention but increase memory overhead. A good
-    ///   starting point is the number of CPU cores or a power of 2 like 16 or
-    ///   32.
-    /// - `hasher_builder`: The hasher builder used to create stable hashers for
-    ///   computing value hashes.
+    /// - `shard_amount`: The number of shards for concurrent access. Each shard
+    ///   has its own lock, so more shards reduce contention. Good starting
+    ///   values:
+    ///   - Single-threaded: 1-4 shards
+    ///   - Multi-threaded: 16-32 shards (powers of 2 work well)
+    ///   - High contention: Number of CPU cores or 2× that
+    ///
+    /// - `hasher_builder`: The builder for creating stable hashers. Must
+    ///   produce deterministic 128-bit hashes for the same input across all
+    ///   program executions.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use qbice_stable_hash::BuildStableHasher128;
+    ///
+    /// let interner = Interner::new(16, BuildStableHasher128::default());
+    /// ```
     pub fn new<S: BuildStableHasher + Send + Sync + 'static>(
         shard_amount: usize,
         hasher_builder: S,
@@ -337,13 +453,18 @@ impl Interner {
 
     /// Computes the 128-bit stable hash of a value.
     ///
-    /// This method uses the interner's hasher builder to compute a
-    /// deterministic hash of the given value. The same value will always
-    /// produce the same hash within the same interner instance.
+    /// This method uses the interner's configured hasher to compute a
+    /// deterministic hash. The same value will always produce the same hash
+    /// within this interner instance (and across instances using the same
+    /// hasher configuration).
     ///
     /// # Parameters
     ///
     /// - `value`: A reference to the value to hash.
+    ///
+    /// # Returns
+    ///
+    /// A [`Compact128`] representing the 128-bit hash of the value.
     pub fn hash_128<T: StableHash>(&self, value: &T) -> Compact128 {
         let hash_u128 =
             (self.stable_hash_fn)(&*self.hasher_builder_erased, value);
@@ -351,7 +472,37 @@ impl Interner {
         hash_u128.into()
     }
 
-    /// Attempts to retrieve an interned value by its 128-bit hash.
+    /// Retrieves an interned value by its 128-bit hash, if it exists.
+    ///
+    /// This method looks up a value that was previously interned and is still
+    /// alive (has at least one [`Interned<T>`] handle). It's primarily used
+    /// during deserialization when references to interned values need to be
+    /// resolved.
+    ///
+    /// # Parameters
+    ///
+    /// - `hash_128`: The 128-bit hash of the value to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Interned<T>)` if a value with this hash exists and is still
+    ///   alive
+    /// - `None` if no matching value is found or the value has been deallocated
+    ///
+    /// # Relationship to Serialization
+    ///
+    /// During serialization, `Interned<T>` values are encoded either as:
+    /// 1. Full value (first occurrence)
+    /// 2. Hash reference (subsequent occurrences)
+    ///
+    /// During deserialization, hash references are resolved using this method
+    /// to point to the previously-deserialized instance.
+    ///
+    /// # Type Safety
+    ///
+    /// The method uses the type's [`StableTypeID`] to ensure type safety.
+    /// Attempting to retrieve a value with the wrong type will return `None`,
+    /// even if a value with that hash exists for a different type.
     pub fn get_from_hash<T: Identifiable + Send + Sync + 'static>(
         &self,
         hash_128: Compact128,
@@ -376,26 +527,44 @@ impl Interner {
 
     /// Interns a value, returning a reference-counted handle to it.
     ///
-    /// If an equal value has already been interned and is still alive, this
-    /// method returns a handle to the existing value. Otherwise, it stores
-    /// the new value and returns a handle to it.
+    /// If an equal value (as determined by stable hash) has already been
+    /// interned and is still alive, this method returns a handle to the
+    /// existing value. Otherwise, it stores the new value and returns a handle
+    /// to it.
+    ///
+    /// # Equality Semantics
+    ///
+    /// Values are considered equal if:
+    /// 1. They have the same type (same `StableTypeID`)
+    /// 2. They have the same stable hash (128-bit)
+    ///
+    /// Note that this uses **hash equality**, not value equality. Hash
+    /// collisions are extremely rare with 128-bit hashes but theoretically
+    /// possible.
     ///
     /// # Parameters
     ///
-    /// - `value`: The value to intern. Must implement [`StableHash`],
-    ///   [`Identifiable`], [`Send`], [`Sync`], and have a `'static` lifetime.
+    /// - `value`: The value to intern. Must implement:
+    ///   - [`StableHash`]: For computing the content hash
+    ///   - [`Identifiable`]: For the stable type ID
+    ///   - `Send + Sync + 'static`: For safe sharing across threads
     ///
     /// # Returns
     ///
-    /// An [`Interned<T>`] handle to the interned value. If an equal value
-    /// was already interned, this will point to the existing allocation.
+    /// An [`Interned<T>`] handle to the interned value. If an equal value was
+    /// already interned, the returned handle points to the existing allocation.
     ///
     /// # Thread Safety
     ///
-    /// This method is thread-safe and can be called concurrently from multiple
-    /// threads. If two threads attempt to intern the same value simultaneously,
-    /// only one allocation will be created and both threads will receive
-    /// handles to it.
+    /// This method is thread-safe and can be called concurrently. If two
+    /// threads intern the same value simultaneously, only one allocation
+    /// will be created and both threads will receive handles to it.
+    ///
+    /// # Performance
+    ///
+    /// - **Time complexity**: O(1) expected, O(n) worst case due to hash table
+    /// - **Hashing cost**: Requires computing a stable hash of the entire value
+    /// - **Lock contention**: Only affects the specific shard for this hash
     pub fn intern<T: StableHash + Identifiable + Send + Sync + 'static>(
         &self,
         value: T,
