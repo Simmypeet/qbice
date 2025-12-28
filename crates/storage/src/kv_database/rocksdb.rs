@@ -13,8 +13,8 @@ use qbice_serialize::{
 };
 use qbice_stable_type_id::StableTypeID;
 use rust_rocksdb::{
-    BoundColumnFamily, ColumnFamilyDescriptor, DBCompressionType,
-    DBWithThreadMode, MultiThreaded, Options, ReadOptions, WriteBatch,
+    BoundColumnFamily, ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded,
+    Options, WriteBatch,
 };
 
 use super::{Column, KvDatabase, Normal, WriteTransaction};
@@ -118,14 +118,6 @@ impl RocksDB {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        opts.set_write_buffer_size(128 * 1024 * 1024);
-        opts.set_max_write_buffer_number(4);
-        opts.set_compaction_style(rust_rocksdb::DBCompactionStyle::Universal);
-        opts.set_max_background_jobs(8);
-        opts.set_compression_type(DBCompressionType::Lz4);
-        opts.set_use_direct_io_for_flush_and_compaction(true);
-        opts.set_use_direct_reads(true);
-        opts.set_max_subcompactions(4);
 
         // List existing column families
         let existing_cfs =
@@ -353,11 +345,7 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
 
     fn commit(self) {
         let batch = self.batch.into_inner();
-        let mut opts = rust_rocksdb::WriteOptions::default();
-
-        opts.disable_wal(true);
-
-        self.db.db.write_opt(&batch, &opts).expect("write should not fail");
+        self.db.db.write(&batch).expect("write should not fail");
     }
 }
 
@@ -408,34 +396,30 @@ impl KvDatabase for RocksDB {
         self.encode_value_length_prefixed(key, &mut prefix_buffer);
 
         // Use an iterator with prefix seek
-        let mut read_opts = ReadOptions::default();
-        read_opts.set_prefix_same_as_start(true);
-        read_opts.set_readahead_size(2 * 1024 * 1024);
-
-        let iter = self.db.iterator_cf_opt(
-            &cf,
-            read_opts,
-            rust_rocksdb::IteratorMode::From(
-                &prefix_buffer,
-                rust_rocksdb::Direction::Forward,
-            ),
-        );
+        let iter = self.db.prefix_iterator_cf(&cf, &prefix_buffer);
 
         // Filter to only include keys that actually start with our prefix.
         // RocksDB's prefix_iterator doesn't guarantee this - it just starts
         // at the prefix position and continues iterating.
-        iter.map(|x| x.expect("RocksDB iteration error")).map(|(key, _)| {
-            let length = u64::from_le_bytes(
-                key[0..8].try_into().expect("length prefix should be 8 bytes"),
-            ) as usize;
+        iter.map(|x| x.expect("RocksDB iteration error"))
+            .take_while(move |(key, _)| key.starts_with(&prefix_buffer))
+            .map(|(key, _)| {
+                let length = u64::from_le_bytes(
+                    key[0..8]
+                        .try_into()
+                        .expect("length prefix should be 8 bytes"),
+                ) as usize;
 
-            let mut decoder =
-                PostcardDecoder::new(std::io::Cursor::new(&key[8 + length..]));
+                let mut decoder = PostcardDecoder::new(std::io::Cursor::new(
+                    &key[8 + length..],
+                ));
 
-            decoder
-                .decode::<<C::Mode as super::KeyOfSetMode>::Value>(&self.plugin)
-                .expect("decoding should not fail")
-        })
+                decoder
+                    .decode::<<C::Mode as super::KeyOfSetMode>::Value>(
+                        &self.plugin,
+                    )
+                    .expect("decoding should not fail")
+            })
     }
 
     fn write_transaction(&self) -> Self::WriteTransaction<'_> {
