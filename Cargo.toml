@@ -10,6 +10,7 @@ members = [
     "crates/serialize",
     "crates/serialize_derive",
     "crates/storage",
+    "crates/benchmark",
 ]
 resolver = "2"
 
@@ -44,6 +45,7 @@ rust-rocksdb = "0.44.2"
 tempfile = "3"
 futures = "0.3.31"
 rayon = "1.11.0"
+criterion = { version = "0.8.0", features = ["async_tokio"] }
 
 [workspace.lints.rust]
 missing_docs = "deny"
