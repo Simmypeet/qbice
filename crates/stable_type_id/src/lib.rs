@@ -83,6 +83,7 @@ pub use qbice_stable_hash::StableHash;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash,
 )]
+#[stable_hash_crate(qbice_stable_hash)]
 #[allow(clippy::unsafe_derive_deserialize)]
 pub struct StableTypeID(u64, u64);
 

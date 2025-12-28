@@ -13,7 +13,7 @@ use std::{
 };
 
 use qbice::{
-    Decode, Encode, TrackedEngine,
+    Decode, Encode, Identifiable, StableHash, TrackedEngine,
     config::Config,
     executor::{CyclicError, Executor},
     query::Query,
@@ -21,8 +21,6 @@ use qbice::{
 use qbice_integration_test::{
     SlowExecutor, SlowQuery, Variable, create_test_engine,
 };
-use qbice_stable_hash::StableHash;
-use qbice_stable_type_id::Identifiable;
 use tempfile::tempdir;
 use tokio::task::yield_now;
 

@@ -73,9 +73,29 @@ use syn::{
 ///     Named { name: String },
 /// }
 /// ```
-#[proc_macro_derive(StableHash)]
+#[proc_macro_derive(StableHash, attributes(stable_hash_crate))]
 pub fn derive_stable_hash(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+
+    let trait_crate_path: syn::Path = if let Some(attr) = input
+        .attrs
+        .iter()
+        .find(|attr| attr.path().is_ident("stable_hash_crate"))
+    {
+        match attr.parse_args::<syn::Path>() {
+            Ok(path) => path,
+            Err(_) => {
+                return syn::Error::new_spanned(
+                    attr,
+                    "invalid `#[stable_hash_crate(...)]` attribute on key type",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    } else {
+        syn::parse_quote!(::qbice::stable_hash)
+    };
 
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) =
@@ -96,8 +116,12 @@ pub fn derive_stable_hash(input: TokenStream) -> TokenStream {
     }
 
     let stable_hash_impl = match &input.data {
-        Data::Struct(data_struct) => impl_stable_hash_struct(data_struct),
-        Data::Enum(data_enum) => impl_stable_hash_enum(data_enum),
+        Data::Struct(data_struct) => {
+            impl_stable_hash_struct(&trait_crate_path, data_struct)
+        }
+        Data::Enum(data_enum) => {
+            impl_stable_hash_enum(&trait_crate_path, data_enum)
+        }
         Data::Union(_) => {
             return syn::Error::new_spanned(
                 &input,
@@ -111,8 +135,8 @@ pub fn derive_stable_hash(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #[allow(clippy::trait_duplication_in_bounds)]
-        impl #impl_generics ::qbice_stable_hash::StableHash for #name #ty_generics #where_clause {
-            fn stable_hash<H: ::qbice_stable_hash::StableHasher + ?Sized>(&self, state: &mut H) {
+        impl #impl_generics #trait_crate_path::StableHash for #name #ty_generics #where_clause {
+            fn stable_hash<H: #trait_crate_path::StableHasher + ?Sized>(&self, state: &mut H) {
                 #stable_hash_impl
             }
         }
@@ -122,6 +146,7 @@ pub fn derive_stable_hash(input: TokenStream) -> TokenStream {
 }
 
 fn impl_stable_hash_struct(
+    trait_crate_path: &syn::Path,
     data_struct: &DataStruct,
 ) -> proc_macro2::TokenStream {
     match &data_struct.fields {
@@ -129,7 +154,7 @@ fn impl_stable_hash_struct(
             let field_hashes = fields.named.iter().map(|field| {
                 let field_name = &field.ident;
                 quote! {
-                    ::qbice_stable_hash::StableHash::stable_hash(&self.#field_name, state);
+                    #trait_crate_path::StableHash::stable_hash(&self.#field_name, state);
                 }
             });
 
@@ -141,7 +166,7 @@ fn impl_stable_hash_struct(
             let field_hashes = fields.unnamed.iter().enumerate().map(|(i, _)| {
                 let index = Index::from(i);
                 quote! {
-                    ::qbice_stable_hash::StableHash::stable_hash(&self.#index, state);
+                    #trait_crate_path::StableHash::stable_hash(&self.#index, state);
                 }
             });
 
@@ -157,7 +182,10 @@ fn impl_stable_hash_struct(
     }
 }
 
-fn impl_stable_hash_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
+fn impl_stable_hash_enum(
+    trait_crate_path: &syn::Path,
+    data_enum: &DataEnum,
+) -> proc_macro2::TokenStream {
     let variant_matches = data_enum.variants.iter().map(|variant| {
         let variant_name = &variant.ident;
         match &variant.fields {
@@ -165,7 +193,7 @@ fn impl_stable_hash_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
                 let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
                 let field_hashes = field_names.iter().map(|field_name| {
                     quote! {
-                        ::qbice_stable_hash::StableHash::stable_hash(#field_name, state);
+                        #trait_crate_path::StableHash::stable_hash(#field_name, state);
                     }
                 });
                 quote! {
@@ -180,7 +208,7 @@ fn impl_stable_hash_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
                     .collect();
                 let field_hashes = field_bindings.iter().map(|field_name| {
                     quote! {
-                        ::qbice_stable_hash::StableHash::stable_hash(#field_name, state);
+                        #trait_crate_path::StableHash::stable_hash(#field_name, state);
                     }
                 });
                 quote! {
@@ -198,7 +226,7 @@ fn impl_stable_hash_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
     });
 
     quote! {
-        ::qbice_stable_hash::StableHash::stable_hash(
+        #trait_crate_path::StableHash::stable_hash(
             &::std::mem::discriminant(self),
             state
         );

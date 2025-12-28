@@ -10,10 +10,6 @@ publish = false
 
 [dependencies]
 qbice = { path = "../qbice" }
-qbice_stable_hash = { path = "../stable_hash" }
-qbice_stable_type_id = { path = "../stable_type_id" }
-qbice_serialize = { path = "../serialize" }
-qbice_storage = { path = "../storage" }
 tempfile.workspace = true
 tokio.workspace = true
 flexstr.workspace = true

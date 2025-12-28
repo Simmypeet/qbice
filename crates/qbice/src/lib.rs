@@ -256,6 +256,8 @@
 //! [`TrackedEngine`]: engine::TrackedEngine
 //! [`CyclicError`]: executor::CyclicError
 
+extern crate self as qbice;
+
 pub mod config;
 pub mod engine;
 pub mod executor;
@@ -263,7 +265,12 @@ pub mod query;
 
 pub use engine::{Engine, computation_graph::TrackedEngine};
 pub use executor::Executor;
+// re-export companion crates
+pub use qbice_serialize as serialize;
 pub use qbice_serialize::{Decode, Encode};
+pub use qbice_stable_hash as stable_hash;
 pub use qbice_stable_hash::StableHash;
+pub use qbice_stable_type_id as stable_type_id;
 pub use qbice_stable_type_id::Identifiable;
+pub use qbice_storage as storage;
 pub use query::{ExecutionStyle, Query};

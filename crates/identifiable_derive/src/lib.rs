@@ -225,39 +225,37 @@ use proc_macro::TokenStream;
 /// The stable ID computation happens entirely at compile time and has zero
 /// runtime cost. The generated constant can be used directly without any
 /// function calls or allocations.
-#[proc_macro_derive(Identifiable, attributes(qbice_stable_type_id))]
+#[proc_macro_derive(Identifiable, attributes(stable_type_id_crate))]
 #[allow(clippy::too_many_lines)]
 pub fn derive_identifiable(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     let name = input.ident.clone();
     let generics = input.generics;
 
-    let qbice_stable_type_id_crate: syn::Path = match input
+    // Support #[stable_type_id_crate(some_crate)]
+    let trait_crate_path: syn::Path = if let Some(attr) = input
         .attrs
         .iter()
-        .find(|attr| attr.path().is_ident("qbice_stable_type_id"))
+        .find(|attr| attr.path().is_ident("stable_type_id_crate"))
     {
-        Some(attr) => {
-            let Ok(value) = attr.parse_args::<syn::Path>() else {
+        match attr.parse_args::<syn::Path>() {
+            Ok(path) => path,
+            Err(_) => {
                 return syn::Error::new_spanned(
                     attr,
-                    "invalid `#[qbice_query]` attribute on key type",
+                    "invalid `#[stable_type_id_crate(...)]` attribute on key \
+                     type",
                 )
                 .to_compile_error()
                 .into();
-            };
-
-            value
+            }
         }
-        None => {
-            syn::parse_quote!(::qbice_stable_type_id)
-        }
+    } else {
+        syn::parse_quote!(::qbice::stable_type_id)
     };
 
-    let identifiable_path =
-        syn::parse_quote!(#qbice_stable_type_id_crate::Identifiable);
-    let stable_type_id =
-        syn::parse_quote!(#qbice_stable_type_id_crate::StableTypeID);
+    let identifiable_path = syn::parse_quote!(#trait_crate_path::Identifiable);
+    let stable_type_id = syn::parse_quote!(#trait_crate_path::StableTypeID);
 
     qbice_identifiable_derive_lib::implements_identifiable(
         &name,

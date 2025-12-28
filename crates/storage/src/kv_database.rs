@@ -33,6 +33,7 @@ pub trait KeyOfSetMode: StorageMode {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]
+#[serialize_crate(qbice_serialize)]
 pub struct Normal;
 
 impl StorageMode for Normal {}
@@ -78,6 +79,7 @@ impl StorageMode for Normal {}
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]
+#[serialize_crate(qbice_serialize)]
 pub struct KeyOfSet<T>(PhantomData<T>);
 
 impl<T> StorageMode for KeyOfSet<T> {}

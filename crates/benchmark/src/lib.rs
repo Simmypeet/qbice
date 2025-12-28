@@ -1,9 +1,12 @@
 #![allow(missing_docs)]
 
-use qbice::{Engine, config::DefaultConfig};
-use qbice_serialize::Plugin;
-use qbice_stable_hash::{SeededStableHasherBuilder, Sip128Hasher};
-use qbice_storage::kv_database::rocksdb::RocksDB;
+use qbice::{
+    Engine,
+    config::DefaultConfig,
+    serialize::Plugin,
+    stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
+    storage::kv_database::rocksdb::RocksDB,
+};
 use tempfile::TempDir;
 
 #[must_use]

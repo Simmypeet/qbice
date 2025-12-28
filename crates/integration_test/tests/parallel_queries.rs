@@ -18,10 +18,10 @@ use qbice::{
     config::Config,
     executor::{CyclicError, Executor},
     query::Query,
+    stable_hash::StableHash,
+    stable_type_id::Identifiable,
 };
 use qbice_integration_test::{Variable, create_test_engine};
-use qbice_stable_hash::StableHash;
-use qbice_stable_type_id::Identifiable;
 use tempfile::tempdir;
 
 // ============================================================================

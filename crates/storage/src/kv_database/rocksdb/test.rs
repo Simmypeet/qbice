@@ -7,6 +7,7 @@ use crate::kv_database::{KeyOfSet, Normal};
 
 /// Test column for normal key-value storage.
 #[derive(Debug, Clone, Identifiable)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 struct TestColumn;
 
 impl Column for TestColumn {
@@ -17,6 +18,7 @@ impl Column for TestColumn {
 
 /// Test column for set storage.
 #[derive(Debug, Clone, Identifiable)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 struct TestSetColumn;
 
 impl Column for TestSetColumn {

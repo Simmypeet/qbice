@@ -133,9 +133,27 @@ fn should_skip(field: &Field) -> bool {
 ///     Named { name: String },
 /// }
 /// ```
-#[proc_macro_derive(Encode, attributes(serialize))]
+#[proc_macro_derive(Encode, attributes(serialize, serialize_crate))]
 pub fn derive_encode(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+
+    let trait_crate_path: syn::Path = if let Some(attr) =
+        input.attrs.iter().find(|attr| attr.path().is_ident("serialize_crate"))
+    {
+        match attr.parse_args::<syn::Path>() {
+            Ok(path) => path,
+            Err(_) => {
+                return syn::Error::new_spanned(
+                    attr,
+                    "invalid `#[serialize_crate(...)]` attribute on key type",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    } else {
+        syn::parse_quote!(::qbice::serialize)
+    };
 
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) =
@@ -151,13 +169,15 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
             let ident = &type_param.ident;
             where_clause
                 .predicates
-                .push(syn::parse_quote!(#ident: ::qbice_serialize::Encode));
+                .push(syn::parse_quote!(#ident: #trait_crate_path::Encode));
         }
     }
 
     let encode_impl = match &input.data {
-        Data::Struct(data_struct) => impl_encode_struct(data_struct),
-        Data::Enum(data_enum) => impl_encode_enum(data_enum),
+        Data::Struct(data_struct) => {
+            impl_encode_struct(&trait_crate_path, data_struct)
+        }
+        Data::Enum(data_enum) => impl_encode_enum(&trait_crate_path, data_enum),
         Data::Union(_) => {
             return syn::Error::new_spanned(
                 &input,
@@ -171,12 +191,12 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #[allow(clippy::trait_duplication_in_bounds)]
-        impl #impl_generics ::qbice_serialize::Encode for #name #ty_generics #where_clause {
-            fn encode<__E: ::qbice_serialize::Encoder + ?Sized>(
+        impl #impl_generics #trait_crate_path::Encode for #name #ty_generics #where_clause {
+            fn encode<__E: #trait_crate_path::Encoder + ?Sized>(
                 &self,
                 encoder: &mut __E,
-                plugin: &::qbice_serialize::Plugin,
-                session: &mut ::qbice_serialize::session::Session,
+                plugin: &#trait_crate_path::Plugin,
+                session: &mut #trait_crate_path::session::Session,
             ) -> ::std::io::Result<()> {
                 #encode_impl
             }
@@ -186,7 +206,10 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn impl_encode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
+fn impl_encode_struct(
+    trath_crate_path: &syn::Path,
+    data_struct: &DataStruct,
+) -> proc_macro2::TokenStream {
     match &data_struct.fields {
         Fields::Named(fields) => {
             let field_encodes = fields
@@ -196,7 +219,7 @@ fn impl_encode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
                 .map(|field| {
                     let field_name = &field.ident;
                     quote! {
-                        ::qbice_serialize::Encode::encode(&self.#field_name, encoder, plugin, session)?;
+                        #trath_crate_path::Encode::encode(&self.#field_name, encoder, plugin, session)?;
                     }
                 });
 
@@ -214,7 +237,7 @@ fn impl_encode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
                 .map(|(i, _)| {
                     let index = Index::from(i);
                     quote! {
-                        ::qbice_serialize::Encode::encode(&self.#index, encoder, plugin, session)?;
+                        #trath_crate_path::Encode::encode(&self.#index, encoder, plugin, session)?;
                     }
                 });
 
@@ -232,7 +255,10 @@ fn impl_encode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
     }
 }
 
-fn impl_encode_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
+fn impl_encode_enum(
+    trait_crate_path: &syn::Path,
+    data_enum: &DataEnum,
+) -> proc_macro2::TokenStream {
     let variant_matches =
         data_enum.variants.iter().enumerate().map(|(idx, variant)| {
             let variant_name = &variant.ident;
@@ -257,7 +283,7 @@ fn impl_encode_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
                         field_names.iter().filter(|(_, skip)| !skip).map(
                             |(field_name, _)| {
                                 quote! {
-                                    ::qbice_serialize::Encode::encode(#field_name, encoder, plugin, session)?;
+                                    #trait_crate_path::Encode::encode(#field_name, encoder, plugin, session)?;
                                 }
                             },
                         );
@@ -295,7 +321,7 @@ fn impl_encode_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
                         field_data.iter().filter(|(_, skip)| !skip).map(
                             |(binding, _)| {
                                 quote! {
-                                    ::qbice_serialize::Encode::encode(#binding, encoder, plugin, session)?;
+                                    #trait_crate_path::Encode::encode(#binding, encoder, plugin, session)?;
                                 }
                             },
                         );
@@ -361,9 +387,27 @@ fn impl_encode_enum(data_enum: &DataEnum) -> proc_macro2::TokenStream {
 ///     Named { name: String },
 /// }
 /// ```
-#[proc_macro_derive(Decode, attributes(serialize))]
+#[proc_macro_derive(Decode, attributes(serialize, serialize_crate))]
 pub fn derive_decode(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+
+    let trait_crate_path: syn::Path = if let Some(attr) =
+        input.attrs.iter().find(|attr| attr.path().is_ident("serialize_crate"))
+    {
+        match attr.parse_args::<syn::Path>() {
+            Ok(path) => path,
+            Err(_) => {
+                return syn::Error::new_spanned(
+                    attr,
+                    "invalid `#[serialize_crate(...)]` attribute on key type",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    } else {
+        syn::parse_quote!(::qbice::serialize)
+    };
 
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) =
@@ -379,13 +423,17 @@ pub fn derive_decode(input: TokenStream) -> TokenStream {
             let ident = &type_param.ident;
             where_clause
                 .predicates
-                .push(syn::parse_quote!(#ident: ::qbice_serialize::Decode));
+                .push(syn::parse_quote!(#ident: #trait_crate_path::Decode));
         }
     }
 
     let decode_impl = match &input.data {
-        Data::Struct(data_struct) => impl_decode_struct(data_struct),
-        Data::Enum(data_enum) => impl_decode_enum(name, data_enum),
+        Data::Struct(data_struct) => {
+            impl_decode_struct(&trait_crate_path, data_struct)
+        }
+        Data::Enum(data_enum) => {
+            impl_decode_enum(&trait_crate_path, name, data_enum)
+        }
         Data::Union(_) => {
             return syn::Error::new_spanned(
                 &input,
@@ -399,11 +447,11 @@ pub fn derive_decode(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #[allow(clippy::trait_duplication_in_bounds)]
-        impl #impl_generics ::qbice_serialize::Decode for #name #ty_generics #where_clause {
-            fn decode<__D: ::qbice_serialize::Decoder + ?Sized>(
+        impl #impl_generics #trait_crate_path::Decode for #name #ty_generics #where_clause {
+            fn decode<__D: #trait_crate_path::Decoder + ?Sized>(
                 decoder: &mut __D,
-                plugin: &::qbice_serialize::Plugin,
-                session: &mut ::qbice_serialize::session::Session,
+                plugin: &#trait_crate_path::Plugin,
+                session: &mut #trait_crate_path::session::Session,
             ) -> ::std::io::Result<Self> {
                 #decode_impl
             }
@@ -413,7 +461,10 @@ pub fn derive_decode(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn impl_decode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
+fn impl_decode_struct(
+    trait_crate_path: &syn::Path,
+    data_struct: &DataStruct,
+) -> proc_macro2::TokenStream {
     match &data_struct.fields {
         Fields::Named(fields) => {
             let field_decodes = fields.named.iter().map(|field| {
@@ -426,7 +477,7 @@ fn impl_decode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
                     }
                 } else {
                     quote! {
-                        #field_name: <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin, session)?,
+                        #field_name: <#field_type as #trait_crate_path::Decode>::decode(decoder, plugin, session)?,
                     }
                 }
             });
@@ -447,7 +498,7 @@ fn impl_decode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
                     }
                 } else {
                     quote! {
-                        <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin, session)?,
+                        <#field_type as #trait_crate_path::Decode>::decode(decoder, plugin, session)?,
                     }
                 }
             });
@@ -465,6 +516,7 @@ fn impl_decode_struct(data_struct: &DataStruct) -> proc_macro2::TokenStream {
 }
 
 fn impl_decode_enum(
+    trait_crate_path: &syn::Path,
     name: &syn::Ident,
     data_enum: &DataEnum,
 ) -> proc_macro2::TokenStream {
@@ -485,7 +537,7 @@ fn impl_decode_enum(
                             }
                         } else {
                             quote! {
-                                #field_name: <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin, session)?,
+                                #field_name: <#field_type as #trait_crate_path::Decode>::decode(decoder, plugin, session)?,
                             }
                         }
                     });
@@ -504,7 +556,7 @@ fn impl_decode_enum(
                             }
                         } else {
                             quote! {
-                                <#field_type as ::qbice_serialize::Decode>::decode(decoder, plugin, session)?,
+                                <#field_type as #trait_crate_path::Decode>::decode(decoder, plugin, session)?,
                             }
                         }
                     });

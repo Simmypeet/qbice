@@ -83,6 +83,7 @@ pub struct InternedID {
 /// Cloning an `Interned<T>` is cheap as it only increments the reference
 /// count of the underlying `Arc`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash)]
+#[stable_hash_crate(qbice_stable_hash)]
 pub struct Interned<T>(Arc<T>);
 
 impl<T> Interned<T> {

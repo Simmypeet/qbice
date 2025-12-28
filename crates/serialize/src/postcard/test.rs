@@ -78,14 +78,17 @@ use crate::{Decode, Encode};
 
 // Unit struct
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[serialize_crate(crate)]
 struct UnitStruct;
 
 // Tuple struct
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[serialize_crate(crate)]
 struct TupleStruct(u64, String);
 
 // Named fields struct
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[serialize_crate(crate)]
 struct NamedStruct {
     x: i32,
     y: i32,
@@ -94,6 +97,7 @@ struct NamedStruct {
 
 // Struct with skip
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[serialize_crate(crate)]
 struct StructWithSkip {
     value: u32,
     #[serialize(skip)]
@@ -102,12 +106,14 @@ struct StructWithSkip {
 
 // Generic struct
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[serialize_crate(crate)]
 struct GenericStruct<T> {
     inner: T,
 }
 
 // Enum with all variant types
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[serialize_crate(crate)]
 enum TestEnum {
     Unit,
     Tuple(u32, String),
@@ -116,6 +122,7 @@ enum TestEnum {
 
 // Enum with skip on field
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[serialize_crate(crate)]
 enum EnumWithSkip {
     Variant {
         value: u32,
@@ -126,6 +133,7 @@ enum EnumWithSkip {
 
 // Generic enum
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[serialize_crate(crate)]
 enum GenericEnum<T> {
     None,
     Some(T),

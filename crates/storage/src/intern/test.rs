@@ -36,6 +36,9 @@ fn test_shared_interner() -> SharedInterner {
 #[derive(
     Debug, Clone, PartialEq, Eq, Encode, Decode, StableHash, Identifiable,
 )]
+#[stable_hash_crate(qbice_stable_hash)]
+#[serialize_crate(qbice_serialize)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 struct TestData {
     name: String,
     value: i32,
@@ -55,6 +58,9 @@ struct TestData {
     StableHash,
     Identifiable,
 )]
+#[stable_hash_crate(qbice_stable_hash)]
+#[serialize_crate(qbice_serialize)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 struct TestString(String);
 
 impl TestString {
@@ -82,6 +88,9 @@ impl TestString {
     StableHash,
     Identifiable,
 )]
+#[stable_hash_crate(qbice_stable_hash)]
+#[serialize_crate(qbice_serialize)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 struct TestU32(u32);
 
 /// A simple i32 wrapper that implements Identifiable.
@@ -99,12 +108,18 @@ struct TestU32(u32);
     StableHash,
     Identifiable,
 )]
+#[stable_hash_crate(qbice_stable_hash)]
+#[serialize_crate(qbice_serialize)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 struct TestI32(i32);
 
 /// A simple f64 wrapper that implements Identifiable.
 #[derive(
     Debug, Clone, Copy, PartialEq, Encode, Decode, StableHash, Identifiable,
 )]
+#[stable_hash_crate(qbice_stable_hash)]
+#[serialize_crate(qbice_serialize)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 struct TestF64(f64);
 
 // =============================================================================
@@ -724,6 +739,9 @@ fn decoding_reference_before_source_fails() {
 #[derive(
     Debug, Clone, PartialEq, Eq, Encode, Decode, StableHash, Identifiable,
 )]
+#[stable_hash_crate(qbice_stable_hash)]
+#[serialize_crate(qbice_serialize)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 struct NestedTestData {
     inner: TestData,
     children: Vec<TestData>,

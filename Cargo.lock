@@ -752,10 +752,6 @@ dependencies = [
  "criterion",
  "dashmap",
  "qbice",
- "qbice_serialize",
- "qbice_stable_hash",
- "qbice_stable_type_id",
- "qbice_storage",
  "tempfile",
  "tokio",
 ]
@@ -783,10 +779,6 @@ version = "0.1.0"
 dependencies = [
  "flexstr",
  "qbice",
- "qbice_serialize",
- "qbice_stable_hash",
- "qbice_stable_type_id",
- "qbice_storage",
  "tempfile",
  "tokio",
  "tracing",

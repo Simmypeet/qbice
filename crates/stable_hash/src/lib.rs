@@ -983,6 +983,8 @@ impl StableHasher for siphasher::sip128::SipHasher {
     Encode,
     Decode,
 )]
+#[stable_hash_crate(qbice_stable_hash)]
+#[serialize_crate(qbice_serialize)]
 pub struct Compact128(u64, u64);
 
 impl From<u128> for Compact128 {
