@@ -95,59 +95,6 @@ impl<C: Config> ComputationGraph<C> {
 ///
 /// Create a `TrackedEngine` from an `Arc<Engine>`:
 ///
-/// ```rust
-/// use std::sync::Arc;
-///
-/// use qbice::{config::DefaultConfig, engine::Engine};
-///
-/// let engine = Arc::new(Engine::<DefaultConfig>::new());
-/// let tracked = engine.tracked();
-/// ```
-///
-/// # Querying
-///
-/// Use the [`query`][Self::query] method to execute queries:
-///
-/// ```rust
-/// use std::sync::Arc;
-///
-/// use qbice::{
-///     Identifiable, StableHash,
-///     config::DefaultConfig,
-///     engine::{Engine, TrackedEngine},
-///     executor::{CyclicError, Executor},
-///     query::Query,
-/// };
-///
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-/// struct MyQuery(u64);
-/// impl Query for MyQuery {
-///     type Value = i64;
-/// }
-///
-/// struct MyExecutor;
-/// impl<C: qbice::config::Config> Executor<MyQuery, C> for MyExecutor {
-///     async fn execute(
-///         &self,
-///         q: &MyQuery,
-///         _: &TrackedEngine<C>,
-///     ) -> Result<i64, CyclicError> {
-///         Ok(q.0 as i64)
-///     }
-/// }
-///
-/// # #[tokio::main]
-/// # async fn main() {
-/// let mut engine = Engine::<DefaultConfig>::new();
-/// engine.register_executor::<MyQuery, _>(Arc::new(MyExecutor));
-///
-/// let engine = Arc::new(engine);
-/// let tracked = engine.tracked();
-///
-/// let result = tracked.query(&MyQuery(42)).await;
-/// assert_eq!(result, Ok(42));
-/// ```
-///
 /// # Thread Safety
 ///
 /// `TrackedEngine` is `Clone`, `Send`, and `Sync`. It can be cheaply cloned
@@ -187,56 +134,6 @@ impl<C: Config> TrackedEngine<C> {
     ///
     /// Returns [`CyclicError`] if a cyclic dependency is detected (the query
     /// directly or indirectly depends on itself).
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use std::sync::Arc;
-    ///
-    /// use qbice::{
-    ///     Identifiable, StableHash,
-    ///     config::DefaultConfig,
-    ///     engine::{Engine, TrackedEngine},
-    ///     executor::{CyclicError, Executor},
-    ///     query::Query,
-    /// };
-    ///
-    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-    /// struct Double(i64);
-    /// impl Query for Double {
-    ///     type Value = i64;
-    /// }
-    ///
-    /// struct DoubleExecutor;
-    /// impl<C: qbice::config::Config> Executor<Double, C> for DoubleExecutor {
-    ///     async fn execute(
-    ///         &self,
-    ///         q: &Double,
-    ///         _: &TrackedEngine<C>,
-    ///     ) -> Result<i64, CyclicError> {
-    ///         Ok(q.0 * 2)
-    ///     }
-    /// }
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// let mut engine = Engine::<DefaultConfig>::new();
-    /// engine.register_executor::<Double, _>(Arc::new(DoubleExecutor));
-    ///
-    /// let engine = Arc::new(engine);
-    /// let tracked = engine.tracked();
-    ///
-    /// // Execute the query
-    /// let result = tracked.query(&Double(21)).await;
-    /// assert_eq!(result, Ok(42));
-    ///
-    /// // Subsequent queries return cached result
-    /// let result2 = tracked.query(&Double(21)).await;
-    /// assert_eq!(result2, Ok(42));
-    /// # }
-    /// ```
-    ///
-    /// [`CyclicError`]: crate::executor::CyclicError
     pub async fn query<Q: Query>(
         &self,
         query: &Q,
@@ -300,20 +197,6 @@ impl<C: Config> Engine<C> {
     /// `TrackedEngine` is cheap to clone and can be safely sent to other
     /// threads. Each clone shares the same underlying engine but has its
     /// own local cache.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use std::sync::Arc;
-    ///
-    /// use qbice::{config::DefaultConfig, engine::Engine};
-    ///
-    /// let engine = Arc::new(Engine::<DefaultConfig>::new());
-    /// let tracked = engine.clone().tracked();
-    ///
-    /// // Can create multiple tracked engines
-    /// let tracked2 = engine.clone().tracked();
-    /// ```
     #[must_use]
     pub fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
         TrackedEngine {

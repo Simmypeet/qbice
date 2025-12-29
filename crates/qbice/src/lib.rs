@@ -17,8 +17,8 @@
 //! - **Type-Safe Queries**: Strongly-typed query definitions with associated
 //!   value types
 //! - **Thread-Safe**: Safely share the engine across multiple threads
-//! - **Dependency Visualization**: Generate interactive HTML visualizations of
-//!   the dependency graph
+//! - **Persistent Storage**: Supports pluggable key-value database backends
+//!   caching query results
 //!
 //! ## Core Concepts
 //!
@@ -42,219 +42,303 @@
 //!
 //! ## Quick Start
 //!
-//! Here's a simple example demonstrating the core concepts:
+//! Let's write a simple query called `SafeDivide` that performs division but
+//! returns `None` if dividing by zero. This is classic example presented from
+//! **adapton** library.
+//!
+//! This shows how to define queries, implement executors, set up the engine,
+//! and execute queries.
 //!
 //! ```rust
-//! use std::sync::Arc;
-//!
-//! use qbice::{
-//!     Identifiable, StableHash,
-//!     config::DefaultConfig,
-//!     engine::{Engine, TrackedEngine},
-//!     executor::{CyclicError, Executor},
-//!     query::Query,
+//! use std::sync::{
+//!     Arc,
+//!     atomic::{AtomicUsize, Ordering},
 //! };
 //!
-//! // Define an input query representing a variable
-//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-//! struct Variable(u64);
+//! use qbice::{
+//!     Config, CyclicError, Decode, DefaultConfig, Encode, Engine, Executor,
+//!     Identifiable, Query, StableHash, TrackedEngine,
+//!     serialize::Plugin,
+//!     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
+//!     storage::kv_database::rocksdb::RocksDB,
+//! };
 //!
+//! // ===== Define the Query Type ===== (The Interface)
+//!
+//! #[derive(
+//!     Debug,
+//!     Clone,
+//!     Copy,
+//!     PartialEq,
+//!     Eq,
+//!     PartialOrd,
+//!     Ord,
+//!     Hash,
+//!     StableHash,
+//!     Identifiable,
+//!     Encode,
+//!     Decode,
+//! )]
+//! pub enum Variable {
+//!     A,
+//!     B,
+//! }
+//!
+//! // implements `Query` trait; the `Variable` becomes the query key/input to
+//! // the computation
 //! impl Query for Variable {
-//!     type Value = i64;
+//!     // the `Value` associated type defines the output type of the query
+//!     type Value = i32;
 //! }
 //!
-//! // Define a computation query
-//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-//! struct Sum {
-//!     a: Variable,
-//!     b: Variable,
+//! #[derive(
+//!     Debug,
+//!     Clone,
+//!     PartialEq,
+//!     Eq,
+//!     PartialOrd,
+//!     Ord,
+//!     Hash,
+//!     StableHash,
+//!     Identifiable,
+//!     Encode,
+//!     Decode,
+//! )]
+//! pub struct Divide {
+//!     pub numerator: Variable,
+//!     pub denominator: Variable,
 //! }
 //!
-//! impl Query for Sum {
-//!     type Value = i64;
+//! // implements `Query` trait; the `Divide` takes two `Variable`s as input
+//! // and produces an `i32` as output
+//! impl Query for Divide {
+//!     type Value = i32;
 //! }
 //!
-//! // Define the executor for Sum queries
-//! struct SumExecutor;
+//! #[derive(
+//!     Debug,
+//!     Clone,
+//!     PartialEq,
+//!     Eq,
+//!     PartialOrd,
+//!     Ord,
+//!     Hash,
+//!     StableHash,
+//!     Identifiable,
+//!     Encode,
+//!     Decode,
+//! )]
+//! pub struct SafeDivide {
+//!     pub numerator: Variable,
+//!     pub denominator: Variable,
+//! }
 //!
-//! impl<C: qbice::config::Config> Executor<Sum, C> for SumExecutor {
+//! // implements `Query` trait; the `SafeDivide` takes two `Variable`s as input
+//! // but produces an `Option<i32>` as output to handle division by zero
+//! impl Query for SafeDivide {
+//!     type Value = Option<i32>;
+//! }
+//!
+//! // ===== Define Executors ===== (The Implementation)
+//!
+//! struct DivideExecutor(AtomicUsize);
+//!
+//! impl<C: Config> Executor<Divide, C> for DivideExecutor {
 //!     async fn execute(
 //!         &self,
-//!         query: &Sum,
+//!         query: &Divide,
 //!         engine: &TrackedEngine<C>,
-//!     ) -> Result<i64, CyclicError> {
-//!         let a = engine.query(&query.a).await?;
-//!         let b = engine.query(&query.b).await?;
-//!         Ok(a + b)
+//!     ) -> Result<i32, CyclicError> {
+//!         // increment the call count
+//!         self.0.fetch_add(1, Ordering::SeqCst);
+//!
+//!         let num = engine.query(&query.numerator).await?;
+//!         let denom = engine.query(&query.denominator).await?;
+//!
+//!         assert!(denom != 0, "denominator should not be zero");
+//!
+//!         Ok(num / denom)
 //!     }
 //! }
 //!
-//! #[tokio::main]
-//! async fn main() {
-//!     // Create and configure the engine
-//!     let mut engine = Engine::<DefaultConfig>::new();
-//!     engine.register_executor::<Sum, _>(Arc::new(SumExecutor));
+//! struct SafeDivideExecutor(AtomicUsize);
 //!
-//!     // Set input values
-//!     {
-//!         let mut session = engine.input_session();
-//!         session.set_input(Variable(0), 10);
-//!         session.set_input(Variable(1), 20);
-//!     }
-//!
-//!     // Query the engine
-//!     let engine = Arc::new(engine);
-//!     let tracked = engine.clone().tracked();
-//!     let result =
-//!         tracked.query(&Sum { a: Variable(0), b: Variable(1) }).await;
-//!
-//!     assert_eq!(result, Ok(30));
-//! }
-//! ```
-//!
-//! ## Incremental Updates
-//!
-//! QBICE shines when inputs change. After modifying inputs, only the affected
-//! queries are recomputed:
-//!
-//! ```rust
-//! # use std::sync::Arc;
-//! # use qbice::{
-//! #     Identifiable, StableHash,
-//! #     config::DefaultConfig,
-//! #     engine::{Engine, TrackedEngine},
-//! #     executor::{CyclicError, Executor},
-//! #     query::Query,
-//! # };
-//! #
-//! # #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-//! # struct Variable(u64);
-//! # impl Query for Variable { type Value = i64; }
-//! #
-//! # #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-//! # struct Sum { a: Variable, b: Variable }
-//! # impl Query for Sum { type Value = i64; }
-//! #
-//! # struct SumExecutor;
-//! # impl<C: qbice::config::Config> Executor<Sum, C> for SumExecutor {
-//! #     async fn execute(&self, query: &Sum, engine: &TrackedEngine<C>) -> Result<i64, CyclicError> {
-//! #         Ok(engine.query(&query.a).await? + engine.query(&query.b).await?)
-//! #     }
-//! # }
-//! #
-//! # #[tokio::main]
-//! # async fn main() {
-//! let mut engine = Engine::<DefaultConfig>::new();
-//! engine.register_executor::<Sum, _>(Arc::new(SumExecutor));
-//!
-//! // Initial inputs
-//! {
-//!     let mut session = engine.input_session();
-//!     session.set_input(Variable(0), 100);
-//!     session.set_input(Variable(1), 200);
-//! }
-//!
-//! let mut engine = Arc::new(engine);
-//! let tracked = engine.clone().tracked();
-//! let query = Sum { a: Variable(0), b: Variable(1) };
-//!
-//! assert_eq!(tracked.query(&query).await, Ok(300));
-//! drop(tracked); // Release the tracked engine
-//!
-//! // Update an input - only affected queries will recompute
-//! {
-//!     let engine_mut = Arc::get_mut(&mut engine).unwrap();
-//!     let mut session = engine_mut.input_session();
-//!     session.set_input(Variable(0), 150); // Changed from 100 to 150
-//! }
-//!
-//! let tracked = engine.tracked();
-//! assert_eq!(tracked.query(&query).await, Ok(350)); // Sum is recomputed
-//! # }
-//! ```
-//!
-//! ## Handling Cycles
-//!
-//! QBICE automatically detects cyclic dependencies and returns a
-//! [`CyclicError`]. Cycles occur when Query A depends on Query B, which
-//! depends on Query A (directly or transitively).
-//!
-//! For queries that intentionally form cycles (e.g., fixed-point computations),
-//! you can implement [`Executor::scc_value`] to provide a default value:
-//!
-//! ```rust
-//! # use std::sync::Arc;
-//! # use qbice::{
-//! #     Identifiable, StableHash,
-//! #     config::DefaultConfig,
-//! #     engine::{Engine, TrackedEngine},
-//! #     executor::{CyclicError, Executor},
-//! #     query::Query,
-//! # };
-//! #
-//! // A query that may form cycles in a fixed-point computation
-//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-//! struct Reachable { from: u64, to: u64 }
-//!
-//! impl Query for Reachable {
-//!     type Value = bool;
-//! }
-//!
-//! struct ReachableExecutor;
-//!
-//! impl<C: qbice::config::Config> Executor<Reachable, C> for ReachableExecutor {
+//! impl<C: Config> Executor<SafeDivide, C> for SafeDivideExecutor {
 //!     async fn execute(
 //!         &self,
-//!         query: &Reachable,
+//!         query: &SafeDivide,
 //!         engine: &TrackedEngine<C>,
-//!     ) -> Result<bool, CyclicError> {
-//!         // Base case: same node
-//!         if query.from == query.to {
-//!             return Ok(true);
+//!     ) -> Result<Option<i32>, CyclicError> {
+//!         // increment the call count
+//!         self.0.fetch_add(1, Ordering::SeqCst);
+//!
+//!         let denom = engine.query(&query.denominator).await?;
+//!         if denom == 0 {
+//!             return Ok(None);
 //!         }
-//!         // Would check edges here...
-//!         Ok(false)
-//!     }
 //!
-//!     // Provide a default value for cyclic queries
-//!     fn scc_value() -> bool {
-//!         false // Not reachable by default
+//!         Ok(Some(
+//!             engine
+//!                 .query(&Divide {
+//!                     numerator: query.numerator,
+//!                     denominator: query.denominator,
+//!                 })
+//!                 .await?,
+//!         ))
 //!     }
 //! }
 //!
+//! // putting it all together
 //! #[tokio::main]
-//! async fn main() {
-//!     let mut engine = Engine::<DefaultConfig>::new();
-//!     engine.register_executor::<Reachable, _>(Arc::new(ReachableExecutor));
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // create the temporary directory for the database
+//!     let temp_dir = tempfile::tempdir()?;
 //!
-//!     let engine = Arc::new(engine);
-//!     let tracked = engine.tracked();
+//!     let divide_executor = Arc::new(DivideExecutor(AtomicUsize::new(0)));
+//!     let safe_divide_executor =
+//!         Arc::new(SafeDivideExecutor(AtomicUsize::new(0)));
 //!
-//!     let result = tracked.query(&Reachable { from: 1, to: 1 }).await;
-//!     assert_eq!(result, Ok(true));
+//!     {
+//!         // create the engine
+//!         let mut engine = Engine::<DefaultConfig>::new_with(
+//!             Plugin::default(),
+//!             RocksDB::factory(temp_dir.path()),
+//!             SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+//!         )?;
+//!
+//!         // register executors
+//!         engine.register_executor(divide_executor.clone());
+//!         engine.register_executor(safe_divide_executor.clone());
+//!
+//!         // create an input session to set input values
+//!         {
+//!             let mut input_session = engine.input_session();
+//!             input_session.set_input(Variable::A, 42);
+//!             input_session.set_input(Variable::B, 2);
+//!         } // once the input session is dropped, the values are set
+//!
+//!         // create a tracked engine for querying
+//!         let tracked_engine = Arc::new(engine).tracked();
+//!
+//!         // perform a safe division
+//!         let result = tracked_engine
+//!             .query(&SafeDivide {
+//!                 numerator: Variable::A,
+//!                 denominator: Variable::B,
+//!             })
+//!             .await?;
+//!
+//!         assert_eq!(result, Some(21));
+//!
+//!         // both executors should have been called exactly once
+//!         assert_eq!(divide_executor.0.load(Ordering::SeqCst), 1);
+//!         assert_eq!(safe_divide_executor.0.load(Ordering::SeqCst), 1);
+//!     }
+//!
+//!     // the engine is dropped here, but the database persists
+//!
+//!     {
+//!         // create a new engine instance pointing to the same database
+//!         let mut engine = Engine::<DefaultConfig>::new_with(
+//!             Plugin::default(),
+//!             RocksDB::factory(temp_dir.path()),
+//!             SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+//!         )?;
+//!
+//!         // everytime the engine is created, executors must be re-registered
+//!         engine.register_executor(divide_executor.clone());
+//!         engine.register_executor(safe_divide_executor.clone());
+//!
+//!         // wrap in Arc for shared ownership
+//!         let mut engine = Arc::new(engine);
+//!
+//!         // create a tracked engine for querying
+//!         let tracked_engine = engine.clone().tracked();
+//!
+//!         // perform a safe division again; this time the data is loaded from
+//!         // persistent storage
+//!         let result = tracked_engine
+//!             .query(&SafeDivide {
+//!                 numerator: Variable::A,
+//!                 denominator: Variable::B,
+//!             })
+//!             .await?;
+//!
+//!         assert_eq!(result, Some(21));
+//!
+//!         // no additional executor calls should have been made
+//!         assert_eq!(divide_executor.0.load(Ordering::SeqCst), 1);
+//!         assert_eq!(safe_divide_executor.0.load(Ordering::SeqCst), 1);
+//!
+//!         // drop the tracked engine to release the Arc reference
+//!         drop(tracked_engine);
+//!
+//!         // let's test division by zero
+//!         {
+//!             let mut input_session = Arc::get_mut(&mut engine)
+//!                 .expect("no other Arc references exist")
+//!                 .input_session();
+//!
+//!             input_session.set_input(Variable::B, 0);
+//!         } // once the input session is dropped, the value is set
+//!
+//!         // create a new tracked engine for querying
+//!         let tracked_engine = engine.clone().tracked();
+//!
+//!         let result = tracked_engine
+//!             .query(&SafeDivide {
+//!                 numerator: Variable::A,
+//!                 denominator: Variable::B,
+//!             })
+//!             .await?;
+//!
+//!         assert_eq!(result, None);
+//!
+//!         // the divide executor should not have been called again
+//!         assert_eq!(divide_executor.0.load(Ordering::SeqCst), 1);
+//!         assert_eq!(safe_divide_executor.0.load(Ordering::SeqCst), 2);
+//!     }
+//!
+//!     // again, the engine is dropped here, but the database persists
+//!
+//!     {
+//!         // create a new engine instance pointing to the same database
+//!         let mut engine = Engine::<DefaultConfig>::new_with(
+//!             Plugin::default(),
+//!             RocksDB::factory(temp_dir.path()),
+//!             SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+//!         )?;
+//!
+//!         // everytime the engine is created, executors must be re-registered
+//!         engine.register_executor(divide_executor.clone());
+//!         engine.register_executor(safe_divide_executor.clone());
+//!
+//!         // let's restore the denominator to 2
+//!         {
+//!             let mut input_session = engine.input_session();
+//!             input_session.set_input(Variable::B, 2);
+//!         } // once the input session is dropped, the value is set
+//!
+//!         // wrap in Arc for shared ownership
+//!         let tracked_engine = Arc::new(engine).tracked();
+//!
+//!         let result = tracked_engine
+//!             .query(&SafeDivide {
+//!                 numerator: Variable::A,
+//!                 denominator: Variable::B,
+//!             })
+//!             .await?;
+//!
+//!         assert_eq!(result, Some(21));
+//!
+//!         // the divide executor should not have been called again
+//!         assert_eq!(divide_executor.0.load(Ordering::SeqCst), 1);
+//!         assert_eq!(safe_divide_executor.0.load(Ordering::SeqCst), 3);
+//!     }
+//!
+//!     Ok(())
 //! }
 //! ```
-//!
-//! [`Executor::scc_value`]: executor::Executor::scc_value
-//!
-//! ## Modules
-//!
-//! - [`config`]: Configuration traits and default implementations
-//! - [`engine`]: The core engine and tracked engine types
-//! - [`executor`]: Executor trait and registry for query execution
-//! - [`query`]: Query trait and related types
-//!
-//! ## Re-exports
-//!
-//! - [`StableHash`]: Derive macro for stable hashing (required for [`Query`])
-//! - [`Identifiable`]: Derive macro for stable type identification (required
-//!   for [`Query`])
-//!
-//! [`Query`]: query::Query
-//! [`Executor`]: executor::Executor
-//! [`Engine`]: engine::Engine
-//! [`TrackedEngine`]: engine::TrackedEngine
-//! [`CyclicError`]: executor::CyclicError
 
 extern crate self as qbice;
 
@@ -263,8 +347,9 @@ pub mod engine;
 pub mod executor;
 pub mod query;
 
+pub use config::{Config, DefaultConfig};
 pub use engine::{Engine, computation_graph::TrackedEngine};
-pub use executor::Executor;
+pub use executor::{CyclicError, Executor};
 // re-export companion crates
 pub use qbice_serialize as serialize;
 pub use qbice_serialize::{Decode, Encode};

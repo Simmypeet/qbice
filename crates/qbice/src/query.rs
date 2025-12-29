@@ -14,23 +14,6 @@
 //!    `Clone`, `PartialEq`, `Eq`, and `Hash`
 //! 3. Implement the [`Query`] trait, specifying the output `Value` type
 //!
-//! ## Example
-//!
-//! ```rust
-//! use qbice::{Identifiable, StableHash, query::Query};
-//!
-//! /// A query that computes the sum of two values.
-//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-//! struct Add {
-//!     left: i64,
-//!     right: i64,
-//! }
-//!
-//! impl Query for Add {
-//!     type Value = i64;
-//! }
-//! ```
-//!
 //! # Query Identification
 //!
 //! Each query instance is uniquely identified by a [`QueryID`], which combines:
@@ -52,9 +35,6 @@
 //!
 //! Most queries should use `Normal`. Advanced users can leverage `Projection`
 //! and `Firewall` for performance optimization in complex dependency graphs.
-//!
-//! [`Identifiable`]: crate::Identifiable
-//! [`StableHash`]: crate::StableHash
 
 use std::{any::Any, fmt::Debug, hash::Hash};
 
@@ -68,7 +48,7 @@ use crate::{config::Config, engine::InitialSeed};
 ///
 /// A type implementing [`Query`] represents a query input (key) that is
 /// associated with a specific output value type. The query itself only defines
-/// the *what* - the actual computation is provided by an [`Executor`].
+/// the *what* - the actual computation is provided by an [`crate::Executor`].
 ///
 /// # Required Traits
 ///
@@ -84,9 +64,19 @@ use crate::{config::Config, engine::InitialSeed};
 /// Most of these can be derived automatically:
 ///
 /// ```rust
-/// use qbice::{Identifiable, StableHash, query::Query};
+/// use qbice::{Decode, Encode, Identifiable, Query, StableHash};
 ///
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+/// #[derive(
+///     Debug,
+///     Clone,
+///     PartialEq,
+///     Eq,
+///     Hash,
+///     StableHash,
+///     Identifiable,
+///     Encode,
+///     Decode,
+/// )]
 /// struct MyQuery {
 ///     id: u64,
 ///     name: String,
@@ -125,64 +115,6 @@ use crate::{config::Config, engine::InitialSeed};
 /// | `Vec<T>` | `Arc<[T]>` |
 /// | `HashMap<K, V>` | `Arc<HashMap<K, V>>` |
 /// | Large structs | `Arc<T>` |
-///
-/// ## Example: Using Shared Types
-///
-/// ```rust
-/// use std::sync::Arc;
-///
-/// use qbice::{Identifiable, StableHash, query::Query};
-///
-/// /// A query with cheaply cloneable fields.
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-/// struct ParseFile {
-///     // Arc<str> clones in O(1) vs String's O(n)
-///     path: Arc<str>,
-/// }
-///
-/// impl Query for ParseFile {
-///     // Arc<[T]> clones in O(1) vs Vec<T>'s O(n)
-///     type Value = Arc<[u8]>;
-/// }
-/// ```
-///
-/// # Example: Input Query
-///
-/// Input queries are simple keys whose values are set directly:
-///
-/// ```rust
-/// use qbice::{Identifiable, StableHash, query::Query};
-///
-/// /// Represents a configuration variable by name.
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-/// struct ConfigVar(String);
-///
-/// impl Query for ConfigVar {
-///     type Value = String;
-/// }
-/// ```
-///
-/// # Example: Computed Query
-///
-/// Computed queries derive their values from other queries:
-///
-/// ```rust
-/// use qbice::{Identifiable, StableHash, query::Query};
-///
-/// /// Computes the length of a file's contents.
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-/// struct FileLength {
-///     path: String,
-/// }
-///
-/// impl Query for FileLength {
-///     type Value = usize;
-/// }
-/// ```
-///
-/// [`Executor`]: crate::executor::Executor
-/// [`StableHash`]: crate::StableHash
-/// [`Identifiable`]: crate::Identifiable
 pub trait Query:
     StableHash
     + Identifiable
@@ -244,44 +176,6 @@ pub trait Query:
 /// - Isolating volatile inputs from stable computations
 /// - Creating natural boundaries in the dependency graph
 /// - Optimizing rebuild times in large systems
-///
-/// # Example
-///
-/// ```rust
-/// use qbice::{
-///     Identifiable, StableHash,
-///     config::Config,
-///     engine::TrackedEngine,
-///     executor::{CyclicError, Executor},
-///     query::{ExecutionStyle, Query},
-/// };
-///
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-/// struct ExpensiveQuery(u64);
-///
-/// impl Query for ExpensiveQuery {
-///     type Value = Vec<u8>;
-/// }
-///
-/// struct ExpensiveExecutor;
-///
-/// impl<C: Config> Executor<ExpensiveQuery, C> for ExpensiveExecutor {
-///     async fn execute(
-///         &self,
-///         query: &ExpensiveQuery,
-///         engine: &TrackedEngine<C>,
-///     ) -> Result<Vec<u8>, CyclicError> {
-///         // Expensive computation here
-///         Ok(vec![query.0 as u8])
-///     }
-///
-///     fn execution_style() -> ExecutionStyle {
-///         // Mark this as a firewall to prevent unnecessary recomputation
-///         // of downstream queries when the output hasn't changed
-///         ExecutionStyle::Firewall
-///     }
-/// }
-/// ```
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]

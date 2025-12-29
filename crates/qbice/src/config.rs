@@ -2,29 +2,6 @@
 //!
 //! This module provides the [`Config`] trait for customizing engine parameters
 //! and the [`DefaultConfig`] implementation for typical use cases.
-//!
-//! # Custom Configuration
-//!
-//! You can create custom configurations to tune memory allocation behavior:
-//!
-//! ```rust
-//! use std::fmt::Debug;
-//!
-//! use qbice::config::Config;
-//!
-//! /// A custom configuration with larger inline storage.
-//! #[derive(Debug, Default)]
-//! struct LargeStorageConfig;
-//!
-//! impl Config for LargeStorageConfig {
-//!     // 64 bytes of inline storage for query keys and values
-//!     type Storage = [u8; 64];
-//! }
-//! ```
-//!
-//! The `Storage` type determines how much data can be stored inline before
-//! heap allocation is required. Larger storage can reduce allocations for
-//! queries with bigger keys or values, but increases memory usage per query.
 
 use std::{fmt::Debug, hash::BuildHasher};
 
@@ -37,25 +14,6 @@ use qbice_storage::kv_database::{KvDatabase, rocksdb::RocksDB};
 
 /// Configuration trait for QBICE engine, allowing customization of various
 /// parameters.
-///
-/// Implement this trait to customize the engine's behavior. The main
-/// configuration point is the `Storage` associated type, which controls
-/// inline storage size for query keys and values.
-///
-/// # Example
-///
-/// ```rust
-/// use std::fmt::Debug;
-///
-/// use qbice::config::Config;
-///
-/// #[derive(Debug, Default)]
-/// struct MyConfig;
-///
-/// impl Config for MyConfig {
-///     type Storage = [u8; 32]; // 32 bytes of inline storage
-/// }
-/// ```
 pub trait Config:
     Identifiable + Default + Debug + Send + Sync + 'static
 {
@@ -97,19 +55,10 @@ pub trait Config:
     }
 }
 
-/// The default configuration for QBICE.
+/// The default configuration for QBICE engine, suitable for most use cases.
 ///
-/// Uses 16 bytes of inline storage, which is suitable for most common
-/// query types like integers, small structs, or tuple-based keys.
-///
-/// # Example
-///
-/// ```rust
-/// use qbice::{config::DefaultConfig, engine::Engine};
-///
-/// // Create an engine with default configuration
-/// let engine = Engine::<DefaultConfig>::new();
-/// ```
+/// It uses [`RocksDB`] as the database backend and use [`Sip128Hasher`] for
+/// stable hashing.
 #[derive(
     Debug,
     Clone,

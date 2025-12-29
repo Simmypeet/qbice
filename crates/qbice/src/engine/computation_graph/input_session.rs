@@ -45,30 +45,6 @@ impl<C: Config> Engine<C> {
     /// The returned session allows you to set values for input queries. When
     /// the session is dropped, dirty propagation is triggered for any changed
     /// inputs.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use qbice::{
-    ///     Identifiable, StableHash, config::DefaultConfig, engine::Engine,
-    ///     query::Query,
-    /// };
-    ///
-    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
-    /// struct Input(u64);
-    /// impl Query for Input {
-    ///     type Value = i64;
-    /// }
-    ///
-    /// let mut engine = Engine::<DefaultConfig>::new();
-    ///
-    /// // Create a session and set inputs
-    /// {
-    ///     let mut session = engine.input_session();
-    ///     session.set_input(Input(0), 42);
-    ///     session.set_input(Input(1), 100);
-    /// }
-    /// ```
     #[must_use]
     pub fn input_session(&mut self) -> InputSession<'_, C> {
         InputSession {
@@ -81,6 +57,33 @@ impl<C: Config> Engine<C> {
 }
 
 impl<C: Config> InputSession<'_, C> {
+    /// Sets the value for an input query.
+    ///
+    /// This method updates the value associated with the given query. If the
+    /// new value differs from the existing value (based on fingerprint
+    /// comparison), the query and its dependents will be marked as dirty for
+    /// recomputation.
+    ///
+    /// # Behavior
+    ///
+    /// - **New queries**: If the query has never been set before, a new entry
+    ///   is created
+    /// - **Changed values**: If the value fingerprint differs from the stored
+    ///   value, dirty propagation is scheduled
+    /// - **Timestamp management**: The first change in a session increments the
+    ///   global timestamp
+    ///
+    /// All dirty propagation happens when the `InputSession` is dropped, not
+    /// when this method is called.
+    ///
+    /// # Type Parameters
+    ///
+    /// - `Q`: The query type, must implement [`Query`]
+    ///
+    /// # Arguments
+    ///
+    /// - `query`: The input query key
+    /// - `new_value`: The new value to associate with this query
     pub fn set_input<Q: Query>(&mut self, query: Q, new_value: Q::Value) {
         let query_hash = self.engine.hash(&query);
         let query_id = QueryID::new::<Q>(query_hash);
