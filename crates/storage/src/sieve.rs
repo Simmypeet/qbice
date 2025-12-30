@@ -27,7 +27,7 @@
 use core::fmt;
 use std::{
     borrow::Borrow,
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet},
     fmt::Debug,
     hash::{BuildHasher, BuildHasherDefault, Hash},
     option::Option,
@@ -35,9 +35,7 @@ use std::{
 };
 
 use dashmap::DashSet;
-use parking_lot::{
-    Condvar, MappedRwLockReadGuard, Mutex, RwLockReadGuard, RwLockWriteGuard,
-};
+use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 
 use crate::{
     kv_database::{Column, KeyOfSet, KeyOfSetMode, KvDatabase, Normal},
@@ -121,31 +119,6 @@ impl<T: Eq + Hash, S: BuildHasher + Clone> RemoveElementFromSet
     }
 }
 
-#[derive(Clone)]
-struct Notify(Arc<(Condvar, Mutex<bool>)>);
-
-impl Notify {
-    pub fn new() -> Self { Self(Arc::new((Condvar::new(), Mutex::new(false)))) }
-
-    pub fn notify_waiters(&self) {
-        let (condvar, lock) = &*self.0;
-
-        let mut notified = lock.lock();
-        *notified = true;
-        condvar.notify_all();
-    }
-
-    pub fn wait(&self) {
-        let (condvar, lock) = &*self.0;
-
-        let mut notified = lock.lock();
-
-        while !*notified {
-            condvar.wait(&mut notified);
-        }
-    }
-}
-
 /// A sharded cache implementation using the SIEVE eviction algorithm.
 ///
 /// This cache provides concurrent access to cached values with lazy loading
@@ -174,8 +147,6 @@ where
     hasher_builder: S,
 
     backing_db: Arc<DB>,
-
-    in_flight: Mutex<HashMap<C::Key, Arc<Notify>>>,
 }
 
 impl<C: Column, DB, S> Debug for Sieve<C, DB, S>
@@ -197,31 +168,6 @@ where
         }
 
         map.finish_non_exhaustive()
-    }
-}
-
-struct FetchingGuard<'k, 'x, K>
-where
-    K: Eq + Hash,
-{
-    in_flight: &'x Mutex<HashMap<K, Arc<Notify>>>,
-    key: &'k K,
-    defused: bool,
-}
-
-impl<K: Eq + Hash> Drop for FetchingGuard<'_, '_, K> {
-    fn drop(&mut self) {
-        if self.defused {
-            return;
-        }
-
-        let mut in_flight = self.in_flight.lock();
-
-        let Some(notify) = in_flight.remove(self.key) else {
-            return;
-        };
-
-        notify.notify_waiters();
     }
 }
 
@@ -259,8 +205,6 @@ where
             }),
             hasher_builder,
             backing_db,
-
-            in_flight: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -319,30 +263,34 @@ where
         C: Column<Mode = Normal>,
         C::Mode: BackingStorage<C::Value, Value = Option<C::Value>>,
     {
-        self.get_loop(
-            key,
-            |shard_index| {
-                let lock = self.shards.read_shard(shard_index);
+        let shard_index = self.shard_index(key);
+        loop {
+            let read_lock = self.shards.read_shard(shard_index);
 
-                RwLockReadGuard::try_map(lock, |x| match x.get(key) {
+            if let Ok(guard) =
+                RwLockReadGuard::try_map(read_lock, |x| match x.get(key) {
                     Retrieve::Hit(entry) => Some(entry),
                     Retrieve::Miss => None,
                 })
-                .map_or_else(
-                    |_| None,
-                    |lock| {
-                        Some(
-                            MappedRwLockReadGuard::try_map(
-                                lock,
-                                Option::as_ref,
-                            )
-                            .ok(),
-                        )
-                    },
-                )
-            },
-            |_| self.backing_db.get::<C>(key),
-        )
+            {
+                return MappedRwLockReadGuard::try_map(guard, |entry| {
+                    entry.as_ref()
+                })
+                .ok();
+            }
+
+            let mut write_lock = self.shards.write_shard(shard_index);
+
+            if let Retrieve::Hit(_) = write_lock.get(key) {
+                // another thread already filled the cache while we were
+                // acquiring the write lock, retry read
+                continue;
+            }
+
+            let db_value = self.backing_db.get::<C>(key);
+
+            write_lock.insert(key.clone(), db_value);
+        }
     }
 
     /// Retrieves a set value from the cache, fetching from the backing database
@@ -391,19 +339,31 @@ where
         C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
         C::Value: FromIterator<<<C as Column>::Mode as KeyOfSetMode>::Value>,
     {
-        self.get_loop(
-            key,
-            |index| {
-                let lock = self.shards.read_shard(index);
+        let shard_index = self.shard_index(key);
+        loop {
+            let read_lock = self.shards.read_shard(shard_index);
 
-                RwLockReadGuard::try_map(lock, |x| match x.get(key) {
+            if let Ok(guard) =
+                RwLockReadGuard::try_map(read_lock, |x| match x.get(key) {
                     Retrieve::Hit(entry) => Some(entry),
                     Retrieve::Miss => None,
                 })
-                .ok()
-            },
-            |_| self.backing_db.collect_key_of_set::<C>(key),
-        )
+            {
+                return MappedRwLockReadGuard::map(guard, |entry| entry);
+            }
+
+            let mut write_lock = self.shards.write_shard(shard_index);
+
+            if let Retrieve::Hit(_) = write_lock.get(key) {
+                // another thread already filled the cache while we were
+                // acquiring the write lock, retry read
+                continue;
+            }
+
+            let db_value = self.backing_db.collect_key_of_set::<C>(key);
+
+            write_lock.insert(key.clone(), db_value);
+        }
     }
 
     /// Inserts or updates a value in the cache for the given key.
@@ -445,29 +405,11 @@ where
         C: Column<Mode = Normal>,
         C::Mode: BackingStorage<C::Value, Value = Option<C::Value>>,
     {
-        let mut in_flight = self.in_flight.lock();
+        let shard_index = self.shard_index(&key);
 
-        match in_flight.entry(key.clone()) {
-            // steal the fetching lock to perform the insertion
-            Entry::Occupied(occupied_entry) => {
-                let notify = occupied_entry.remove();
+        let mut write_lock = self.shards.write_shard(shard_index);
 
-                {
-                    let shard_index = self.shard_index(&key);
-                    let mut lock = self.shards.write_shard(shard_index);
-                    lock.insert(key, value);
-                }
-
-                notify.notify_waiters();
-            }
-
-            // do nothing with the inflight, but has to hold the lock
-            Entry::Vacant(_) => {
-                let shard_index = self.shard_index(&key);
-                let mut lock = self.shards.write_shard(shard_index);
-                lock.insert(key, value);
-            }
-        }
+        write_lock.insert(key, value);
     }
 
     /// Inserts elements into a set stored in the cache for the given key.
@@ -525,21 +467,13 @@ where
             + Extend<<<C as Column>::Mode as KeyOfSetMode>::Value>
             + Default,
     {
-        let mut write_lock = self.get_loop(
-            key,
-            |index| {
-                let lock = self.shards.write_shard(index);
+        let shard_index = self.shard_index(key);
 
-                RwLockWriteGuard::try_map(lock, |x| match x.get_mut(key) {
-                    RetrieveMut::Hit(entry) => Some(entry),
-                    RetrieveMut::Miss => None,
-                })
-                .ok()
-            },
-            |_| self.backing_db.collect_key_of_set::<C>(key),
-        );
+        let mut write_lock = self.shards.write_shard(shard_index);
 
-        write_lock.extend(element);
+        if let RetrieveMut::Hit(entry) = write_lock.get_mut(key) {
+            entry.extend(element);
+        }
     }
 
     /// Removes an element from a set stored in the cache for the given key.
@@ -593,92 +527,12 @@ where
             + FromIterator<<<C as Column>::Mode as KeyOfSetMode>::Value>,
         <C::Mode as KeyOfSetMode>::Value: Borrow<Q>,
     {
-        let mut write_lock = self.get_loop(
-            key,
-            |index| {
-                let lock = self.shards.write_shard(index);
-
-                RwLockWriteGuard::try_map(lock, |x| match x.get_mut(key) {
-                    RetrieveMut::Hit(entry) => Some(entry),
-                    RetrieveMut::Miss => None,
-                })
-                .ok()
-            },
-            |_| self.backing_db.collect_key_of_set::<C>(key),
-        );
-
-        write_lock.remove_element(element);
-    }
-
-    fn get_loop<T>(
-        &self,
-        key: &C::Key,
-        mut fast_path: impl FnMut(usize) -> Option<T>,
-        mut slow_path: impl FnMut(
-            usize,
-        )
-            -> <C::Mode as BackingStorage<C::Value>>::Value,
-    ) -> T {
         let shard_index = self.shard_index(key);
 
-        loop {
-            if let Some(fast_path_result) = fast_path(shard_index) {
-                return fast_path_result;
-            }
+        let mut write_lock = self.shards.write_shard(shard_index);
 
-            let Some(mut fetching_guard) = self.fetching_lock(key) else {
-                // some thread has already fetched the value, retry
-                continue;
-            };
-
-            let value = slow_path(shard_index);
-
-            // hold the lock while inserting to avoid races
-            {
-                let mut in_flight_lock = self.in_flight.lock();
-
-                // defuse the guard
-                fetching_guard.defused = true;
-
-                let Some(notify) = in_flight_lock.remove(key) else {
-                    // the `put` operation has overwritten this entry, discard
-                    continue;
-                };
-
-                // insert into the cache
-                let mut lock = self.shards.write_shard(shard_index);
-                lock.insert(key.clone(), value);
-
-                notify.notify_waiters();
-            }
-
-            // retry again to get the read lock
-        }
-    }
-
-    #[allow(clippy::await_holding_lock)] // FALSE POSITIVE
-    fn fetching_lock<'k>(
-        &self,
-        key: &'k C::Key,
-    ) -> Option<FetchingGuard<'k, '_, C::Key>> {
-        let mut in_flight = self.in_flight.lock();
-
-        if let Some(notify) = in_flight.get(key) {
-            let notified = notify.clone();
-            drop(in_flight);
-
-            notified.wait();
-
-            None
-        } else {
-            let notify = Arc::new(Notify::new());
-            in_flight.insert(key.clone(), notify);
-
-            Some(FetchingGuard {
-                key,
-                defused: false,
-                in_flight: &self.in_flight,
-            })
+        if let RetrieveMut::Hit(entry) = write_lock.get_mut(key) {
+            entry.remove_element(element);
         }
     }
 }
