@@ -223,10 +223,9 @@ impl<C: Config> Engine<C> {
                         current_id.stable_type_id().as_u128()
                     ),
                     format!("UnknownDigested({:#X})", current_id.hash_128()),
-                    format!(
-                        "UnknownResult (please register the query for more \
-                         information)"
-                    ),
+                    "UnknownResult (please register the query for more \
+                     information)"
+                        .to_string(),
                 )
             };
 
