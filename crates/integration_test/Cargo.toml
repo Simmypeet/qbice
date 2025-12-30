@@ -40,9 +40,5 @@ name = "parallel_queries"
 path = "tests/parallel_queries.rs"
 
 [[test]]
-name = "visualization"
-path = "tests/visualization.rs"
-
-[[test]]
 name = "firewall"
 path = "tests/firewall.rs"

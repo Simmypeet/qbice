@@ -418,6 +418,10 @@ async fn multiple_projections_single_firewall() {
     // since the firewall is dirty (due to SlowSquare(0) -> Variable(0) being
     // dirty)
     {
+        let _ = Arc::get_mut(&mut engine)
+            .unwrap()
+            .visualize_html(&DoubleSquare(Variable(1)), "graph.html");
+
         let tracked = engine.clone().tracked();
         let v1 = tracked.query(&DoubleSquare(Variable(1))).await.unwrap();
         assert_eq!(v1, Some(8));
