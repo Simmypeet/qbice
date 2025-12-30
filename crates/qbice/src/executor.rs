@@ -20,7 +20,7 @@ use qbice_stable_type_id::StableTypeID;
 use crate::{
     Engine, TrackedEngine,
     config::Config,
-    engine::computation_graph::CallerInformation,
+    engine::computation_graph::{CallerInformation, QueryDebug},
     query::{ExecutionStyle, Query},
 };
 
@@ -199,6 +199,11 @@ type ObtainSccValueFn = for<'a> fn(buffer: &'a mut dyn Any);
 
 type ObtainExecutionStyleFn = fn() -> ExecutionStyle;
 
+type DebugQueryFn<C> = for<'a> fn(
+    engine: &'a Engine<C>,
+    query_input_hash_128: &'a Compact128,
+) -> Option<QueryDebug>;
+
 fn obtain_scc_value<
     C: Config,
     E: Executor<K, C> + 'static,
@@ -226,6 +231,7 @@ fn obtain_execution_style<
 pub(crate) struct Entry<C: Config> {
     executor: Arc<dyn Any + Send + Sync>,
     invoke_executor: InvokeExecutorFn<C>,
+    query_debug: DebugQueryFn<C>,
     repair_query: RepairQueryFn<C>,
     obtain_scc_value: ObtainSccValueFn,
     obtain_execution_style: ObtainExecutionStyleFn,
@@ -238,6 +244,7 @@ impl<C: Config> Entry<C> {
         Self {
             executor,
             invoke_executor: invoke_executor::<C, E, Q>,
+            query_debug: Engine::<C>::get_query_debug::<Q>,
             repair_query: Engine::<C>::repair_query_from_query_id::<Q>,
             obtain_scc_value: obtain_scc_value::<C, E, Q>,
             obtain_execution_style: obtain_execution_style::<C, E, Q>,
@@ -282,6 +289,14 @@ impl<C: Config> Entry<C> {
 
     pub fn obtain_execution_style(&self) -> ExecutionStyle {
         (self.obtain_execution_style)()
+    }
+
+    pub fn get_query_debug(
+        &self,
+        engine: &Engine<C>,
+        query_input_hash_128: &Compact128,
+    ) -> Option<QueryDebug> {
+        (self.query_debug)(engine, query_input_hash_128)
     }
 }
 
@@ -328,6 +343,17 @@ impl<C: Config> Registry<C> {
         self.executors_by_key_type_id.get(type_id).unwrap_or_else(|| {
             panic!("Failed to find executor for query type id: {type_id:?}")
         })
+    }
+
+    /// Retrieves the executor entry for the given query type ID.
+    ///
+    /// Returns `None` if no executor is registered for the query type.
+    #[must_use]
+    pub(crate) fn try_get_executor_entry_by_type_id(
+        &self,
+        type_id: &StableTypeID,
+    ) -> Option<&Entry<C>> {
+        self.executors_by_key_type_id.get(type_id)
     }
 
     /// Retrieves the executor entry for the given query type.

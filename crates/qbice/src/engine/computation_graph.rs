@@ -3,6 +3,7 @@ use std::sync::Arc;
 // re-export
 pub(crate) use caller::CallerInformation;
 use dashmap::{DashMap, DashSet};
+pub(crate) use persist::query_store::QueryDebug;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHasher};
 
@@ -30,6 +31,7 @@ mod slow_path;
 mod statistic;
 mod tfc_achetype;
 mod timestamp;
+mod visualization;
 
 type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
     Col,

@@ -14,7 +14,7 @@ use qbice_storage::{
 };
 use rayon::iter::IntoParallelRefIterator;
 
-mod query_store;
+pub(super) mod query_store;
 
 use crate::{
     Engine, ExecutionStyle, Query,

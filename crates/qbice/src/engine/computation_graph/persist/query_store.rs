@@ -4,15 +4,17 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashMap;
+use dashmap::{DashMap, Entry, mapref::one::MappedRef};
 use qbice_serialize::{Decode, Encode, Plugin, session::Session};
 use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::Identifiable;
 use qbice_storage::kv_database::{Column, Normal};
 
-use crate::{Query, config::Config, engine::computation_graph::Sieve};
+use crate::{Engine, Query, config::Config, engine::computation_graph::Sieve};
+
 pub struct QueryStore<C: Config> {
     map: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
+
     total_capacity: usize,
     shard_amount: usize,
     backing_db: Arc<C::Database>,
@@ -33,6 +35,7 @@ where
     type Key = Compact128;
 
     type Value = QueryEntry<Q>;
+
     type Mode = Normal;
 }
 
@@ -75,6 +78,13 @@ impl<Q: Query> QueryEntry<Q> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryDebug {
+    pub r#type: &'static str,
+    pub input: String,
+    pub output: String,
+}
+
 impl<C: Config> QueryStore<C> {
     pub(super) fn new(
         total_capacity: usize,
@@ -92,23 +102,38 @@ impl<C: Config> QueryStore<C> {
         }
     }
 
+    fn get_sieve<Q: Query>(
+        &self,
+    ) -> MappedRef<
+        '_,
+        TypeId,
+        Box<dyn Any + Send + Sync>,
+        Sieve<QueryColumn<Q>, C>,
+    > {
+        loop {
+            if let Some(entry) = self.map.get(&TypeId::of::<Q>()) {
+                return entry.map(|e| {
+                    e.downcast_ref::<Sieve<QueryColumn<Q>, C>>().unwrap()
+                });
+            }
+
+            if let Entry::Vacant(entry) = self.map.entry(TypeId::of::<Q>()) {
+                entry.insert(Box::new(Sieve::<QueryColumn<Q>, C>::new(
+                    self.total_capacity,
+                    self.shard_amount,
+                    self.backing_db.clone(),
+                    self.hasher_builder.clone(),
+                )));
+            }
+        }
+    }
+
     pub(super) fn insert<Q: Query>(
         &self,
         query_input_hash_128: Compact128,
         query_entry: QueryEntry<Q>,
     ) {
-        let mut entry =
-            self.map.entry(TypeId::of::<Q>()).or_insert_with(|| {
-                Box::new(Sieve::<QueryColumn<Q>, C>::new(
-                    self.total_capacity,
-                    self.shard_amount,
-                    self.backing_db.clone(),
-                    self.hasher_builder.clone(),
-                ))
-            });
-
-        let entry =
-            (**entry).downcast_mut::<Sieve<QueryColumn<Q>, C>>().unwrap();
+        let entry = self.get_sieve::<Q>();
 
         entry.put(query_input_hash_128, Some(query_entry));
     }
@@ -117,18 +142,7 @@ impl<C: Config> QueryStore<C> {
         &self,
         query_input_hash_128: &Compact128,
     ) -> Option<Q> {
-        let mut entry =
-            self.map.entry(TypeId::of::<Q>()).or_insert_with(|| {
-                Box::new(Sieve::<QueryColumn<Q>, C>::new(
-                    self.total_capacity,
-                    self.shard_amount,
-                    self.backing_db.clone(),
-                    self.hasher_builder.clone(),
-                ))
-            });
-
-        let entry =
-            (**entry).downcast_mut::<Sieve<QueryColumn<Q>, C>>().unwrap();
+        let entry = self.get_sieve::<Q>();
 
         entry
             .get_normal(query_input_hash_128)
@@ -139,19 +153,23 @@ impl<C: Config> QueryStore<C> {
         &self,
         query_input_hash_128: &Compact128,
     ) -> Option<Q::Value> {
-        let mut entry =
-            self.map.entry(TypeId::of::<Q>()).or_insert_with(|| {
-                Box::new(Sieve::<QueryColumn<Q>, C>::new(
-                    self.total_capacity,
-                    self.shard_amount,
-                    self.backing_db.clone(),
-                    self.hasher_builder.clone(),
-                ))
-            });
-
-        let entry =
-            (**entry).downcast_mut::<Sieve<QueryColumn<Q>, C>>().unwrap();
+        let entry = self.get_sieve::<Q>();
 
         entry.get_normal(query_input_hash_128).map(|x| x.query_result.clone())
+    }
+}
+
+impl<C: Config> Engine<C> {
+    pub(crate) fn get_query_debug<Q: Query>(
+        &self,
+        query_input_hash_128: &Compact128,
+    ) -> Option<QueryDebug> {
+        let entry = self.computation_graph.persist.query_store.get_sieve::<Q>();
+
+        entry.get_normal(query_input_hash_128).map(|x| QueryDebug {
+            r#type: std::any::type_name::<Q>(),
+            input: format!("{:?}", x.original_query_input),
+            output: format!("{:?}", x.query_result),
+        })
     }
 }
