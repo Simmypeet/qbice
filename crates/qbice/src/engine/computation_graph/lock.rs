@@ -96,9 +96,10 @@ impl<C: Config> Engine<C> {
         &self,
         computing_caller: &mut Computing,
         callee_info: &NodeInfo,
+        kind: QueryKind,
         callee_id: &QueryID,
     ) {
-        match callee_info.query_kind() {
+        match kind {
             QueryKind::Input
             | QueryKind::Executable(ExecutionStyle::ExternalInput) => {
                 // input queries do not contribute to tfc archetype
@@ -299,10 +300,12 @@ impl<C: Config> Engine<C> {
                     self.computation_graph.get_last_verified(query_id);
 
                 let (mode, query_kind) = if last_verified.is_some() {
-                    let node_info =
-                        self.computation_graph.get_node_info(query_id).unwrap();
+                    let kind = self
+                        .computation_graph
+                        .get_query_kind(query_id)
+                        .unwrap();
 
-                    (ComputingMode::Repair, node_info.query_kind())
+                    (ComputingMode::Repair, kind)
                 } else {
                     let executor =
                         self.executor_registry.get_executor_entry_by_type_id(

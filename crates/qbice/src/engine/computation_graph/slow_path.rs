@@ -90,7 +90,7 @@ impl<C: Config> Engine<C> {
 
         let value = result.unwrap_or_else(|_| entry.obtain_scc_value::<Q>());
 
-        let old_node_info = self.computation_graph.get_node_info(&query.id);
+        let old_kind = self.computation_graph.get_query_kind(&query.id);
 
         // if the old node info is a firewall or projection node, we compare
         // the old and new value fingerprints to determine if we need to
@@ -99,11 +99,16 @@ impl<C: Config> Engine<C> {
             continuing_tx,
             query_value_fingerprint,
             need_backward_projection_propagation,
-        ) = if let Some(old_node_info) = old_node_info
-            && (old_node_info.query_kind().is_firewall()
-                || old_node_info.query_kind().is_projection())
+        ) = if let Some(old_kind) = old_kind
+            && (old_kind.is_firewall() || old_kind.is_projection())
             && execute_query_for == ExecuteQueryFor::RecomputeQuery
         {
+            let old_node_info =
+                self.computation_graph.get_node_info(&query.id).expect(
+                    "old node info should exist for recomputed firewall or \
+                     projection",
+                );
+
             let tx = self.database.write_transaction();
 
             let fingerprint = self.hash(&value);
@@ -120,7 +125,7 @@ impl<C: Config> Engine<C> {
                 // if the query is a firewall and its value has changed, it
                 // needs to invoke projection queries in the backward direction
                 // and propagate dirtiness as needed.
-                old_node_info.query_kind().is_firewall() && updated,
+                old_kind.is_firewall() && updated,
             )
         } else {
             (None, None, false)

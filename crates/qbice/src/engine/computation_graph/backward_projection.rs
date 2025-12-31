@@ -22,10 +22,10 @@ impl<C: Config> Engine<C> {
             .iter()
             .map(|x| *x)
             .filter(|x| {
-                let node_info =
-                    self.computation_graph.get_node_info(x).unwrap();
+                let query_kind =
+                    self.computation_graph.get_query_kind(x).unwrap();
 
-                node_info.query_kind().is_projection()
+                query_kind.is_projection()
             })
             .collect::<Vec<_>>();
 
@@ -50,7 +50,6 @@ impl<C: Config> Engine<C> {
                         engine.executor_registry.get_executor_entry_by_type_id(
                             &query_id.stable_type_id(),
                         );
-
 
                     let _ = entry
                         .repair_query_from_query_id(

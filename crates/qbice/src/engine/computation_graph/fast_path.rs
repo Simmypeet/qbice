@@ -4,8 +4,8 @@ use crate::{
     Engine, Query,
     config::Config,
     engine::computation_graph::{
-        caller::CallerInformation, lock::Computing, persist::NodeInfo,
-        slow_path::SlowPath,
+        QueryKind, caller::CallerInformation, lock::Computing,
+        persist::NodeInfo, slow_path::SlowPath,
     },
     executor::CyclicError,
     query::QueryID,
@@ -24,6 +24,7 @@ impl<C: Config> Engine<C> {
         &self,
         callee_info: &NodeInfo,
         callee_target: &QueryID,
+        callee_kind: QueryKind,
         caller_source: &QueryID,
     ) {
         // add dependency for the caller
@@ -39,6 +40,7 @@ impl<C: Config> Engine<C> {
         self.caller_observe_tfc_callees(
             &mut caller_computing,
             callee_info,
+            callee_kind,
             callee_target,
         );
     }
@@ -171,7 +173,15 @@ impl<C: Config> Engine<C> {
             };
 
             if let Some(caller) = caller.has_a_caller_requiring_value() {
-                self.observe_callee_fingerprint(&query_info, query_id, caller);
+                let kind =
+                    self.computation_graph.get_query_kind(query_id).unwrap();
+
+                self.observe_callee_fingerprint(
+                    &query_info,
+                    query_id,
+                    kind,
+                    caller,
+                );
             }
 
             Ok(FastPathResult::Hit(query_result))

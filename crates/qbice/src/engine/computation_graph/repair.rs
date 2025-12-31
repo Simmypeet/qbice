@@ -44,15 +44,12 @@ impl<C: Config> Engine<C> {
                 continue;
             }
 
-            let callee_node_info =
-                self.computation_graph.get_node_info(callee).expect(
-                    "callee node info should exist when forward edge exists",
-                );
+            let kind = self.computation_graph.get_query_kind(callee).unwrap();
 
             // NOTE: if the callee is an input (explicitly set), it's impossible
             // to try to repair it, so we'll skip repairing and directly
             // compare the fingerprint.
-            if !callee_node_info.query_kind().is_input() {
+            if !kind.is_input() {
                 // recursively repair the callee first
                 let entry = self
                     .executor_registry
@@ -95,7 +92,7 @@ impl<C: Config> Engine<C> {
                 cleaned_edges.push(*callee);
 
                 // check wherther the transitive firewall callee needs repair
-                if !callee_node_info.query_kind().is_firewall() {
+                if !kind.is_firewall() {
                     let tfc_fingerprint_diff = callee_node_info
                         .transitive_firewall_callees_fingerprint()
                         != forward_edge_observations
@@ -125,9 +122,8 @@ impl<C: Config> Engine<C> {
 
         let is_current_query_projection = self
             .computation_graph
-            .get_node_info(&query.id)
+            .get_query_kind(&query.id)
             .unwrap()
-            .query_kind()
             .is_projection();
 
         let tfcs = node_info.transitive_firewall_callees();
@@ -255,12 +251,14 @@ impl<C: Config> Engine<C> {
 
             let new_tfc =
                 self.union_tfcs(forward_edges.iter().filter_map(|x| {
-                    let callee_info =
-                        self.computation_graph.get_node_info(x).unwrap();
+                    let kind =
+                        self.computation_graph.get_query_kind(x).unwrap();
 
-                    if callee_info.query_kind().is_firewall() {
+                    if kind.is_firewall() {
                         Some(Cow::Owned(self.new_singleton_tfc(*x)))
                     } else {
+                        let callee_info =
+                            self.computation_graph.get_node_info(x).unwrap();
                         callee_info
                             .transitive_firewall_callees()
                             .map(|x| Cow::Owned(x.clone()))

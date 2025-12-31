@@ -202,7 +202,6 @@ impl Column for DirtySetColumn {
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Identifiable)]
 pub struct NodeInfo {
-    query_kind: QueryKind,
     fingerprint: Compact128,
     transitive_firewall_callees_fingerprint: Compact128,
     transitive_firewall_callees: Option<Interned<TransitiveFirewallCallees>>,
@@ -210,7 +209,6 @@ pub struct NodeInfo {
 
 impl NodeInfo {
     pub const fn new(
-        query_kind: QueryKind,
         fingerprint: Compact128,
         transitive_firewall_callees_fingerprint: Compact128,
         transitive_firewall_callees: Option<
@@ -218,7 +216,6 @@ impl NodeInfo {
         >,
     ) -> Self {
         Self {
-            query_kind,
             fingerprint,
             transitive_firewall_callees_fingerprint,
             transitive_firewall_callees,
@@ -236,8 +233,6 @@ impl NodeInfo {
     ) -> Option<&Interned<TransitiveFirewallCallees>> {
         self.transitive_firewall_callees.as_ref()
     }
-
-    pub const fn query_kind(&self) -> QueryKind { self.query_kind }
 }
 
 #[derive(
@@ -253,10 +248,24 @@ impl<C: Config> Column for BackwardEdgeColumn<C> {
     type Mode = KeyOfSet<QueryID>;
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+pub struct QueryKindColumn;
+
+impl Column for QueryKindColumn {
+    type Key = QueryID;
+
+    type Value = QueryKind;
+
+    type Mode = Normal;
+}
+
 pub struct Persist<C: Config> {
     last_verifieds: Sieve<LastVerifiedColumn, C>,
     forward_edge_orders: Sieve<ForwardEdgeOrderColumn, C>,
     forward_edge_observations: Sieve<ForwardEdgeObservationColumn<C>, C>,
+    query_kinds: Sieve<QueryKindColumn, C>,
     node_info: Sieve<NodeInfoColumn, C>,
     dirty_edge_set: Sieve<DirtySetColumn, C>,
     backward_edges: Sieve<BackwardEdgeColumn<C>, C>,
@@ -287,6 +296,12 @@ impl<C: Config> Persist<C> {
                 C::BuildHasher::default(),
             ),
             node_info: Sieve::<_, C>::new(
+                C::cache_entry_capacity(),
+                shard_amount,
+                db.clone(),
+                C::BuildHasher::default(),
+            ),
+            query_kinds: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
@@ -348,6 +363,10 @@ impl<C: Config> ComputationGraph<C> {
         self.persist.node_info.get_normal(query_id).map(|x| x.clone())
     }
 
+    pub fn get_query_kind(&self, query_id: &QueryID) -> Option<QueryKind> {
+        self.persist.query_kinds.get_normal(query_id).map(|x| *x)
+    }
+
     pub fn get_last_verified(&self, query_id: &QueryID) -> Option<Timestamp> {
         self.persist.last_verifieds.get_normal(query_id).map(|x| *x)
     }
@@ -403,7 +422,6 @@ impl<C: Config> Engine<C> {
         let query_entry =
             query_store::QueryEntry::new(query_id.query.clone(), query_value);
         let node_info = NodeInfo::new(
-            query_kind,
             query_value_fingerprint,
             transitive_firewall_callees_fingerprint,
             tfc_achetype,
@@ -425,6 +443,8 @@ impl<C: Config> Engine<C> {
                     &current_timestamp,
                 );
             }
+
+            tx.put::<QueryKindColumn>(&query_id.id, &query_kind);
 
             // remove prior backward edges
             if let Some(forward_edges) = &existing_forward_edges {
@@ -477,6 +497,11 @@ impl<C: Config> Engine<C> {
                     .pending_backward_projections
                     .put(query_id.id, Some(current_timestamp));
             }
+
+            self.computation_graph
+                .persist
+                .query_kinds
+                .put(query_id.id, Some(query_kind));
 
             self.computation_graph
                 .persist
@@ -535,7 +560,6 @@ impl<C: Config> Engine<C> {
             self.hash(&transitive_firewall_callees);
 
         let node_info = NodeInfo::new(
-            QueryKind::Input,
             query_value_fingerprint,
             transitive_firewall_callees_fingerprint,
             transitive_firewall_callees,
@@ -552,6 +576,8 @@ impl<C: Config> Engine<C> {
                     tx.delete_member::<BackwardEdgeColumn<C>>(edge, &query_id);
                 }
             }
+
+            tx.put::<QueryKindColumn>(&query_id, &QueryKind::Input);
 
             tx.put::<LastVerifiedColumn>(&query_id, &timestamp);
 
@@ -576,6 +602,11 @@ impl<C: Config> Engine<C> {
                         .remove_set_element(edge, &query_id);
                 }
             }
+
+            self.computation_graph
+                .persist
+                .query_kinds
+                .put(query_id, Some(QueryKind::Input));
 
             self.computation_graph
                 .persist

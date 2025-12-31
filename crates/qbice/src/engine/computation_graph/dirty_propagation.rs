@@ -26,15 +26,15 @@ impl<C: Config> Engine<C> {
 
                 self.mark_dirty_forward_edge(caller_query_id, query_id, tx);
 
-                let node_info = self
+                let query_kind = self
                     .computation_graph
-                    .get_node_info(&caller_query_id)
+                    .get_query_kind(&caller_query_id)
                     .unwrap();
 
                 // if this is a firewall node or projection node, then we stop
                 // propagation here.
                 if matches!(
-                    node_info.query_kind(),
+                    query_kind,
                     QueryKind::Executable(
                         ExecutionStyle::Firewall | ExecutionStyle::Projection
                     )

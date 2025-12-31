@@ -200,8 +200,8 @@ impl<C: Config> Engine<C> {
             }
 
             // Get the query meta
-            let (Some(node_info), Some(forward_edge)) = (
-                self.computation_graph.get_node_info(&current_id),
+            let (Some(kind), Some(forward_edge)) = (
+                self.computation_graph.get_query_kind(&current_id),
                 self.computation_graph.get_forward_edges_order(&current_id),
             ) else {
                 continue;
@@ -232,7 +232,7 @@ impl<C: Config> Engine<C> {
             nodes.push(NodeInfo {
                 id: current_id,
                 label,
-                is_input: node_info.query_kind().is_input(),
+                is_input: kind.is_input(),
                 type_name,
                 result,
             });
