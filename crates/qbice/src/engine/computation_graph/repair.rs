@@ -32,9 +32,13 @@ impl<C: Config> Engine<C> {
         let mut cleaned_edges = Vec::new();
 
         let forward_edges =
-            self.computation_graph.get_forward_edges(&query.id).unwrap();
+            self.computation_graph.get_forward_edges_order(&query.id).unwrap();
+        let forward_edge_observations = self
+            .computation_graph
+            .get_forward_edge_observations(&query.id)
+            .unwrap();
 
-        for callee in &forward_edges.callee_order {
+        for callee in forward_edges.iter() {
             // skip if not dirty
             if !self.is_edge_dirty(query.id, *callee) {
                 continue;
@@ -77,8 +81,7 @@ impl<C: Config> Engine<C> {
 
                 let value_fingerprint_diff = callee_node_info
                     .value_fingerprint()
-                    != forward_edges
-                        .callee_observations
+                    != forward_edge_observations
                         .get(callee)
                         .unwrap()
                         .seen_value_fingerprint;
@@ -95,8 +98,7 @@ impl<C: Config> Engine<C> {
                 if !callee_node_info.query_kind().is_firewall() {
                     let tfc_fingerprint_diff = callee_node_info
                         .transitive_firewall_callees_fingerprint()
-                        != forward_edges
-                            .callee_observations
+                        != forward_edge_observations
                             .get(callee)
                             .unwrap()
                             .seen_transitive_firewall_callees_fingerprint;
@@ -228,11 +230,13 @@ impl<C: Config> Engine<C> {
                 lock_guard,
             );
         } else {
-            let forward_edges =
-                self.computation_graph.get_forward_edges(&query.id).unwrap();
+            let forward_edges = self
+                .computation_graph
+                .get_forward_edges_order(&query.id)
+                .unwrap();
 
             // repair all callees
-            for callee in &forward_edges.callee_order {
+            for callee in forward_edges.iter() {
                 let entry = self
                     .executor_registry
                     .get_executor_entry_by_type_id(&callee.stable_type_id());
@@ -249,8 +253,8 @@ impl<C: Config> Engine<C> {
                     .await;
             }
 
-            let new_tfc = self.union_tfcs(
-                forward_edges.callee_order.iter().filter_map(|x| {
+            let new_tfc =
+                self.union_tfcs(forward_edges.iter().filter_map(|x| {
                     let callee_info =
                         self.computation_graph.get_node_info(x).unwrap();
 
@@ -261,8 +265,7 @@ impl<C: Config> Engine<C> {
                             .transitive_firewall_callees()
                             .map(|x| Cow::Owned(x.clone()))
                     }
-                }),
-            );
+                }));
 
             self.computing_lock_to_clean_query(
                 &query.id,

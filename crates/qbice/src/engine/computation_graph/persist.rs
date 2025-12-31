@@ -142,7 +142,32 @@ impl Column for LastVerifiedColumn {
     type Mode = Normal;
 }
 
-pub type ForwardEdgeColumn<C> = (QueryID, Arc<ForwardEdges<C>>);
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+pub struct ForwardEdgeOrderColumn;
+
+impl Column for ForwardEdgeOrderColumn {
+    type Key = QueryID;
+
+    type Value = Arc<[QueryID]>;
+
+    type Mode = Normal;
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+pub struct ForwardEdgeObservationColumn<C>(PhantomData<C>);
+
+impl<C: Config> Column for ForwardEdgeObservationColumn<C> {
+    type Key = QueryID;
+
+    type Value = Arc<HashMap<QueryID, Observation, C::BuildHasher>>;
+
+    type Mode = Normal;
+}
+
 pub type NodeInfoColumn = (QueryID, NodeInfo);
 
 #[derive(
@@ -230,7 +255,8 @@ impl<C: Config> Column for BackwardEdgeColumn<C> {
 
 pub struct Persist<C: Config> {
     last_verifieds: Sieve<LastVerifiedColumn, C>,
-    forward_edges: Sieve<ForwardEdgeColumn<C>, C>,
+    forward_edge_orders: Sieve<ForwardEdgeOrderColumn, C>,
+    forward_edge_observations: Sieve<ForwardEdgeObservationColumn<C>, C>,
     node_info: Sieve<NodeInfoColumn, C>,
     dirty_edge_set: Sieve<DirtySetColumn, C>,
     backward_edges: Sieve<BackwardEdgeColumn<C>, C>,
@@ -248,7 +274,13 @@ impl<C: Config> Persist<C> {
                 db.clone(),
                 C::BuildHasher::default(),
             ),
-            forward_edges: Sieve::<_, C>::new(
+            forward_edge_orders: Sieve::<_, C>::new(
+                C::cache_entry_capacity(),
+                shard_amount,
+                db.clone(),
+                C::BuildHasher::default(),
+            ),
+            forward_edge_observations: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
@@ -294,52 +326,22 @@ pub struct Observation {
     pub seen_transitive_firewall_callees_fingerprint: Compact128,
 }
 
-#[derive(Identifiable)]
-pub struct ForwardEdges<C: Config> {
-    pub callee_observations: HashMap<QueryID, Observation, C::BuildHasher>,
-    pub callee_order: Vec<QueryID>,
-}
-
-impl<C: Config> Encode for ForwardEdges<C> {
-    fn encode<E: qbice_serialize::Encoder + ?Sized>(
-        &self,
-        encoder: &mut E,
-        plugin: &qbice_serialize::Plugin,
-        session: &mut qbice_serialize::session::Session,
-    ) -> std::io::Result<()> {
-        self.callee_observations.encode(encoder, plugin, session)?;
-        self.callee_order.encode(encoder, plugin, session)
-    }
-}
-
-impl<C: Config> Decode for ForwardEdges<C> {
-    fn decode<D: qbice_serialize::Decoder + ?Sized>(
-        decoder: &mut D,
-        plugin: &qbice_serialize::Plugin,
-        session: &mut qbice_serialize::session::Session,
-    ) -> std::io::Result<Self> {
-        let callee_observation = HashMap::decode(decoder, plugin, session)?;
-        let callee_order = Vec::decode(decoder, plugin, session)?;
-
-        Ok(Self { callee_observations: callee_observation, callee_order })
-    }
-}
-
-impl<C: Config> ForwardEdges<C> {
-    pub fn empty() -> Self {
-        Self {
-            callee_observations: HashMap::with_hasher(C::BuildHasher::default()),
-            callee_order: Vec::new(),
-        }
-    }
-}
-
 impl<C: Config> ComputationGraph<C> {
-    pub fn get_forward_edges(
+    pub fn get_forward_edges_order(
         &self,
         query_id: &QueryID,
-    ) -> Option<Arc<ForwardEdges<C>>> {
-        self.persist.forward_edges.get_normal(query_id).map(|x| x.clone())
+    ) -> Option<Arc<[QueryID]>> {
+        self.persist.forward_edge_orders.get_normal(query_id).map(|x| x.clone())
+    }
+
+    pub fn get_forward_edge_observations(
+        &self,
+        query_id: &QueryID,
+    ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
+        self.persist
+            .forward_edge_observations
+            .get_normal(query_id)
+            .map(|x| x.clone())
     }
 
     pub fn get_node_info(&self, query_id: &QueryID) -> Option<NodeInfo> {
@@ -380,7 +382,12 @@ impl<C: Config> Engine<C> {
         query_value: Q::Value,
         query_value_fingerprint: Option<Compact128>,
         query_kind: QueryKind,
-        forward_edges: ForwardEdges<C>,
+        forward_edge_order: Arc<[QueryID]>,
+        forward_edge_observations: HashMap<
+            QueryID,
+            Observation,
+            C::BuildHasher,
+        >,
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
         has_pending_backward_projection: bool,
         continuting_tx: Option<
@@ -391,7 +398,8 @@ impl<C: Config> Engine<C> {
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
         let transitive_firewall_callees_fingerprint = self.hash(&tfc_achetype);
 
-        let forward_edges = Arc::new(forward_edges);
+        let forward_edge_observations = Arc::new(forward_edge_observations);
+
         let query_entry =
             query_store::QueryEntry::new(query_id.query.clone(), query_value);
         let node_info = NodeInfo::new(
@@ -404,7 +412,7 @@ impl<C: Config> Engine<C> {
             self.computation_graph.timestamp_manager.get_current();
 
         let existing_forward_edges =
-            self.computation_graph.get_forward_edges(&query_id.id);
+            self.computation_graph.get_forward_edges_order(&query_id.id);
 
         {
             let tx = continuting_tx
@@ -420,7 +428,7 @@ impl<C: Config> Engine<C> {
 
             // remove prior backward edges
             if let Some(forward_edges) = &existing_forward_edges {
-                for edge in &forward_edges.callee_order {
+                for edge in forward_edges.iter() {
                     tx.delete_member::<BackwardEdgeColumn<C>>(
                         edge,
                         &query_id.id,
@@ -430,11 +438,16 @@ impl<C: Config> Engine<C> {
 
             tx.put::<LastVerifiedColumn>(&query_id.id, &current_timestamp);
 
-            for edge in &forward_edges.callee_order {
+            for edge in forward_edge_order.iter() {
                 tx.insert_member::<BackwardEdgeColumn<C>>(edge, &query_id.id);
             }
 
-            tx.put::<ForwardEdgeColumn<C>>(&query_id.id, &forward_edges);
+            tx.put::<ForwardEdgeOrderColumn>(&query_id.id, &forward_edge_order);
+
+            tx.put::<ForwardEdgeObservationColumn<C>>(
+                &query_id.id,
+                &forward_edge_observations,
+            );
 
             tx.put::<NodeInfoColumn>(&query_id.id, &node_info);
 
@@ -449,7 +462,7 @@ impl<C: Config> Engine<C> {
         {
             // remove prior backward edges
             if let Some(forward_edges) = &existing_forward_edges {
-                for edge in &forward_edges.callee_order {
+                for edge in forward_edges.iter() {
                     self.computation_graph
                         .persist
                         .backward_edges
@@ -470,7 +483,7 @@ impl<C: Config> Engine<C> {
                 .last_verifieds
                 .put(query_id.id, Some(current_timestamp));
 
-            for edge in &forward_edges.callee_order {
+            for edge in forward_edge_order.iter() {
                 self.computation_graph
                     .persist
                     .backward_edges
@@ -479,8 +492,13 @@ impl<C: Config> Engine<C> {
 
             self.computation_graph
                 .persist
-                .forward_edges
-                .put(query_id.id, Some(forward_edges));
+                .forward_edge_orders
+                .put(query_id.id, Some(forward_edge_order));
+
+            self.computation_graph
+                .persist
+                .forward_edge_observations
+                .put(query_id.id, Some(forward_edge_observations));
 
             self.computation_graph
                 .persist
@@ -506,9 +524,12 @@ impl<C: Config> Engine<C> {
 
         // if have an existing forward edges, unwire the backward edges
         let existing_forward_edges =
-            self.computation_graph.get_forward_edges(&query_id);
+            self.computation_graph.get_forward_edges_order(&query_id);
 
-        let empty_forward_edges = Arc::new(ForwardEdges::empty());
+        let empty_forward_edges = Arc::from([]);
+        let empty_forward_edge_observations =
+            Arc::new(HashMap::with_hasher(C::BuildHasher::default()));
+
         let transitive_firewall_callees = None;
         let transitive_firewall_callees_fingerprint =
             self.hash(&transitive_firewall_callees);
@@ -527,14 +548,19 @@ impl<C: Config> Engine<C> {
         {
             // remove prior backward edges
             if let Some(forward_edges) = &existing_forward_edges {
-                for edge in &forward_edges.callee_order {
+                for edge in forward_edges.iter() {
                     tx.delete_member::<BackwardEdgeColumn<C>>(edge, &query_id);
                 }
             }
 
             tx.put::<LastVerifiedColumn>(&query_id, &timestamp);
 
-            tx.put::<ForwardEdgeColumn<C>>(&query_id, &empty_forward_edges);
+            tx.put::<ForwardEdgeOrderColumn>(&query_id, &empty_forward_edges);
+
+            tx.put::<ForwardEdgeObservationColumn<C>>(
+                &query_id,
+                &empty_forward_edge_observations,
+            );
 
             tx.put::<NodeInfoColumn>(&query_id, &node_info);
 
@@ -543,7 +569,7 @@ impl<C: Config> Engine<C> {
 
         {
             if let Some(forward_edges) = existing_forward_edges {
-                for edge in &forward_edges.callee_order {
+                for edge in forward_edges.iter() {
                     self.computation_graph
                         .persist
                         .backward_edges
@@ -558,8 +584,13 @@ impl<C: Config> Engine<C> {
 
             self.computation_graph
                 .persist
-                .forward_edges
+                .forward_edge_orders
                 .put(query_id, Some(empty_forward_edges));
+
+            self.computation_graph
+                .persist
+                .forward_edge_observations
+                .put(query_id, Some(empty_forward_edge_observations));
 
             self.computation_graph
                 .persist

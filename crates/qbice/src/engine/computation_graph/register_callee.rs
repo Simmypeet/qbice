@@ -59,6 +59,7 @@ impl<C: Config> Engine<C> {
                     !computing.query_kind().is_external_input(),
                     "`ExternalInput` queries cannot call other queries"
                 );
+
                 // Invariant Check: projection query can only requires firewall
                 // queries.
                 if computing.query_kind().is_projection() {

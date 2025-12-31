@@ -17,7 +17,7 @@ use crate::{
     config::Config,
     engine::computation_graph::{
         QueryKind, QueryWithID,
-        persist::{ForwardEdges, NodeInfo, Observation},
+        persist::{NodeInfo, Observation},
         slow_path::SlowPath,
         tfc_achetype::TransitiveFirewallCallees,
     },
@@ -100,7 +100,11 @@ impl<C: Config> Engine<C> {
     ) {
         match callee_info.query_kind() {
             QueryKind::Input
-            | QueryKind::Executable(
+            | QueryKind::Executable(ExecutionStyle::ExternalInput) => {
+                // input queries do not contribute to tfc archetype
+            }
+
+            QueryKind::Executable(
                 ExecutionStyle::Normal | ExecutionStyle::Projection,
             ) => {
                 computing_caller.tfc_archetype = self.union_tfcs(
@@ -435,16 +439,14 @@ impl<C: Config> Engine<C> {
             value,
             query_value_fingerprint,
             query_kind,
-            ForwardEdges {
-                callee_observations: callee_info
-                    .callee_queries
-                    .into_iter()
-                    // in case of cyclic dependencies, some callees may have
-                    // been aborted
-                    .filter_map(|(k, v)| v.map(|v| (k, v)))
-                    .collect(),
-                callee_order: callee_info.callee_order,
-            },
+            callee_info.callee_order.into(),
+            callee_info
+                .callee_queries
+                .into_iter()
+                // in case of cyclic dependencies, some callees may have
+                // been aborted
+                .filter_map(|(k, v)| v.map(|v| (k, v)))
+                .collect(),
             tfc_archetype,
             has_pending_backward_projection,
             continuing_tx,
