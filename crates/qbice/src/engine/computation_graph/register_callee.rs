@@ -55,6 +55,10 @@ impl<C: Config> Engine<C> {
                 let mut computing =
                     self.computation_graph.lock.get_lock_mut(caller);
 
+                assert!(
+                    !computing.query_kind().is_external_input(),
+                    "`ExternalInput` queries cannot call other queries"
+                );
                 // Invariant Check: projection query can only requires firewall
                 // queries.
                 if computing.query_kind().is_projection() {

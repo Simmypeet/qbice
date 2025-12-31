@@ -198,6 +198,21 @@ pub enum ExecutionStyle {
     /// only marked dirty if the firewall's output value actually changes,
     /// not just because its inputs changed.
     Firewall,
+
+    /// An external input query that can interact with the outside world.
+    ///
+    /// This is similar to input queries that are explicitly set with input
+    /// sessions. However, external input queries are modeled by executors
+    /// invoking impure operations, such as reading from files or network.
+    ///
+    /// The queries executed as [`Self::ExternalInput`] are assumed to be the
+    /// leaf nodes in the computation graph (cannot depend on other queries).
+    ///
+    /// During the input session, the input session can ask the engine to
+    /// refresh the values of external input queries, causing them to be
+    /// re-executed and possibly dirtying dependent queries if their values
+    /// change.
+    ExternalInput,
 }
 
 /// Type-erased interface for queries.

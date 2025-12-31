@@ -66,6 +66,9 @@ impl QueryKind {
     pub const fn is_firewall(self) -> bool {
         matches!(self, Self::Executable(ExecutionStyle::Firewall))
     }
+    pub const fn is_external_input(self) -> bool {
+        matches!(self, Self::Executable(ExecutionStyle::ExternalInput))
+    }
 }
 
 pub struct ComputationGraph<C: Config> {
