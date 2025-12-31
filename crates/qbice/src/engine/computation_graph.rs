@@ -3,7 +3,7 @@ use std::sync::Arc;
 // re-export
 pub(crate) use caller::CallerInformation;
 use dashmap::{DashMap, DashSet};
-pub(crate) use persist::query_store::QueryDebug;
+pub(crate) use persist::QueryDebug;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHasher};
 
@@ -260,7 +260,7 @@ impl<C: Config> Engine<C> {
 
         // pulling the value
         let value = loop {
-            let slow_path = match self.fast_path::<Q>(&query.id, caller).await {
+            let slow_path = match self.fast_path::<Q>(query.id, caller).await {
                 // try again
                 Ok(FastPathResult::TryAgain) => {
                     continue;
@@ -297,7 +297,7 @@ impl<C: Config> Engine<C> {
             // now the `query` state is held in computing state.
             // if `lock_computing` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
-            let Some(guard) = self.get_lock_guard(&query.id, slow_path) else {
+            let Some(guard) = self.get_lock_guard(query.id, slow_path) else {
                 // try the fast path again
                 continue;
             };

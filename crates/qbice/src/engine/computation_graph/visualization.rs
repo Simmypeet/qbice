@@ -201,8 +201,8 @@ impl<C: Config> Engine<C> {
 
             // Get the query meta
             let (Some(kind), Some(forward_edge)) = (
-                self.computation_graph.get_query_kind(&current_id),
-                self.computation_graph.get_forward_edges_order(&current_id),
+                self.computation_graph.get_query_kind(current_id),
+                self.computation_graph.get_forward_edges_order(current_id),
             ) else {
                 continue;
             };
@@ -211,11 +211,11 @@ impl<C: Config> Engine<C> {
                 .executor_registry
                 .try_get_executor_entry_by_type_id(&current_id.stable_type_id())
                 .and_then(|x| {
-                    x.get_query_debug(self, &current_id.compact_hash_128())
+                    x.get_query_debug(self, current_id.compact_hash_128())
                 });
 
             let (type_name, label, result) = if let Some(dbg) = dbg {
-                (dbg.r#type.to_string(), dbg.input, dbg.output)
+                (dbg.type_name.to_string(), dbg.input, dbg.output)
             } else {
                 (
                     format!(

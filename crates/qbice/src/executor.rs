@@ -201,7 +201,7 @@ type ObtainExecutionStyleFn = fn() -> ExecutionStyle;
 
 type DebugQueryFn<C> = for<'a> fn(
     engine: &'a Engine<C>,
-    query_input_hash_128: &'a Compact128,
+    query_input_hash_128: Compact128,
 ) -> Option<QueryDebug>;
 
 fn obtain_scc_value<
@@ -294,7 +294,7 @@ impl<C: Config> Entry<C> {
     pub fn get_query_debug(
         &self,
         engine: &Engine<C>,
-        query_input_hash_128: &Compact128,
+        query_input_hash_128: Compact128,
     ) -> Option<QueryDebug> {
         (self.query_debug)(engine, query_input_hash_128)
     }

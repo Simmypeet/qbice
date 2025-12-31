@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use qbice_storage::kv_database::{KvDatabase, WriteTransaction};
+use qbice_storage::kv_database::{KvDatabase, WriteBatch};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{Engine, Query, config::Config, query::QueryID};
@@ -9,7 +9,7 @@ pub struct InputSession<'x, C: Config> {
     engine: &'x Engine<C>,
     incremented: bool,
     dirty_batch: VecDeque<QueryID>,
-    transaction: Option<<C::Database as KvDatabase>::WriteTransaction<'x>>,
+    transaction: Option<<C::Database as KvDatabase>::WriteBatch<'x>>,
 }
 
 impl<C: Config> Drop for InputSession<'_, C> {
@@ -93,7 +93,7 @@ impl<C: Config> InputSession<'_, C> {
         // has prior node infos, check for fingerprint diff
         // also, unwire the backward edges (if any)
         if let Some(node_info) =
-            self.engine.computation_graph.get_node_info(&query_id)
+            self.engine.computation_graph.get_node_info(query_id)
         {
             let fingerprint_diff =
                 node_info.value_fingerprint() != query_value_fingerprint;

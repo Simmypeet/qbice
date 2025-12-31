@@ -73,7 +73,7 @@ impl<C: Config> Engine<C> {
         );
 
         let is_in_scc =
-            self.computation_graph.lock.get_lock(&query.id).is_in_scc();
+            self.computation_graph.lock.get_lock(query.id).is_in_scc();
 
         // if `is_in_scc` is `true`, it means that the query is part of
         // a strongly connected component (SCC) and the
@@ -90,7 +90,7 @@ impl<C: Config> Engine<C> {
 
         let value = result.unwrap_or_else(|_| entry.obtain_scc_value::<Q>());
 
-        let old_kind = self.computation_graph.get_query_kind(&query.id);
+        let old_kind = self.computation_graph.get_query_kind(query.id);
 
         // if the old node info is a firewall or projection node, we compare
         // the old and new value fingerprints to determine if we need to
@@ -104,7 +104,7 @@ impl<C: Config> Engine<C> {
             && execute_query_for == ExecuteQueryFor::RecomputeQuery
         {
             let old_node_info =
-                self.computation_graph.get_node_info(&query.id).expect(
+                self.computation_graph.get_node_info(query.id).expect(
                     "old node info should exist for recomputed firewall or \
                      projection",
                 );
@@ -146,7 +146,7 @@ impl<C: Config> Engine<C> {
             invoke_backward_projection: true
         }) && need_backward_projection_propagation
         {
-            self.try_do_backward_projections(&query.id).await;
+            self.try_do_backward_projections(query.id).await;
         }
     }
 

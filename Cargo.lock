@@ -829,6 +829,7 @@ name = "qbice_stable_type_id"
 version = "0.1.1"
 dependencies = [
  "qbice_identifiable_derive",
+ "qbice_serialize",
  "qbice_stable_hash",
 ]
 

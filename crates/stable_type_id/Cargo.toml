@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 qbice_stable_hash = { version = "0.1.2", path = "../stable_hash" }
+qbice_serialize = { version = "0.1.0", path = "../serialize" }
 qbice_identifiable_derive = { version = "0.1.1", path = "../identifiable_derive" }
 
 [lints]

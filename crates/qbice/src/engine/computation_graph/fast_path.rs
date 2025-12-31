@@ -23,9 +23,9 @@ impl<C: Config> Engine<C> {
     fn observe_callee_fingerprint(
         &self,
         callee_info: &NodeInfo,
-        callee_target: &QueryID,
+        callee_target: QueryID,
         callee_kind: QueryKind,
-        caller_source: &QueryID,
+        caller_source: QueryID,
     ) {
         // add dependency for the caller
         let mut caller_computing =
@@ -57,7 +57,7 @@ impl<C: Config> Engine<C> {
 
         // OPTIMIZE: this can be parallelized
         for dep in computing.registered_callees() {
-            let Some(state) = self.computation_graph.lock.try_get_lcok(dep)
+            let Some(state) = self.computation_graph.lock.try_get_lcok(*dep)
             else {
                 continue;
             };
@@ -75,7 +75,7 @@ impl<C: Config> Engine<C> {
     /// Exit early if a cyclic dependency is detected.
     fn exit_scc(
         &self,
-        called_from: Option<&QueryID>,
+        called_from: Option<QueryID>,
         running_state: &Computing,
     ) -> Result<(), CyclicError> {
         // if there is no caller, we are at the root.
@@ -83,7 +83,7 @@ impl<C: Config> Engine<C> {
             return Ok(());
         };
 
-        let is_in_scc = self.check_cyclic(running_state, *called_from);
+        let is_in_scc = self.check_cyclic(running_state, called_from);
 
         // mark the caller as being in scc
         if is_in_scc {
@@ -99,7 +99,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) async fn fast_path<Q: Query>(
         self: &Arc<Self>,
-        query_id: &QueryID,
+        query_id: QueryID,
         caller: &CallerInformation,
     ) -> Result<FastPathResult<Q::Value>, CyclicError> {
         if let Some(computing) =
@@ -162,7 +162,7 @@ impl<C: Config> Engine<C> {
             let query_result = if caller.require_value() {
                 let Some(query_result) = self
                     .computation_graph
-                    .get_value::<Q>(&query_id.hash_128().into())
+                    .get_query_result::<Q>(query_id.hash_128().into())
                 else {
                     return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
                 };
@@ -180,7 +180,7 @@ impl<C: Config> Engine<C> {
                     &query_info,
                     query_id,
                     kind,
-                    caller,
+                    *caller,
                 );
             }
 

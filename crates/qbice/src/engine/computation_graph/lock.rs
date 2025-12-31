@@ -72,14 +72,14 @@ impl Computing {
 
     pub fn observe_callee(
         &mut self,
-        callee_target_id: &QueryID,
+        callee_target_id: QueryID,
         seen_value_fingerprint: Compact128,
         seen_transitive_firewall_callees_fingerprint: Compact128,
     ) {
         let callee_observation = self
             .callee_info
             .callee_queries
-            .get_mut(callee_target_id)
+            .get_mut(&callee_target_id)
             .expect("callee should have been registered");
 
         *callee_observation = Some(Observation {
@@ -97,7 +97,7 @@ impl<C: Config> Engine<C> {
         computing_caller: &mut Computing,
         callee_info: &NodeInfo,
         kind: QueryKind,
-        callee_id: &QueryID,
+        callee_id: QueryID,
     ) {
         match kind {
             QueryKind::Input
@@ -118,7 +118,7 @@ impl<C: Config> Engine<C> {
                 );
             }
             QueryKind::Executable(ExecutionStyle::Firewall) => {
-                let singleton_tfc = self.new_singleton_tfc(*callee_id);
+                let singleton_tfc = self.new_singleton_tfc(callee_id);
 
                 computing_caller.tfc_archetype = self.union_tfcs(
                     computing_caller
@@ -255,27 +255,27 @@ impl<C: Config> Drop for ComputingLockGuard<'_, C> {
 impl<C: Config> Lock<C> {
     pub fn try_get_lcok(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) -> Option<Ref<'_, QueryID, Computing>> {
-        self.lock.get(query_id)
+        self.lock.get(&query_id)
     }
 
     pub fn try_get_pending_backward_projection_lock(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) -> Option<Ref<'_, QueryID, PendingBackwardProjection>> {
-        self.backward_projection_lock.get(query_id)
+        self.backward_projection_lock.get(&query_id)
     }
 
     pub fn get_lock_mut(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) -> RefMut<'_, QueryID, Computing> {
-        self.lock.get_mut(query_id).unwrap()
+        self.lock.get_mut(&query_id).unwrap()
     }
 
-    pub fn get_lock(&self, query_id: &QueryID) -> Ref<'_, QueryID, Computing> {
-        self.lock.get(query_id).unwrap()
+    pub fn get_lock(&self, query_id: QueryID) -> Ref<'_, QueryID, Computing> {
+        self.lock.get(&query_id).unwrap()
     }
 }
 pub enum LockGuard<'x, C: Config> {
@@ -286,9 +286,9 @@ pub enum LockGuard<'x, C: Config> {
 impl<C: Config> Engine<C> {
     fn computing_lock_guard(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) -> Option<ComputingLockGuard<'_, C>> {
-        match self.computation_graph.lock.lock.entry(*query_id) {
+        match self.computation_graph.lock.lock.entry(query_id) {
             dashmap::Entry::Occupied(_) => {
                 // there's some computing state already try again
                 None
@@ -331,7 +331,7 @@ impl<C: Config> Engine<C> {
 
                 Some(ComputingLockGuard {
                     computing_lock: &self.computation_graph.lock,
-                    query_id: *query_id,
+                    query_id,
                     defused: false,
                     computing_mode: mode,
                 })
@@ -341,13 +341,13 @@ impl<C: Config> Engine<C> {
 
     pub(super) fn get_backward_projection_lock_guard(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) -> Option<BackwardProjectionLockGuard<'_, C>> {
         match self
             .computation_graph
             .lock
             .backward_projection_lock
-            .entry(*query_id)
+            .entry(query_id)
         {
             dashmap::Entry::Occupied(_) => {
                 // there's some computing state already try again
@@ -361,7 +361,7 @@ impl<C: Config> Engine<C> {
 
                 Some(BackwardProjectionLockGuard {
                     computing_lock: &self.computation_graph.lock,
-                    query_id: *query_id,
+                    query_id,
                     defused: false,
                 })
             }
@@ -370,7 +370,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) fn get_lock_guard(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
         slow_path: SlowPath,
     ) -> Option<LockGuard<'_, C>> {
         match slow_path {
@@ -387,13 +387,13 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::option_option)]
     pub(super) fn computing_lock_to_clean_query(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
         clean_edges: &[QueryID],
         new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
         lock_guard: ComputingLockGuard<'_, C>,
     ) {
         let dashmap::Entry::Occupied(entry_lock) =
-            self.computation_graph.lock.lock.entry(*query_id)
+            self.computation_graph.lock.lock.entry(query_id)
         else {
             panic!("computing lock should exist when transferring to computed");
         };
@@ -416,9 +416,7 @@ impl<C: Config> Engine<C> {
         query_value_fingerprint: Option<Compact128>,
         lock_guard: ComputingLockGuard<'_, C>,
         has_pending_backward_projection: bool,
-        continuing_tx: Option<
-            <C::Database as KvDatabase>::WriteTransaction<'s>,
-        >,
+        continuing_tx: Option<<C::Database as KvDatabase>::WriteBatch<'s>>,
     ) {
         let dashmap::Entry::Occupied(mut entry_lock) =
             self.computation_graph.lock.lock.entry(query_id.id)
@@ -464,7 +462,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) fn is_query_running_in_scc(
         &self,
-        caller: Option<&QueryID>,
+        caller: Option<QueryID>,
     ) -> Result<(), CyclicError> {
         let Some(called_from) = caller else {
             return Ok(());

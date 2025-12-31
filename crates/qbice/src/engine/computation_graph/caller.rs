@@ -43,13 +43,13 @@ pub enum CallerInformation {
 }
 
 impl CallerInformation {
-    pub const fn get_caller(&self) -> Option<&QueryID> {
+    pub const fn get_caller(&self) -> Option<QueryID> {
         match self {
             Self::RepairFirewall { .. }
             | Self::BackwardProjectionPropagation
             | Self::User => None,
 
-            Self::Query(q) => Some(&q.query_id),
+            Self::Query(q) => Some(q.query_id),
         }
     }
 

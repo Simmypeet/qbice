@@ -32,10 +32,10 @@ impl<C: Config> Engine<C> {
         let mut cleaned_edges = Vec::new();
 
         let forward_edges =
-            self.computation_graph.get_forward_edges_order(&query.id).unwrap();
+            self.computation_graph.get_forward_edges_order(query.id).unwrap();
         let forward_edge_observations = self
             .computation_graph
-            .get_forward_edge_observations(&query.id)
+            .get_forward_edge_observations(query.id)
             .unwrap();
 
         for callee in forward_edges.iter() {
@@ -44,7 +44,7 @@ impl<C: Config> Engine<C> {
                 continue;
             }
 
-            let kind = self.computation_graph.get_query_kind(callee).unwrap();
+            let kind = self.computation_graph.get_query_kind(*callee).unwrap();
 
             // NOTE: if the callee is an input (explicitly set), it's impossible
             // to try to repair it, so we'll skip repairing and directly
@@ -71,7 +71,7 @@ impl<C: Config> Engine<C> {
             // recompute
             {
                 let callee_node_info =
-                    self.computation_graph.get_node_info(callee).expect(
+                    self.computation_graph.get_node_info(*callee).expect(
                         "callee node info should exist when forward edge \
                          exists",
                     );
@@ -117,12 +117,11 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
     ) {
-        let node_info =
-            self.computation_graph.get_node_info(&query.id).unwrap();
+        let node_info = self.computation_graph.get_node_info(query.id).unwrap();
 
         let is_current_query_projection = self
             .computation_graph
-            .get_query_kind(&query.id)
+            .get_query_kind(query.id)
             .unwrap()
             .is_projection();
 
@@ -220,7 +219,7 @@ impl<C: Config> Engine<C> {
 
         if repair_transitive_firewall_callees.not() {
             self.computing_lock_to_clean_query(
-                &query.id,
+                query.id,
                 &cleaned_edges,
                 None,
                 lock_guard,
@@ -228,7 +227,7 @@ impl<C: Config> Engine<C> {
         } else {
             let forward_edges = self
                 .computation_graph
-                .get_forward_edges_order(&query.id)
+                .get_forward_edges_order(query.id)
                 .unwrap();
 
             // repair all callees
@@ -252,13 +251,13 @@ impl<C: Config> Engine<C> {
             let new_tfc =
                 self.union_tfcs(forward_edges.iter().filter_map(|x| {
                     let kind =
-                        self.computation_graph.get_query_kind(x).unwrap();
+                        self.computation_graph.get_query_kind(*x).unwrap();
 
                     if kind.is_firewall() {
                         Some(Cow::Owned(self.new_singleton_tfc(*x)))
                     } else {
                         let callee_info =
-                            self.computation_graph.get_node_info(x).unwrap();
+                            self.computation_graph.get_node_info(*x).unwrap();
                         callee_info
                             .transitive_firewall_callees()
                             .map(|x| Cow::Owned(x.clone()))
@@ -266,7 +265,7 @@ impl<C: Config> Engine<C> {
                 }));
 
             self.computing_lock_to_clean_query(
-                &query.id,
+                query.id,
                 &cleaned_edges,
                 Some(new_tfc),
                 lock_guard,
@@ -306,7 +305,7 @@ impl<C: Config> Engine<C> {
     ) -> Pin<Box<dyn Future<Output = Result<(), CyclicError>> + Send + 'x>>
     {
         Box::pin(async move {
-            let query_input = self.get_query_input::<Q>(&query_id).unwrap();
+            let query_input = self.get_query_input::<Q>(query_id).unwrap();
             let query_for = QueryWithID {
                 id: QueryID::new::<Q>(query_id),
                 query: &query_input,

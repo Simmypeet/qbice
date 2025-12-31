@@ -16,14 +16,14 @@ impl<C: Config> Engine<C> {
         backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
     ) {
         let backward_edges =
-            self.computation_graph.get_backward_edges(&current_query_id);
+            self.computation_graph.get_backward_edges(current_query_id);
 
         let backward_projections = backward_edges
             .iter()
             .map(|x| *x)
             .filter(|x| {
                 let query_kind =
-                    self.computation_graph.get_query_kind(x).unwrap();
+                    self.computation_graph.get_query_kind(*x).unwrap();
 
                 query_kind.is_projection()
             })
@@ -74,7 +74,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) async fn try_do_backward_projections(
         self: &Arc<Self>,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) {
         let current_timestamp =
             self.computation_graph.timestamp_manager.get_current();
@@ -113,7 +113,7 @@ impl<C: Config> Engine<C> {
             };
 
             // the lock is acquired, do the backward propagations
-            self.invoke_backward_projections(*query_id, lock_guard).await;
+            self.invoke_backward_projections(query_id, lock_guard).await;
         }
     }
 }

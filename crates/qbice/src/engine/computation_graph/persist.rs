@@ -5,16 +5,17 @@ use std::{
 
 use dashmap::{DashMap, DashSet, setref::multiple::RefMulti};
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::Compact128;
-use qbice_stable_type_id::Identifiable;
+use qbice_stable_hash::{Compact128, StableHash};
+use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{
     intern::Interned,
-    kv_database::{Column, KeyOfSet, KvDatabase, Normal, WriteTransaction},
-    sieve::RemoveElementFromSet,
+    kv_database::{
+        DiscriminantEncoding, KeyOfSetColumn, KvDatabase, WideColumn,
+        WideColumnValue, WriteBatch,
+    },
+    sieve::{KeyOfSetSieve, RemoveElementFromSet, WideColumnSieve},
 };
 use rayon::iter::IntoParallelRefIterator;
-
-pub(super) mod query_store;
 
 use crate::{
     Engine, ExecutionStyle, Query,
@@ -22,12 +23,22 @@ use crate::{
     engine::computation_graph::{
         ComputationGraph, QueryKind, QueryWithID, Sieve,
         lock::BackwardProjectionLockGuard,
-        persist::query_store::{QueryColumn, QueryStore},
-        tfc_achetype::TransitiveFirewallCallees,
-        timestamp::Timestamp,
+        tfc_achetype::TransitiveFirewallCallees, timestamp::Timestamp,
     },
     query::QueryID,
 };
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
+)]
+pub enum QueryNodeDiscriminant {
+    LastVerified,
+    ForwardEdgeOrder,
+    ForwardEdgeObservation,
+    QueryKind,
+    NodeInfo,
+    PendingBackwardProjection,
+}
 
 impl QueryKind {
     pub const fn is_projection(self) -> bool {
@@ -129,60 +140,6 @@ impl<C: Config> RemoveElementFromSet for BackwardEdge<C> {
     }
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
-)]
-struct LastVerifiedColumn;
-
-impl Column for LastVerifiedColumn {
-    type Key = QueryID;
-
-    type Value = Timestamp;
-
-    type Mode = Normal;
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
-)]
-pub struct ForwardEdgeOrderColumn;
-
-impl Column for ForwardEdgeOrderColumn {
-    type Key = QueryID;
-
-    type Value = Arc<[QueryID]>;
-
-    type Mode = Normal;
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
-)]
-pub struct ForwardEdgeObservationColumn<C>(PhantomData<C>);
-
-impl<C: Config> Column for ForwardEdgeObservationColumn<C> {
-    type Key = QueryID;
-
-    type Value = Arc<HashMap<QueryID, Observation, C::BuildHasher>>;
-
-    type Mode = Normal;
-}
-
-pub type NodeInfoColumn = (QueryID, NodeInfo);
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
-)]
-struct PendingBackwardProjectionColumn;
-
-impl Column for PendingBackwardProjectionColumn {
-    type Key = QueryID;
-
-    type Value = Timestamp;
-
-    type Mode = Normal;
-}
-
 #[derive(Identifiable)]
 pub struct DirtySetColumn;
 
@@ -194,10 +151,32 @@ pub struct Edge {
     to: QueryID,
 }
 
-impl Column for DirtySetColumn {
+impl WideColumn for DirtySetColumn {
     type Key = Edge;
-    type Value = ();
-    type Mode = Normal;
+    type Discriminant = ();
+
+    fn discriminant_encoding() -> DiscriminantEncoding {
+        DiscriminantEncoding::Prefixed
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Encode,
+    Decode,
+)]
+pub struct Unit;
+
+impl WideColumnValue<DirtySetColumn> for Unit {
+    fn discriminant() {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Identifiable)]
@@ -240,68 +219,170 @@ impl NodeInfo {
 )]
 pub struct BackwardEdgeColumn<C: Config>(PhantomData<C>);
 
-impl<C: Config> Column for BackwardEdgeColumn<C> {
+impl<C: Config> KeyOfSetColumn for BackwardEdgeColumn<C> {
     type Key = QueryID;
 
-    type Value = BackwardEdge<C>;
-
-    type Mode = KeyOfSet<QueryID>;
+    type Element = QueryID;
 }
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
 )]
-pub struct QueryKindColumn;
+pub struct QueryNodeColumn;
 
-impl Column for QueryKindColumn {
+impl WideColumn for QueryNodeColumn {
     type Key = QueryID;
+    type Discriminant = QueryNodeDiscriminant;
 
-    type Value = QueryKind;
+    fn discriminant_encoding() -> DiscriminantEncoding {
+        DiscriminantEncoding::Suffixed
+    }
+}
 
-    type Mode = Normal;
+macro_rules! implements_wide_column_value_new_type {
+    (
+        $name:ident,
+        $ty:ty,
+        $discriminant:expr
+    ) => {
+        #[derive(Debug, Clone, Encode, Decode)]
+        pub struct $name(pub $ty);
+
+        impl WideColumnValue<QueryNodeColumn> for $name {
+            fn discriminant() -> QueryNodeDiscriminant { $discriminant }
+        }
+    };
+}
+
+macro_rules! implements_wide_column_value {
+    (
+        $ty:ty,
+        $discriminant:expr
+    ) => {
+        impl WideColumnValue<QueryNodeColumn> for $ty {
+            fn discriminant() -> QueryNodeDiscriminant { $discriminant }
+        }
+    };
+}
+
+implements_wide_column_value_new_type!(
+    LastVerified,
+    Timestamp,
+    QueryNodeDiscriminant::LastVerified
+);
+
+implements_wide_column_value_new_type!(
+    ForwardEdgeOrder,
+    Arc<[QueryID]>,
+    QueryNodeDiscriminant::ForwardEdgeOrder
+);
+
+#[derive(Debug, Clone)]
+pub struct ForwardEdgeObservation<C: Config>(
+    Arc<HashMap<QueryID, Observation, C::BuildHasher>>,
+);
+
+impl<C: Config> WideColumnValue<QueryNodeColumn> for ForwardEdgeObservation<C> {
+    fn discriminant() -> QueryNodeDiscriminant {
+        QueryNodeDiscriminant::ForwardEdgeObservation
+    }
+}
+
+impl<C: Config> Encode for ForwardEdgeObservation<C> {
+    fn encode<E: qbice_serialize::Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &qbice_serialize::Plugin,
+        session: &mut qbice_serialize::session::Session,
+    ) -> std::io::Result<()> {
+        (*self.0).encode(encoder, plugin, session)
+    }
+}
+
+impl<C: Config> Decode for ForwardEdgeObservation<C> {
+    fn decode<D: qbice_serialize::Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &qbice_serialize::Plugin,
+        session: &mut qbice_serialize::session::Session,
+    ) -> std::io::Result<Self> {
+        let map = HashMap::decode(decoder, plugin, session)?;
+        Ok(Self(Arc::new(map)))
+    }
+}
+
+implements_wide_column_value!(QueryKind, QueryNodeDiscriminant::QueryKind);
+
+implements_wide_column_value!(NodeInfo, QueryNodeDiscriminant::NodeInfo);
+
+implements_wide_column_value_new_type!(
+    PendingBackwardProjection,
+    Timestamp,
+    QueryNodeDiscriminant::PendingBackwardProjection
+);
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+pub struct QueryStoreColumn;
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
+)]
+pub enum QueryStoreDiscriminant {
+    Input,
+    Result,
+}
+
+impl WideColumn for QueryStoreColumn {
+    type Key = Compact128;
+    type Discriminant = (StableTypeID, QueryStoreDiscriminant);
+
+    fn discriminant_encoding() -> DiscriminantEncoding {
+        DiscriminantEncoding::Prefixed
+    }
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct QueryInput<Q: Query>(pub Q);
+
+impl<Q: Query> WideColumnValue<QueryStoreColumn> for QueryInput<Q> {
+    fn discriminant() -> (StableTypeID, QueryStoreDiscriminant) {
+        (Q::STABLE_TYPE_ID, QueryStoreDiscriminant::Input)
+    }
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct QueryResult<Q: Query>(pub Q::Value);
+
+impl<Q: Query> WideColumnValue<QueryStoreColumn> for QueryResult<Q> {
+    fn discriminant() -> (StableTypeID, QueryStoreDiscriminant) {
+        (Q::STABLE_TYPE_ID, QueryStoreDiscriminant::Result)
+    }
 }
 
 pub struct Persist<C: Config> {
-    last_verifieds: Sieve<LastVerifiedColumn, C>,
-    forward_edge_orders: Sieve<ForwardEdgeOrderColumn, C>,
-    forward_edge_observations: Sieve<ForwardEdgeObservationColumn<C>, C>,
-    query_kinds: Sieve<QueryKindColumn, C>,
-    node_info: Sieve<NodeInfoColumn, C>,
-    dirty_edge_set: Sieve<DirtySetColumn, C>,
-    backward_edges: Sieve<BackwardEdgeColumn<C>, C>,
-    pending_backward_projections: Sieve<PendingBackwardProjectionColumn, C>,
-
-    query_store: query_store::QueryStore<C>,
+    query_node: WideColumnSieve<QueryNodeColumn, C::Database, C::BuildHasher>,
+    dirty_edge_set:
+        WideColumnSieve<DirtySetColumn, C::Database, C::BuildHasher>,
+    query_store: WideColumnSieve<QueryStoreColumn, C::Database, C::BuildHasher>,
+    backward_edges: KeyOfSetSieve<
+        BackwardEdgeColumn<C>,
+        BackwardEdge<C>,
+        C::Database,
+        C::BuildHasher,
+    >,
 }
 
 impl<C: Config> Persist<C> {
     pub fn new(db: Arc<C::Database>, shard_amount: usize) -> Self {
         Self {
-            last_verifieds: Sieve::<_, C>::new(
+            query_node: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 C::BuildHasher::default(),
             ),
-            forward_edge_orders: Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db.clone(),
-                C::BuildHasher::default(),
-            ),
-            forward_edge_observations: Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db.clone(),
-                C::BuildHasher::default(),
-            ),
-            node_info: Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db.clone(),
-                C::BuildHasher::default(),
-            ),
-            query_kinds: Sieve::<_, C>::new(
+            query_store: Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
@@ -314,18 +395,6 @@ impl<C: Config> Persist<C> {
                 C::BuildHasher::default(),
             ),
             backward_edges: Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db.clone(),
-                C::BuildHasher::default(),
-            ),
-            pending_backward_projections: Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db.clone(),
-                C::BuildHasher::default(),
-            ),
-            query_store: QueryStore::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db,
@@ -344,57 +413,69 @@ pub struct Observation {
 impl<C: Config> ComputationGraph<C> {
     pub fn get_forward_edges_order(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) -> Option<Arc<[QueryID]>> {
-        self.persist.forward_edge_orders.get_normal(query_id).map(|x| x.clone())
+        self.persist
+            .query_node
+            .get_normal::<ForwardEdgeOrder>(query_id)
+            .map(|x| x.0.clone())
     }
 
     pub fn get_forward_edge_observations(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
         self.persist
-            .forward_edge_observations
-            .get_normal(query_id)
+            .query_node
+            .get_normal::<ForwardEdgeObservation<C>>(query_id)
+            .map(|x| x.0.clone())
+    }
+
+    pub fn get_node_info(&self, query_id: QueryID) -> Option<NodeInfo> {
+        self.persist
+            .query_node
+            .get_normal::<NodeInfo>(query_id)
             .map(|x| x.clone())
     }
 
-    pub fn get_node_info(&self, query_id: &QueryID) -> Option<NodeInfo> {
-        self.persist.node_info.get_normal(query_id).map(|x| x.clone())
+    pub fn get_query_kind(&self, query_id: QueryID) -> Option<QueryKind> {
+        self.persist.query_node.get_normal::<QueryKind>(query_id).map(|x| *x)
     }
 
-    pub fn get_query_kind(&self, query_id: &QueryID) -> Option<QueryKind> {
-        self.persist.query_kinds.get_normal(query_id).map(|x| *x)
+    pub fn get_last_verified(&self, query_id: QueryID) -> Option<Timestamp> {
+        self.persist
+            .query_node
+            .get_normal::<LastVerified>(query_id)
+            .map(|x| x.0)
     }
 
-    pub fn get_last_verified(&self, query_id: &QueryID) -> Option<Timestamp> {
-        self.persist.last_verifieds.get_normal(query_id).map(|x| *x)
+    pub fn get_backward_edges(&self, query_id: QueryID) -> BackwardEdge<C> {
+        self.persist.backward_edges.get_set(&query_id).clone()
     }
 
-    pub fn get_backward_edges(&self, query_id: &QueryID) -> BackwardEdge<C> {
-        self.persist.backward_edges.get_set(query_id).clone()
-    }
-
-    pub fn get_value<Q: Query>(
+    pub fn get_query_result<Q: Query>(
         &self,
-        query_input_hash_128: &Compact128,
+        query_input_hash_128: Compact128,
     ) -> Option<Q::Value> {
-        self.persist.query_store.get_value::<Q>(query_input_hash_128)
+        self.persist
+            .query_store
+            .get_normal::<QueryResult<Q>>(query_input_hash_128)
+            .map(|x| x.0.clone())
     }
 
     pub fn get_pending_backward_projection(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
     ) -> Option<Timestamp> {
         self.persist
-            .pending_backward_projections
-            .get_normal(query_id)
-            .map(|x| *x)
+            .query_node
+            .get_normal::<PendingBackwardProjection>(query_id)
+            .map(|x| x.0)
     }
 }
 
 impl<C: Config> Engine<C> {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn set_computed<'s, Q: Query>(
         &'s self,
         query_id: &QueryWithID<'_, Q>,
@@ -409,18 +490,16 @@ impl<C: Config> Engine<C> {
         >,
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
         has_pending_backward_projection: bool,
-        continuting_tx: Option<
-            <C::Database as KvDatabase>::WriteTransaction<'s>,
-        >,
+        continuting_tx: Option<<C::Database as KvDatabase>::WriteBatch<'s>>,
     ) {
         let query_value_fingerprint =
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
         let transitive_firewall_callees_fingerprint = self.hash(&tfc_achetype);
 
-        let forward_edge_observations = Arc::new(forward_edge_observations);
+        let forward_edge_order = ForwardEdgeOrder(forward_edge_order);
+        let forward_edge_observations =
+            ForwardEdgeObservation::<C>(Arc::new(forward_edge_observations));
 
-        let query_entry =
-            query_store::QueryEntry::new(query_id.query.clone(), query_value);
         let node_info = NodeInfo::new(
             query_value_fingerprint,
             transitive_firewall_callees_fingerprint,
@@ -430,7 +509,10 @@ impl<C: Config> Engine<C> {
             self.computation_graph.timestamp_manager.get_current();
 
         let existing_forward_edges =
-            self.computation_graph.get_forward_edges_order(&query_id.id);
+            self.computation_graph.get_forward_edges_order(query_id.id);
+
+        let query_input = QueryInput::<Q>(query_id.query.clone());
+        let query_result = QueryResult::<Q>(query_value);
 
         {
             let tx = continuting_tx
@@ -438,13 +520,13 @@ impl<C: Config> Engine<C> {
 
             // mark pending backward projection if needed
             if has_pending_backward_projection {
-                tx.put::<PendingBackwardProjectionColumn>(
+                tx.put::<QueryNodeColumn, _>(
                     &query_id.id,
-                    &current_timestamp,
+                    &PendingBackwardProjection(current_timestamp),
                 );
             }
 
-            tx.put::<QueryKindColumn>(&query_id.id, &query_kind);
+            tx.put::<QueryNodeColumn, _>(&query_id.id, &node_info);
 
             // remove prior backward edges
             if let Some(forward_edges) = &existing_forward_edges {
@@ -456,24 +538,32 @@ impl<C: Config> Engine<C> {
                 }
             }
 
-            tx.put::<LastVerifiedColumn>(&query_id.id, &current_timestamp);
+            tx.put::<QueryNodeColumn, _>(
+                &query_id.id,
+                &LastVerified(current_timestamp),
+            );
 
-            for edge in forward_edge_order.iter() {
+            for edge in forward_edge_order.0.iter() {
                 tx.insert_member::<BackwardEdgeColumn<C>>(edge, &query_id.id);
             }
 
-            tx.put::<ForwardEdgeOrderColumn>(&query_id.id, &forward_edge_order);
+            tx.put::<QueryNodeColumn, _>(&query_id.id, &forward_edge_order);
 
-            tx.put::<ForwardEdgeObservationColumn<C>>(
+            tx.put::<QueryNodeColumn, _>(
                 &query_id.id,
                 &forward_edge_observations,
             );
 
-            tx.put::<NodeInfoColumn>(&query_id.id, &node_info);
+            tx.put::<QueryNodeColumn, _>(&query_id.id, &query_kind);
 
-            tx.put::<QueryColumn<Q>>(
-                &query_id.id.hash_128().into(),
-                &query_entry,
+            tx.put::<QueryStoreColumn, _>(
+                &query_id.id.compact_hash_128(),
+                &query_result,
+            );
+
+            tx.put::<QueryStoreColumn, _>(
+                &query_id.id.compact_hash_128(),
+                &query_input,
             );
 
             tx.commit();
@@ -492,23 +582,28 @@ impl<C: Config> Engine<C> {
 
             // set pending backward projection if needed
             if has_pending_backward_projection {
-                self.computation_graph
-                    .persist
-                    .pending_backward_projections
-                    .put(query_id.id, Some(current_timestamp));
+                self.computation_graph.persist.query_node.put(
+                    query_id.id,
+                    Some(PendingBackwardProjection(current_timestamp)),
+                );
             }
 
             self.computation_graph
                 .persist
-                .query_kinds
+                .query_node
+                .put(query_id.id, Some(node_info));
+
+            self.computation_graph
+                .persist
+                .query_node
                 .put(query_id.id, Some(query_kind));
 
             self.computation_graph
                 .persist
-                .last_verifieds
-                .put(query_id.id, Some(current_timestamp));
+                .query_node
+                .put(query_id.id, Some(LastVerified(current_timestamp)));
 
-            for edge in forward_edge_order.iter() {
+            for edge in forward_edge_order.0.iter() {
                 self.computation_graph
                     .persist
                     .backward_edges
@@ -517,23 +612,23 @@ impl<C: Config> Engine<C> {
 
             self.computation_graph
                 .persist
-                .forward_edge_orders
+                .query_node
                 .put(query_id.id, Some(forward_edge_order));
 
             self.computation_graph
                 .persist
-                .forward_edge_observations
+                .query_node
                 .put(query_id.id, Some(forward_edge_observations));
 
             self.computation_graph
                 .persist
-                .node_info
-                .put(query_id.id, Some(node_info));
+                .query_store
+                .put(query_id.id.compact_hash_128(), Some(query_input));
 
             self.computation_graph
                 .persist
                 .query_store
-                .insert::<Q>(query_id.id.hash_128().into(), query_entry);
+                .put(query_id.id.compact_hash_128(), Some(query_result));
         }
     }
 
@@ -543,17 +638,18 @@ impl<C: Config> Engine<C> {
         query_hash_128: Compact128,
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
-        tx: &<C::Database as KvDatabase>::WriteTransaction<'_>,
+        tx: &<C::Database as KvDatabase>::WriteBatch<'_>,
     ) {
         let query_id = QueryID::new::<Q>(query_hash_128);
 
         // if have an existing forward edges, unwire the backward edges
         let existing_forward_edges =
-            self.computation_graph.get_forward_edges_order(&query_id);
+            self.computation_graph.get_forward_edges_order(query_id);
 
-        let empty_forward_edges = Arc::from([]);
-        let empty_forward_edge_observations =
-            Arc::new(HashMap::with_hasher(C::BuildHasher::default()));
+        let empty_forward_edges = ForwardEdgeOrder(Arc::from([]));
+        let empty_forward_edge_observations = ForwardEdgeObservation::<C>(
+            Arc::new(HashMap::with_hasher(C::BuildHasher::default())),
+        );
 
         let transitive_firewall_callees = None;
         let transitive_firewall_callees_fingerprint =
@@ -567,7 +663,8 @@ impl<C: Config> Engine<C> {
 
         let timestamp = self.computation_graph.timestamp_manager.get_current();
 
-        let query_entry = query_store::QueryEntry::new(query, query_value);
+        let query_input = QueryInput::<Q>(query);
+        let query_result = QueryResult::<Q>(query_value);
 
         {
             // remove prior backward edges
@@ -577,20 +674,28 @@ impl<C: Config> Engine<C> {
                 }
             }
 
-            tx.put::<QueryKindColumn>(&query_id, &QueryKind::Input);
+            tx.put::<QueryNodeColumn, _>(&query_id, &QueryKind::Input);
 
-            tx.put::<LastVerifiedColumn>(&query_id, &timestamp);
+            tx.put::<QueryNodeColumn, _>(&query_id, &LastVerified(timestamp));
 
-            tx.put::<ForwardEdgeOrderColumn>(&query_id, &empty_forward_edges);
+            tx.put::<QueryNodeColumn, _>(&query_id, &empty_forward_edges);
 
-            tx.put::<ForwardEdgeObservationColumn<C>>(
+            tx.put::<QueryNodeColumn, _>(
                 &query_id,
                 &empty_forward_edge_observations,
             );
 
-            tx.put::<NodeInfoColumn>(&query_id, &node_info);
+            tx.put::<QueryNodeColumn, _>(&query_id, &node_info);
 
-            tx.put::<QueryColumn<Q>>(&query_id.hash_128().into(), &query_entry);
+            tx.put::<QueryStoreColumn, _>(
+                &query_id.compact_hash_128(),
+                &query_input,
+            );
+
+            tx.put::<QueryStoreColumn, _>(
+                &query_id.compact_hash_128(),
+                &query_result,
+            );
         }
 
         {
@@ -605,33 +710,38 @@ impl<C: Config> Engine<C> {
 
             self.computation_graph
                 .persist
-                .query_kinds
+                .query_node
                 .put(query_id, Some(QueryKind::Input));
 
             self.computation_graph
                 .persist
-                .last_verifieds
-                .put(query_id, Some(timestamp));
+                .query_node
+                .put(query_id, Some(LastVerified(timestamp)));
 
             self.computation_graph
                 .persist
-                .forward_edge_orders
+                .query_node
                 .put(query_id, Some(empty_forward_edges));
 
             self.computation_graph
                 .persist
-                .forward_edge_observations
+                .query_node
                 .put(query_id, Some(empty_forward_edge_observations));
 
             self.computation_graph
                 .persist
-                .node_info
+                .query_node
                 .put(query_id, Some(node_info));
 
             self.computation_graph
                 .persist
                 .query_store
-                .insert::<Q>(query_id.hash_128().into(), query_entry);
+                .put(query_id.compact_hash_128(), Some(query_input));
+
+            self.computation_graph
+                .persist
+                .query_store
+                .put(query_id.compact_hash_128(), Some(query_result));
         }
     }
 
@@ -639,20 +749,20 @@ impl<C: Config> Engine<C> {
         &self,
         from: QueryID,
         to: QueryID,
-        tx: &<C::Database as KvDatabase>::WriteTransaction<'_>,
+        tx: &<C::Database as KvDatabase>::WriteBatch<'_>,
     ) {
         let edge = Edge { from, to };
 
-        tx.put::<DirtySetColumn>(&edge, &());
+        tx.put::<DirtySetColumn, _>(&edge, &Unit);
 
-        self.computation_graph.persist.dirty_edge_set.put(edge, Some(()));
+        self.computation_graph.persist.dirty_edge_set.put(edge, Some(Unit));
         self.computation_graph.add_dirtied_edge_count();
     }
 
     #[allow(clippy::option_option)]
     pub(super) fn clean_query(
         &self,
-        query_id: &QueryID,
+        query_id: QueryID,
         clean_edges: &[QueryID],
         new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
     ) {
@@ -674,15 +784,18 @@ impl<C: Config> Engine<C> {
             let tx = self.database.write_transaction();
 
             for callee in clean_edges.iter().copied() {
-                let edge = Edge { from: *query_id, to: callee };
+                let edge = Edge { from: query_id, to: callee };
 
-                tx.delete::<DirtySetColumn>(&edge);
+                tx.delete::<DirtySetColumn, Unit>(&edge);
             }
 
-            tx.put::<LastVerifiedColumn>(query_id, &current_timestamp);
+            tx.put::<QueryNodeColumn, _>(
+                &query_id,
+                &LastVerified(current_timestamp),
+            );
 
             if let Some(node_info) = &new_node_info {
-                tx.put::<NodeInfoColumn>(query_id, node_info);
+                tx.put::<QueryNodeColumn, _>(&query_id, node_info);
             }
 
             tx.commit();
@@ -690,22 +803,25 @@ impl<C: Config> Engine<C> {
 
         {
             for callee in clean_edges.iter().copied() {
-                let edge = Edge { from: *query_id, to: callee };
+                let edge = Edge { from: query_id, to: callee };
 
-                self.computation_graph.persist.dirty_edge_set.put(edge, None);
+                self.computation_graph
+                    .persist
+                    .dirty_edge_set
+                    .put::<Unit>(edge, None);
             }
 
             if let Some(node_info) = new_node_info {
                 self.computation_graph
                     .persist
-                    .node_info
-                    .put(*query_id, Some(node_info));
+                    .query_node
+                    .put(query_id, Some(node_info));
             }
 
             self.computation_graph
                 .persist
-                .last_verifieds
-                .put(*query_id, Some(current_timestamp));
+                .query_node
+                .put(query_id, Some(LastVerified(current_timestamp)));
         }
     }
 
@@ -713,15 +829,19 @@ impl<C: Config> Engine<C> {
         self.computation_graph
             .persist
             .dirty_edge_set
-            .get_normal(&Edge { from, to })
+            .get_normal::<Unit>(Edge { from, to })
             .is_some()
     }
 
     pub(super) fn get_query_input<Q: Query>(
         &self,
-        query_id: &Compact128,
+        query_id: Compact128,
     ) -> Option<Q> {
-        self.computation_graph.persist.query_store.get_input::<Q>(query_id)
+        self.computation_graph
+            .persist
+            .query_store
+            .get_normal::<QueryInput<Q>>(query_id)
+            .map(|x| x.0.clone())
     }
 
     pub(super) fn done_backward_projection(
@@ -731,15 +851,47 @@ impl<C: Config> Engine<C> {
     ) {
         let tx = self.database.write_transaction();
 
-        tx.delete::<PendingBackwardProjectionColumn>(query_id);
+        tx.delete::<QueryNodeColumn, PendingBackwardProjection>(query_id);
 
         tx.commit();
 
         self.computation_graph
             .persist
-            .pending_backward_projections
-            .put(*query_id, None);
+            .query_node
+            .put::<PendingBackwardProjection>(*query_id, None);
 
         backward_projection_lock_guard.done();
+    }
+}
+
+pub(crate) struct QueryDebug {
+    pub type_name: &'static str,
+    pub input: String,
+    pub output: String,
+}
+
+impl<C: Config> Engine<C> {
+    pub(crate) fn get_query_debug<Q: Query>(
+        &self,
+        query_id: Compact128,
+    ) -> Option<QueryDebug> {
+        let (Some(query_input), Some(query_value)) = (
+            self.computation_graph
+                .persist
+                .query_store
+                .get_normal::<QueryInput<Q>>(query_id),
+            self.computation_graph
+                .persist
+                .query_store
+                .get_normal::<QueryResult<Q>>(query_id),
+        ) else {
+            return None;
+        };
+
+        Some(QueryDebug {
+            type_name: std::any::type_name::<Q>(),
+            input: format!("{query_input:?}"),
+            output: format!("{query_value:?}"),
+        })
     }
 }

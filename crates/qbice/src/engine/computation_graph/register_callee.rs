@@ -35,7 +35,7 @@ impl<C: Config> Drop for UndoRegisterCallee<'_, C> {
         }
 
         if let Some(caller) = self.caller_source {
-            let mut caller_meta = self.graph.lock.get_lock_mut(&caller);
+            let mut caller_meta = self.graph.lock.get_lock_mut(caller);
 
             caller_meta.abort_callee(&self.callee_target);
         }
@@ -44,7 +44,7 @@ impl<C: Config> Drop for UndoRegisterCallee<'_, C> {
 impl<C: Config> Engine<C> {
     pub(super) fn register_callee(
         &self,
-        caller_source: Option<&QueryID>,
+        caller_source: Option<QueryID>,
         calee_target: QueryID,
     ) -> Option<UndoRegisterCallee<'_, C>> {
         // record the dependency first, don't necessary need to figure out
@@ -81,7 +81,7 @@ impl<C: Config> Engine<C> {
 
                 Some(UndoRegisterCallee::new(
                     &self.computation_graph,
-                    Some(*caller),
+                    Some(caller),
                     calee_target,
                 ))
             },

@@ -2,6 +2,7 @@
 //! trait.
 
 pub use qbice_identifiable_derive::Identifiable;
+use qbice_serialize::{Decode, Encode};
 pub use qbice_stable_hash::StableHash;
 
 /// A stable alternative to [`std::any::TypeId`] that is used to uniquely
@@ -75,9 +76,20 @@ pub use qbice_stable_hash::StableHash;
 /// let id = MyType::STABLE_TYPE_ID;
 /// ```
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Encode,
+    Decode,
 )]
 #[stable_hash_crate(qbice_stable_hash)]
+#[serialize_crate(qbice_serialize)]
 #[allow(clippy::unsafe_derive_deserialize)]
 pub struct StableTypeID(u64, u64);
 
