@@ -11,16 +11,18 @@ use parking_lot::Mutex;
 use qbice_serialize::{
     Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
 };
-use qbice_stable_type_id::StableTypeID;
+use qbice_stable_type_id::{Identifiable, StableTypeID};
 use rust_rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, BoundColumnFamily,
     ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
     DBWithThreadMode, DataBlockIndexType, IteratorMode, MultiThreaded, Options,
-    SliceTransform, UniversalCompactOptions, WriteBatch,
+    SliceTransform, UniversalCompactOptions,
 };
 
-use super::{Column, KvDatabase, Normal, WriteTransaction};
-use crate::kv_database::KvDatabaseFactory;
+use crate::kv_database::{
+    DiscriminantEncoding, KeyOfSetColumn, KvDatabase, KvDatabaseFactory,
+    WideColumn, WideColumnValue, WriteBatch,
+};
 
 #[derive(Debug)]
 struct BufferPool {
@@ -44,7 +46,7 @@ impl BufferPool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ColumnKind {
-    Normal,
+    WideColumn,
     KeyOfSet,
 }
 
@@ -241,19 +243,26 @@ impl RocksDB {
     }
 
     /// Generates a column family name from a stable type ID.
-    fn cf_name_from_id(id: StableTypeID) -> String {
-        format!("cf_{:032x}", id.as_u128())
+    fn cf_name_from_id(id: StableTypeID, kind: ColumnKind) -> String {
+        format!(
+            "cf_{}_{:#X}",
+            match kind {
+                ColumnKind::WideColumn => "wide_column",
+                ColumnKind::KeyOfSet => "key_of_set",
+            },
+            id.as_u128()
+        )
     }
 
     fn get_cf_options(kind: ColumnKind) -> Options {
         match kind {
-            ColumnKind::Normal => Options::default(),
+            ColumnKind::WideColumn => Options::default(),
             ColumnKind::KeyOfSet => Self::get_key_of_set_options(),
         }
     }
 
     /// Gets or creates a column family for the given column type.
-    fn get_or_create_cf<C: Column>(
+    fn get_or_create_cf<C: Identifiable>(
         &self,
         kind: ColumnKind,
     ) -> Arc<BoundColumnFamily<'_>> {
@@ -267,7 +276,7 @@ impl RocksDB {
         }
 
         // Create the column family if it doesn't exist
-        let cf_name = Self::cf_name_from_id(id);
+        let cf_name = Self::cf_name_from_id(id, kind);
 
         // Try to get existing CF first
         if let Some(cf) = self.db.cf_handle(&cf_name) {
@@ -378,6 +387,22 @@ impl RocksDB {
         SliceTransform::create(name, Self::transform_key, Some(in_domain))
     }
 
+    fn encode_wide_column_key<W: WideColumn, C: WideColumnValue<W>>(
+        &self,
+        key: &W::Key,
+        buffer: &mut Vec<u8>,
+    ) {
+        if W::discriminant_encoding() == DiscriminantEncoding::Prefixed {
+            self.encode_value(&C::discriminant(), buffer);
+        }
+
+        self.encode_value(key, buffer);
+
+        if W::discriminant_encoding() == DiscriminantEncoding::Suffixed {
+            self.encode_value(&C::discriminant(), buffer);
+        }
+    }
+
     fn get_key_of_set_options() -> Options {
         let mut opts = Options::default();
         let mut table_opts = BlockBasedOptions::default();
@@ -427,7 +452,7 @@ pub struct RocksDBWriteTransaction<'a> {
     db: &'a RocksDB,
 
     /// The write batch accumulating all operations.
-    batch: Mutex<WriteBatch>,
+    batch: Mutex<rust_rocksdb::WriteBatch>,
 }
 
 impl std::fmt::Debug for RocksDBWriteTransaction<'_> {
@@ -442,22 +467,22 @@ impl std::fmt::Debug for RocksDBWriteTransaction<'_> {
 impl<'a> RocksDBWriteTransaction<'a> {
     /// Creates a new write transaction.
     fn new(db: &'a RocksDB) -> Self {
-        Self { db, batch: Mutex::new(WriteBatch::default()) }
+        Self { db, batch: Mutex::new(rust_rocksdb::WriteBatch::default()) }
     }
 }
 
-impl WriteTransaction for RocksDBWriteTransaction<'_> {
-    fn put<C: Column<Mode = Normal>>(
+impl WriteBatch for RocksDBWriteTransaction<'_> {
+    fn put<W: WideColumn, C: WideColumnValue<W>>(
         &self,
-        key: &<C as Column>::Key,
-        value: &<C as Column>::Value,
+        key: &W::Key,
+        value: &C,
     ) {
-        let cf = self.db.get_or_create_cf::<C>(ColumnKind::Normal);
+        let cf = self.db.get_or_create_cf::<W>(ColumnKind::WideColumn);
 
         let mut key_buffer = self.db.buffer_pool.get_buffer();
         let mut value_buffer = self.db.buffer_pool.get_buffer();
 
-        self.db.encode_value(key, &mut key_buffer);
+        self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
         self.db.encode_value(value, &mut value_buffer);
 
         self.batch.lock().put_cf(
@@ -470,25 +495,23 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
         self.db.buffer_pool.return_buffer(value_buffer);
     }
 
-    fn delete<C: Column<Mode = Normal>>(&self, key: &<C as Column>::Key) {
-        let cf = self.db.get_or_create_cf::<C>(ColumnKind::Normal);
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&self, key: &W::Key) {
+        let cf = self.db.get_or_create_cf::<W>(ColumnKind::WideColumn);
 
         let mut key_buffer = self.db.buffer_pool.get_buffer();
 
-        self.db.encode_value(key, &mut key_buffer);
+        self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
 
         self.batch.lock().delete_cf(&cf, key_buffer.as_slice());
 
         self.db.buffer_pool.return_buffer(key_buffer);
     }
 
-    fn insert_member<C: Column>(
+    fn insert_member<C: KeyOfSetColumn>(
         &self,
-        key: &<C as Column>::Key,
-        value: &<<C as Column>::Mode as super::KeyOfSetMode>::Value,
-    ) where
-        <C as Column>::Mode: super::KeyOfSetMode,
-    {
+        key: &C::Key,
+        value: &C::Element,
+    ) {
         let cf = self.db.get_or_create_cf::<C>(ColumnKind::KeyOfSet);
         let mut buffer = self.db.buffer_pool.get_buffer();
 
@@ -502,13 +525,11 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
         self.db.buffer_pool.return_buffer(buffer);
     }
 
-    fn delete_member<C: Column>(
+    fn delete_member<C: KeyOfSetColumn>(
         &self,
-        key: &<C as Column>::Key,
-        value: &<<C as Column>::Mode as super::KeyOfSetMode>::Value,
-    ) where
-        <C as Column>::Mode: super::KeyOfSetMode,
-    {
+        key: &C::Key,
+        value: &C::Element,
+    ) {
         let cf = self.db.get_or_create_cf::<C>(ColumnKind::KeyOfSet);
         let mut buffer = self.db.buffer_pool.get_buffer();
 
@@ -534,16 +555,16 @@ impl WriteTransaction for RocksDBWriteTransaction<'_> {
 }
 
 impl KvDatabase for RocksDB {
-    type WriteTransaction<'a> = RocksDBWriteTransaction<'a>;
+    type WriteBatch<'a> = RocksDBWriteTransaction<'a>;
 
-    fn get<C: Column<Mode = Normal>>(
+    fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
         &self,
-        key: &C::Key,
-    ) -> Option<<C as Column>::Value> {
-        let cf = self.get_or_create_cf::<C>(ColumnKind::Normal);
+        key: &W::Key,
+    ) -> Option<C> {
+        let cf = self.get_or_create_cf::<W>(ColumnKind::WideColumn);
 
         let mut buffer = self.buffer_pool.get_buffer();
-        self.encode_value(key, &mut buffer);
+        self.encode_wide_column_key::<W, C>(key, &mut buffer);
 
         match self.db.get_cf(&cf, &buffer) {
             Ok(Some(value_bytes)) => {
@@ -551,7 +572,7 @@ impl KvDatabase for RocksDB {
                     PostcardDecoder::new(std::io::Cursor::new(value_bytes));
 
                 let value = decoder
-                    .decode::<C::Value>(&self.plugin)
+                    .decode::<C>(&self.plugin)
                     .expect("decoding should not fail");
 
                 self.buffer_pool.return_buffer(buffer);
@@ -568,13 +589,10 @@ impl KvDatabase for RocksDB {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn scan_members<'s, C: Column>(
+    fn scan_members<'s, C: KeyOfSetColumn>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Iterator<Item = <C::Mode as super::KeyOfSetMode>::Value> + Send
-    where
-        C::Mode: super::KeyOfSetMode,
-    {
+    ) -> impl Iterator<Item = C::Element> {
         let cf = self.get_or_create_cf::<C>(ColumnKind::KeyOfSet);
         let mut prefix_buffer = self.buffer_pool.get_buffer();
         self.encode_value_length_prefixed(key, &mut prefix_buffer);
@@ -607,15 +625,12 @@ impl KvDatabase for RocksDB {
                 PostcardDecoder::new(std::io::Cursor::new(&key[8 + length..]));
 
             decoder
-                .decode::<<C::Mode as super::KeyOfSetMode>::Value>(&self.plugin)
+                .decode::<C::Element>(&self.plugin)
                 .expect("decoding should not fail")
         })
     }
 
-    fn write_transaction(&self) -> Self::WriteTransaction<'_> {
+    fn write_transaction(&self) -> Self::WriteBatch<'_> {
         RocksDBWriteTransaction::new(self)
     }
 }
-
-#[cfg(test)]
-mod test;

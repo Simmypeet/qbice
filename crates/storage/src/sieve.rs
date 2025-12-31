@@ -26,10 +26,12 @@
 
 use core::fmt;
 use std::{
+    any::Any,
     borrow::Borrow,
     collections::{HashMap, HashSet},
     fmt::Debug,
     hash::{BuildHasher, BuildHasherDefault, Hash},
+    marker::PhantomData,
     option::Option,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -38,37 +40,50 @@ use dashmap::DashSet;
 use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 
 use crate::{
-    kv_database::{Column, KeyOfSet, KeyOfSetMode, KvDatabase, Normal},
+    kv_database::{KeyOfSetColumn, KvDatabase, WideColumn, WideColumnValue},
     sharded::Sharded,
 };
 
-/// A marker trait representing the storage mode of a column.
-///
-/// This trait connects a column's storage mode ([`Normal`] or [`KeyOfSet`]) to
-/// the type of value stored in the cache backing storage. Different storage
-/// modes may wrap values differently for caching purposes.
-///
-/// # Implementations
-///
-/// - For [`Normal`] mode: Values are wrapped in `Option<V>` to distinguish
-///   between "not in cache" and "known to not exist in database".
-/// - For [`KeyOfSet<T>`] mode: Values are stored directly as the collection
-///   type (e.g., `HashSet<T>`) since sets always have a valid empty state.
-pub trait BackingStorage<V> {
-    /// The type of value stored in the backing storage for this mode.
-    ///
-    /// This may differ from the column's value type to accommodate caching
-    /// semantics (e.g., wrapping in `Option`).
+/// An internal trait abstracting the key and value types used for backing
+/// storage in the SIEVE cache.
+pub trait BackingStorage {
+    /// The type of keys used in the backing storage.
+    type Key: Eq + Hash + Clone;
+
+    /// The type of values stored in the backing storage.
     type Value;
 }
 
-impl<V> BackingStorage<V> for Normal {
-    type Value = Option<V>;
+/// An adaptor for using wide columns as backing storage in the SIEVE cache.
+///
+/// See [`WideColumnSieve`] for details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WideColumnAdaptor<C>(pub PhantomData<C>);
+
+impl<C: WideColumn> BackingStorage for WideColumnAdaptor<C> {
+    type Key = (C::Key, C::Discriminant);
+    type Value = Option<Box<dyn Any + Send + Sync>>;
 }
 
-impl<ColumnValue, V> BackingStorage<ColumnValue> for KeyOfSet<V> {
-    type Value = ColumnValue;
+/// An adaptor for using key-of-set columns as backing storage in the SIEVE
+/// cache.
+///
+/// See [`KeyOfSetSieve`] for details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeyOfSetAdaptor<C, V>(pub PhantomData<(C, V)>);
+
+impl<C: KeyOfSetColumn, V> BackingStorage for KeyOfSetAdaptor<C, V> {
+    type Key = C::Key;
+    type Value = V;
 }
+
+/// A sharded sieve cache operating on wide columns data schema.
+pub type WideColumnSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
+    Sieve<WideColumnAdaptor<C>, DB, S>;
+
+/// A sharded sieve cache operating on key-of-set columns data schema.
+pub type KeyOfSetSieve<C, V, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
+    Sieve<KeyOfSetAdaptor<C, V>, DB, S>;
 
 /// A trait for removing an element from a set-like collection.
 ///
@@ -139,22 +154,21 @@ impl<T: Eq + Hash, S: BuildHasher + Clone> RemoveElementFromSet
 /// concurrent access. Each shard maintains its own SIEVE state and can be
 /// accessed independently.
 #[allow(clippy::type_complexity)] // shards field
-pub struct Sieve<C: Column, DB, S = BuildHasherDefault<fxhash::FxHasher>>
-where
-    C::Mode: BackingStorage<C::Value>,
-{
-    shards: Sharded<SieveShard<C, C::Mode, S>>,
+pub struct Sieve<
+    B: BackingStorage,
+    DB,
+    S = BuildHasherDefault<fxhash::FxHasher>,
+> {
+    shards: Sharded<SieveShard<B, S>>,
     hasher_builder: S,
 
     backing_db: Arc<DB>,
 }
 
-impl<C: Column, DB, S> Debug for Sieve<C, DB, S>
+impl<B: BackingStorage, DB, S> Debug for Sieve<B, DB, S>
 where
-    C::Mode: BackingStorage<C::Value>,
-    C::Key: Debug,
-    C::Value: Debug,
-    <C::Mode as BackingStorage<C::Value>>::Value: Debug,
+    B::Key: Debug,
+    B::Value: Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut map = f.debug_map();
@@ -171,10 +185,7 @@ where
     }
 }
 
-impl<C: Column, DB, S: Clone> Sieve<C, DB, S>
-where
-    C::Mode: BackingStorage<C::Value>,
-{
+impl<B: BackingStorage, DB, S: Clone> Sieve<B, DB, S> {
     /// Creates a new [`Sieve`] cache with the specified configuration.
     ///
     /// # Arguments
@@ -209,14 +220,23 @@ where
     }
 }
 
-impl<C: Column, DB: KvDatabase, S: BuildHasher> Sieve<C, DB, S>
-where
-    C::Mode: BackingStorage<C::Value>,
-{
-    fn shard_index(&self, key: &C::Key) -> usize {
+impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
+    fn shard_index(&self, key: &B::Key) -> usize {
         self.shards.shard_index(self.hasher_builder.hash_one(key))
     }
+}
 
+impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
+    Sieve<KeyOfSetAdaptor<C, V>, DB, S>
+{
+}
+
+impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
+    Sieve<WideColumnAdaptor<C>, DB, S>
+where
+    C::Key: Eq + Hash,
+    C::Discriminant: Eq + Hash,
+{
     /// Retrieves a value from the cache, fetching from the backing database if
     /// not present.
     ///
@@ -255,44 +275,103 @@ where
     /// read lock, its internal implementation may acquire write locks to insert
     /// new values on cache misses.
     #[allow(clippy::cast_possible_truncation)] // from u64 to usize
-    pub fn get_normal(
+    pub fn get_normal<W: WideColumnValue<C> + Send + Sync + 'static>(
         &self,
-        key: &C::Key,
-    ) -> Option<MappedRwLockReadGuard<'_, C::Value>>
-    where
-        C: Column<Mode = Normal>,
-        C::Mode: BackingStorage<C::Value, Value = Option<C::Value>>,
-    {
-        let shard_index = self.shard_index(key);
+        key: C::Key,
+    ) -> Option<MappedRwLockReadGuard<'_, W>> {
+        let combined_key = (key, W::discriminant());
+        let shard_index = self.shard_index(&combined_key);
+
         loop {
             let read_lock = self.shards.read_shard(shard_index);
 
-            if let Ok(guard) =
-                RwLockReadGuard::try_map(read_lock, |x| match x.get(key) {
-                    Retrieve::Hit(entry) => Some(entry),
-                    Retrieve::Miss => None,
-                })
+            if let Ok(guard) = RwLockReadGuard::try_map(read_lock, |x| match x
+                .get(&combined_key)
             {
+                Retrieve::Hit(entry) => Some(entry),
+                Retrieve::Miss => None,
+            }) {
                 return MappedRwLockReadGuard::try_map(guard, |entry| {
-                    entry.as_ref()
+                    entry.as_ref().map(|boxed| {
+                        let any_ref: &dyn Any = boxed.as_ref();
+                        any_ref.downcast_ref::<W>().unwrap()
+                    })
                 })
                 .ok();
             }
 
             let mut write_lock = self.shards.write_shard(shard_index);
 
-            if let Retrieve::Hit(_) = write_lock.get(key) {
+            if let Retrieve::Hit(_) = write_lock.get(&combined_key) {
                 // another thread already filled the cache while we were
                 // acquiring the write lock, retry read
                 continue;
             }
 
-            let db_value = self.backing_db.get::<C>(key);
+            let db_value =
+                self.backing_db.get_wide_column::<C, W>(&combined_key.0);
 
-            write_lock.insert(key.clone(), db_value);
+            write_lock.insert(
+                combined_key.clone(),
+                db_value.map(|x| Box::new(x) as Box<dyn Any + Send + Sync>),
+            );
         }
     }
 
+    /// Inserts or updates a value in the cache for the given key.
+    ///
+    /// This method allows direct insertion or update of a value in the cache,
+    /// bypassing the backing database. If there is an ongoing fetch for the
+    /// same key (i.e., another thread is currently fetching the value from
+    /// the database), this method will take over the fetch lock, perform
+    /// the insertion, and notify any waiters. If there is no ongoing fetch,
+    /// it simply inserts or updates the value in the appropriate shard.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert or update in the cache.
+    /// * `value` - The value to associate with the key. `None` can be used to
+    ///   represent deletion or absence of a value, depending on the column
+    ///   semantics.
+    ///
+    /// # Durability
+    ///
+    /// This method only updates the in-memory cache and does not persist
+    /// changes to the backing database. It is the caller's responsibility to
+    /// ensure that the backing database is updated accordingly before or after
+    /// calling this method, if persistence is required.
+    ///
+    /// # Concurrency
+    ///
+    /// If another thread is currently fetching the value for the same key, this
+    /// method will take over the fetch operation, perform the insertion, and
+    /// notify all waiting threads. Otherwise, it performs the insertion
+    /// directly.
+    ///
+    /// # Eviction
+    ///
+    /// If the cache shard is at capacity, this insertion may trigger eviction
+    /// of another entry according to the SIEVE algorithm.
+    pub fn put<W: WideColumnValue<C> + Send + Sync + 'static>(
+        &self,
+        key: C::Key,
+        value: Option<W>,
+    ) {
+        let combined_key = (key, W::discriminant());
+        let shard_index = self.shard_index(&combined_key);
+
+        let mut write_lock = self.shards.write_shard(shard_index);
+
+        write_lock.insert(
+            combined_key,
+            value.map(|x| Box::new(x) as Box<dyn Any + Send + Sync>),
+        );
+    }
+}
+
+impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
+    Sieve<KeyOfSetAdaptor<C, V>, DB, S>
+{
     /// Retrieves a set value from the cache, fetching from the backing database
     /// if not present.
     ///
@@ -333,11 +412,9 @@ where
     /// cache while calling this function. Even though this function returns a
     /// read lock, its internal implementation may acquire write locks to insert
     /// new values on cache misses.
-    pub fn get_set(&self, key: &C::Key) -> MappedRwLockReadGuard<'_, C::Value>
+    pub fn get_set(&self, key: &C::Key) -> MappedRwLockReadGuard<'_, V>
     where
-        C: Column,
-        C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
-        C::Value: FromIterator<<<C as Column>::Mode as KeyOfSetMode>::Value>,
+        V: FromIterator<C::Element>,
     {
         let shard_index = self.shard_index(key);
         loop {
@@ -360,58 +437,11 @@ where
                 continue;
             }
 
-            let db_value = self.backing_db.collect_key_of_set::<C>(key);
+            let db_value = self.backing_db.scan_members::<C>(key).collect();
 
             write_lock.insert(key.clone(), db_value);
         }
     }
-
-    /// Inserts or updates a value in the cache for the given key.
-    ///
-    /// This method allows direct insertion or update of a value in the cache,
-    /// bypassing the backing database. If there is an ongoing fetch for the
-    /// same key (i.e., another thread is currently fetching the value from
-    /// the database), this method will take over the fetch lock, perform
-    /// the insertion, and notify any waiters. If there is no ongoing fetch,
-    /// it simply inserts or updates the value in the appropriate shard.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to insert or update in the cache.
-    /// * `value` - The value to associate with the key. `None` can be used to
-    ///   represent deletion or absence of a value, depending on the column
-    ///   semantics.
-    ///
-    /// # Durability
-    ///
-    /// This method only updates the in-memory cache and does not persist
-    /// changes to the backing database. It is the caller's responsibility to
-    /// ensure that the backing database is updated accordingly before or after
-    /// calling this method, if persistence is required.
-    ///
-    /// # Concurrency
-    ///
-    /// If another thread is currently fetching the value for the same key, this
-    /// method will take over the fetch operation, perform the insertion, and
-    /// notify all waiting threads. Otherwise, it performs the insertion
-    /// directly.
-    ///
-    /// # Eviction
-    ///
-    /// If the cache shard is at capacity, this insertion may trigger eviction
-    /// of another entry according to the SIEVE algorithm.
-    pub fn put(&self, key: C::Key, value: Option<C::Value>)
-    where
-        C: Column<Mode = Normal>,
-        C::Mode: BackingStorage<C::Value, Value = Option<C::Value>>,
-    {
-        let shard_index = self.shard_index(&key);
-
-        let mut write_lock = self.shards.write_shard(shard_index);
-
-        write_lock.insert(key, value);
-    }
-
     /// Inserts elements into a set stored in the cache for the given key.
     ///
     /// This method is designed for columns using the [`KeyOfSet`] storage mode.
@@ -459,13 +489,9 @@ where
     pub fn insert_set_element(
         &self,
         key: &C::Key,
-        element: impl IntoIterator<Item = <C::Mode as KeyOfSetMode>::Value>,
+        element: impl IntoIterator<Item = C::Element>,
     ) where
-        C: Column,
-        C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
-        C::Value: FromIterator<<<C as Column>::Mode as KeyOfSetMode>::Value>
-            + Extend<<<C as Column>::Mode as KeyOfSetMode>::Value>
-            + Default,
+        V: Extend<C::Element>,
     {
         let shard_index = self.shard_index(key);
 
@@ -521,11 +547,8 @@ where
         key: &C::Key,
         element: &Q,
     ) where
-        C: Column,
-        C::Mode: KeyOfSetMode + BackingStorage<C::Value, Value = C::Value>,
-        C::Value: RemoveElementFromSet<Element = <C::Mode as KeyOfSetMode>::Value>
-            + FromIterator<<<C as Column>::Mode as KeyOfSetMode>::Value>,
-        <C::Mode as KeyOfSetMode>::Value: Borrow<Q>,
+        V: RemoveElementFromSet<Element = C::Element>,
+        C::Element: Borrow<Q>,
     {
         let shard_index = self.shard_index(key);
 
@@ -537,27 +560,23 @@ where
     }
 }
 
-struct Node<C: Column, M: BackingStorage<C::Value>> {
-    key: C::Key,
-    value: M::Value,
+struct Node<B: BackingStorage> {
+    key: B::Key,
+    value: B::Value,
     visited: AtomicBool,
 }
 
 type Index = usize;
 
-struct SieveShard<
-    C: Column,
-    M: BackingStorage<C::Value>,
-    S = BuildHasherDefault<fxhash::FxHasher>,
-> {
-    map: HashMap<C::Key, Index, S>,
-    nodes: Vec<Option<Node<C, M>>>,
+struct SieveShard<B: BackingStorage, S = BuildHasherDefault<fxhash::FxHasher>> {
+    map: HashMap<B::Key, Index, S>,
+    nodes: Vec<Option<Node<B>>>,
     hand: Index,
 
     active: usize,
 }
 
-impl<C: Column, M: BackingStorage<C::Value>, S> SieveShard<C, M, S> {
+impl<B: BackingStorage, S> SieveShard<B, S> {
     fn new(capacity: usize, hasher: S) -> Self {
         let mut nodes = Vec::with_capacity(capacity);
         nodes.resize_with(capacity, || None);
@@ -566,20 +585,18 @@ impl<C: Column, M: BackingStorage<C::Value>, S> SieveShard<C, M, S> {
     }
 }
 
-enum Retrieve<'x, C: Column, M: BackingStorage<C::Value>> {
-    Hit(&'x M::Value),
+enum Retrieve<'x, B: BackingStorage> {
+    Hit(&'x B::Value),
     Miss,
 }
 
-enum RetrieveMut<'x, C: Column, M: BackingStorage<C::Value>> {
-    Hit(&'x mut M::Value),
+enum RetrieveMut<'x, B: BackingStorage> {
+    Hit(&'x mut B::Value),
     Miss,
 }
 
-impl<C: Column, M: BackingStorage<C::Value>, S: BuildHasher>
-    SieveShard<C, M, S>
-{
-    fn insert(&mut self, key: C::Key, value: M::Value) {
+impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
+    fn insert(&mut self, key: B::Key, value: B::Value) {
         // scan for an empty slot
         loop {
             let index = self.hand;
@@ -617,7 +634,7 @@ impl<C: Column, M: BackingStorage<C::Value>, S: BuildHasher>
         }
     }
 
-    fn get(&self, key: &C::Key) -> Retrieve<'_, C, M> {
+    fn get(&self, key: &B::Key) -> Retrieve<'_, B> {
         if let Some(&index) = self.map.get(key) {
             let node = self.nodes[index].as_ref().unwrap();
             node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -627,7 +644,7 @@ impl<C: Column, M: BackingStorage<C::Value>, S: BuildHasher>
         Retrieve::Miss
     }
 
-    fn get_mut(&mut self, key: &C::Key) -> RetrieveMut<'_, C, M> {
+    fn get_mut(&mut self, key: &B::Key) -> RetrieveMut<'_, B> {
         if let Some(&index) = self.map.get(key) {
             let node = self.nodes[index].as_mut().unwrap();
             node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
