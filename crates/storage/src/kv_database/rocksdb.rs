@@ -16,7 +16,7 @@ use rust_rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, BoundColumnFamily,
     ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
     DBWithThreadMode, DataBlockIndexType, IteratorMode, MultiThreaded, Options,
-    SliceTransform, WriteBatch,
+    SliceTransform, UniversalCompactOptions, WriteBatch,
 };
 
 use super::{Column, KvDatabase, Normal, WriteTransaction};
@@ -100,6 +100,86 @@ impl<P: AsRef<Path>> KvDatabaseFactory for RocksDBFactory<P> {
         RocksDB::open(self.path, serialization_plugin)
     }
 }
+fn configure_rocksdb_for_small_kv_high_writes() -> Options {
+    let mut opts = Options::default();
+
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+    opts.set_atomic_flush(true);
+
+    // -------------------------------------------------------------------
+    // 1. Compaction Strategy: Universal (Crucial for Write Throughput)
+    // -------------------------------------------------------------------
+    opts.set_compaction_style(DBCompactionStyle::Universal);
+
+    let mut universal_opts = UniversalCompactOptions::default();
+    universal_opts.set_size_ratio(10);
+    universal_opts.set_min_merge_width(2);
+    universal_opts.set_max_size_amplification_percent(200); // 200% space amp limit (favors write speed)
+    opts.set_universal_compaction_options(&universal_opts);
+
+    // -------------------------------------------------------------------
+    // 2. Memtable / Write Buffer (Buffer writes in RAM)
+    // -------------------------------------------------------------------
+    // 128MB per memtable
+    opts.set_write_buffer_size(128 * 1024 * 1024);
+
+    // Allow up to 4 memtables (1 active + 3 flushing)
+    opts.set_max_write_buffer_number(4);
+
+    // Merge 2 memtables in memory before flushing to disk (Reduces small files
+    // on L0)
+    opts.set_min_write_buffer_number_to_merge(2);
+
+    // Match the target file size to the memtable size
+    opts.set_target_file_size_base(128 * 1024 * 1024);
+
+    // Parallelism (Background flushes and compactions)
+    opts.set_max_background_jobs(6);
+
+    // -------------------------------------------------------------------
+    // 3. Block Table Options (The "Small Key" Optimization)
+    // -------------------------------------------------------------------
+    let mut table_opts = BlockBasedOptions::default();
+
+    // 16KB blocks (vs default 4KB).
+    // Reduces the number of blocks, significantly shrinking the index size.
+    table_opts.set_block_size(16 * 1024);
+
+    // Format Version 5 (Compresses the index blocks)
+    table_opts.set_format_version(5);
+
+    // Bloom Filter: 10 bits per key (~1% false positive).
+    // Note: rust-rocksdb may not expose Ribbon Filters easily yet.
+    // Standard Bloom is fine, just slightly more RAM usage.
+    table_opts.set_ribbon_filter(10.0);
+
+    // --- PARTITIONED INDEXES (Vital for small keys) ---
+    // Instead of one giant index block per file, break it into pieces.
+    table_opts.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
+    table_opts.set_partition_filters(true);
+    table_opts.set_metadata_block_size(4096);
+
+    // Caching strategies
+    table_opts.set_cache_index_and_filter_blocks(true);
+    table_opts.set_cache_index_and_filter_blocks_with_high_priority(true);
+    table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+
+    opts.set_block_based_table_factory(&table_opts);
+
+    // -------------------------------------------------------------------
+    // 4. Compression
+    // -------------------------------------------------------------------
+    // LZ4 is extremely fast for the upper levels (high throughput)
+    opts.set_compression_type(DBCompressionType::Lz4);
+
+    // ZSTD for the bottommost level (best compression for data that settles)
+    // Note: If your rust-rocksdb version doesn't support this method,
+    // you can stick to Lz4 globally.
+    opts.set_bottommost_compression_type(DBCompressionType::Zstd);
+
+    opts
+}
 
 impl RocksDB {
     /// Opens or creates a `RocksDB` database at the specified path.
@@ -123,41 +203,7 @@ impl RocksDB {
         path: P,
         plugin: Plugin,
     ) -> Result<Self, rust_rocksdb::Error> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-        opts.set_atomic_flush(true);
-
-        // 1. Increase MemTable size. Computation graphs often have "hot" nodes.
-        // Larger memtables allow more data to stay in memory and be
-        // sorted/merged before hitting disk.
-        opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB per column family
-        opts.set_max_write_buffer_number(4); // Allow up to 512MB of un-flushed data
-
-        // 2. Universal Compaction (Better for write-heavy workloads)
-        // Leveled compaction is the default and is better for reads.
-        // Universal compaction reduces "Write Amplification" significantly.
-        opts.set_compaction_style(DBCompactionStyle::Universal);
-
-        // 3. Parallelism
-        // Use more threads for background flushing and compaction to avoid
-        // write stalls.
-        opts.set_max_background_jobs(8);
-
-        // 4. Disable Compression for the first levels
-        // Compression saves space but costs CPU. For the fastest writes, use
-        // LZ4 or no compression.
-        opts.set_compression_type(DBCompressionType::Lz4);
-
-        // 5. Direct I/O (Optional - depends on your hardware)
-        // Bypasses the OS Page Cache. Best if your database is larger than RAM.
-        // If your DB fits in RAM, leave this false and let the OS handle
-        // caching.
-        opts.set_use_direct_io_for_flush_and_compaction(true);
-        opts.set_use_direct_reads(true);
-
-        // 6. Increase Parallelism for SST file creation
-        opts.set_max_subcompactions(4);
+        let opts = configure_rocksdb_for_small_kv_high_writes();
 
         // List existing column families
         let existing_cfs =
