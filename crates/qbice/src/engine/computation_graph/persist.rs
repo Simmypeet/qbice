@@ -421,7 +421,10 @@ pub struct Persist<C: Config> {
 impl<C: Config> Persist<C> {
     pub fn new(db: Arc<C::Database>, shard_amount: usize) -> Self {
         let background_writer =
-            BackgroundWriter::<C::Database, C::BuildHasher>::new(8, db.clone());
+            BackgroundWriter::<C::Database, C::BuildHasher>::new(
+                C::background_writer_thread_count(),
+                db.clone(),
+            );
 
         let timestamp_sieve =
             Arc::new(WideColumnSieve::<

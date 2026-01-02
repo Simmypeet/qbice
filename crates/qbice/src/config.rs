@@ -63,6 +63,11 @@ pub trait Config:
     #[must_use]
     fn cache_entry_capacity() -> usize { 2usize.pow(16) }
 
+    /// The number of background writer threads for persisting data to the
+    /// database.
+    #[must_use]
+    fn background_writer_thread_count() -> usize { 2 }
+
     /// Creates a Rayon thread pool builder for parallel query execution.
     #[must_use]
     fn rayon_thread_pool_builder() -> rayon::ThreadPoolBuilder {
