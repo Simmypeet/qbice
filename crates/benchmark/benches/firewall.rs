@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 #![allow(missing_docs)]
 
-use std::{self, ops::Range, sync::Arc, time::Instant};
+use std::{self, ops::Range, sync::Arc};
 
 use qbice::{
     Decode, Encode, Identifiable, Query, StableHash, TrackedEngine,
@@ -353,8 +353,6 @@ impl<C: Config> qbice::executor::Executor<Variance, C> for VarianceExecutor {
 }
 
 async fn run(firewall: bool) {
-    let total_time = std::time::Instant::now();
-    let setup_time = Instant::now();
     let tempdir = tempfile::tempdir().unwrap();
     let mut engine = create_test_engine(&tempdir);
 
@@ -375,10 +373,7 @@ async fn run(firewall: bool) {
     ));
     engine.register_executor::<Variance, _>(Arc::new(VarianceExecutor));
 
-    println!("Setup time: {:?}", setup_time.elapsed());
-
     // first session: run as normal
-    let first_query_session_time = Instant::now();
     let mut input_session = engine.input_session();
     let var_count = 5_000u64;
     input_session.set_input(VariableRange, 0..var_count);
@@ -386,12 +381,6 @@ async fn run(firewall: bool) {
         input_session.set_input(Variable(i), (i + 1) as i64);
     }
     drop(input_session);
-    println!(
-        "First query session time: {:?}",
-        first_query_session_time.elapsed()
-    );
-
-    let first_query_time = Instant::now();
 
     let mut engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
@@ -400,27 +389,16 @@ async fn run(firewall: bool) {
 
     drop(tracked_engine);
 
-    println!("First query time: {:?}", first_query_time.elapsed());
-
     // second session: switch 2 variables value (mean should remain the same)
     // avoid dirtying the `Diff` and `DiffSquared` nodes
     {
-        let second_query_session_time = Instant::now();
-
         let mut input_session =
             Arc::get_mut(&mut engine).unwrap().input_session();
 
         input_session.set_input(Variable(0), var_count as i64);
         input_session.set_input(Variable(var_count - 1), 1);
         drop(input_session);
-
-        println!(
-            "Second query session time: {:?}",
-            second_query_session_time.elapsed()
-        );
     }
-
-    let second_query_time = Instant::now();
 
     let tracked_engine = engine.clone().tracked();
 
@@ -428,38 +406,18 @@ async fn run(firewall: bool) {
 
     drop(tracked_engine);
 
-    println!("Second query time: {:?}", second_query_time.elapsed());
-
     // final session: change one variable to dirty the mean
     {
-        let final_query_session_time = Instant::now();
         let mut input_session =
             Arc::get_mut(&mut engine).unwrap().input_session();
 
         input_session.set_input(Variable(var_count / 2), 1);
         drop(input_session);
-
-        println!(
-            "Final query session time: {:?}",
-            final_query_session_time.elapsed()
-        );
     }
-
-    let final_query_time = Instant::now();
 
     let tracked_engine = engine.clone().tracked();
 
     tracked_engine.query(&Variance).await.expect("Variance query failed");
-
-    println!("Final query time: {:?}", final_query_time.elapsed());
-
-    let drop_time = Instant::now();
-    drop(tracked_engine);
-    drop(engine);
-    drop(tempdir);
-
-    println!("Drop time: {:?}", drop_time.elapsed());
-    println!("Total time: {:?}", total_time.elapsed());
 }
 
 fn run_with_tokio(firewall: bool) {
@@ -484,8 +442,5 @@ fn bench_compare_firewall(c: &mut criterion::Criterion) {
     group.finish();
 }
 
-fn main() {
-    run_with_tokio(true);
-    println!("-----------------------------------");
-    run_with_tokio(false);
-}
+criterion::criterion_group!(benches, bench_compare_firewall);
+criterion::criterion_main!(benches);
