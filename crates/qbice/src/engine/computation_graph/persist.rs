@@ -650,6 +650,11 @@ impl<C: Config> Engine<C> {
                 Some(query_result),
                 &mut tx,
             );
+
+            self.computation_graph
+                .persist
+                .background_writer
+                .submit_write_buffer(tx);
         }
     }
 
@@ -806,6 +811,11 @@ impl<C: Config> Engine<C> {
                 Some(LastVerified(current_timestamp)),
                 &mut tx,
             );
+
+            self.computation_graph
+                .persist
+                .background_writer
+                .submit_write_buffer(tx);
         }
     }
 
@@ -842,6 +852,11 @@ impl<C: Config> Engine<C> {
             .put::<PendingBackwardProjection>(*query_id, None, &mut tx);
 
         backward_projection_lock_guard.done();
+
+        self.computation_graph
+            .persist
+            .background_writer
+            .submit_write_buffer(tx);
     }
 }
 
