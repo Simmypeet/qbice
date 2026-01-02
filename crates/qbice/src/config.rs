@@ -3,7 +3,10 @@
 //! This module provides the [`Config`] trait for customizing engine parameters
 //! and the [`DefaultConfig`] implementation for typical use cases.
 
-use std::{fmt::Debug, hash::BuildHasher};
+use std::{
+    fmt::Debug,
+    hash::{BuildHasher, Hash},
+};
 
 use fxhash::FxBuildHasher;
 use qbice_stable_hash::{
@@ -15,7 +18,19 @@ use qbice_storage::kv_database::{KvDatabase, rocksdb::RocksDB};
 /// Configuration trait for QBICE engine, allowing customization of various
 /// parameters.
 pub trait Config:
-    Identifiable + Default + Debug + Send + Sync + 'static
+    Identifiable
+    + Default
+    + Debug
+    + Clone
+    + Copy
+    + PartialEq
+    + Eq
+    + PartialOrd
+    + Ord
+    + Hash
+    + Send
+    + Sync
+    + 'static
 {
     /// The size of static storage allocated for query keys and values.
     ///
