@@ -321,11 +321,7 @@ where
     /// Inserts or updates a value in the cache for the given key.
     ///
     /// This method allows direct insertion or update of a value in the cache,
-    /// bypassing the backing database. If there is an ongoing fetch for the
-    /// same key (i.e., another thread is currently fetching the value from
-    /// the database), this method will take over the fetch lock, perform
-    /// the insertion, and notify any waiters. If there is no ongoing fetch,
-    /// it simply inserts or updates the value in the appropriate shard.
+    /// bypassing the backing database.
     ///
     /// # Arguments
     ///
@@ -340,13 +336,6 @@ where
     /// changes to the backing database. It is the caller's responsibility to
     /// ensure that the backing database is updated accordingly before or after
     /// calling this method, if persistence is required.
-    ///
-    /// # Concurrency
-    ///
-    /// If another thread is currently fetching the value for the same key, this
-    /// method will take over the fetch operation, perform the insertion, and
-    /// notify all waiting threads. Otherwise, it performs the insertion
-    /// directly.
     ///
     /// # Eviction
     ///
@@ -460,15 +449,6 @@ impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
     /// - `key` - A reference to the key identifying the set in the cache
     /// - `element` - An iterable of elements to insert into the set
     ///
-    /// # Behavior
-    ///
-    /// 1. If the key is already cached, the elements are added to the existing
-    ///    set
-    /// 2. If the key is not cached, the set is loaded from the backing database
-    ///    using [`KvDatabase::collect_key_of_set`], then the elements are added
-    /// 3. The operation holds a write lock on the shard during insertion to
-    ///    ensure thread safety
-    ///
     /// # Durability
     ///
     /// This method only updates the in-memory cache. The caller is responsible
@@ -520,17 +500,6 @@ impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
     ///
     /// - `key` - A reference to the key identifying the set in the cache
     /// - `element` - A reference to the element to remove from the set
-    ///
-    /// # Behavior
-    ///
-    /// 1. If the key is already cached, attempts to remove the element from the
-    ///    existing set
-    /// 2. If the key is not cached, loads the set from the backing database
-    ///    using [`KvDatabase::collect_key_of_set`], then attempts to remove the
-    ///    element
-    /// 3. If the element is not in the set, the operation has no effect
-    /// 4. The operation holds a write lock on the shard during removal to
-    ///    ensure thread safety
     ///
     /// # Durability
     ///
