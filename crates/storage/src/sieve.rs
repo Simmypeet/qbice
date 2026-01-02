@@ -745,10 +745,10 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
                 if node
                     .visited
                     .swap(false, std::sync::atomic::Ordering::Relaxed)
-                    && node
+                    || node
                         .pending_writes
                         .load(std::sync::atomic::Ordering::SeqCst)
-                        == 0
+                        != 0
                 {
                     // give a second chance
                     scanned += 1;
