@@ -158,10 +158,20 @@ impl<C: Config> TrackedEngine<C> {
         }
 
         // run the main process
-        self.engine
+        let result = self
+            .engine
             .query_for(&query_with_id, &self.caller)
             .await
-            .map(QueryResult::unwrap_return)
+            .map(QueryResult::unwrap_return);
+
+        // cache the result locally
+        if let Ok(ref value) = result {
+            let dyn_value: DynValueBox<C> = smallbox::smallbox!(value.clone());
+
+            self.cache.insert(query_with_id.id, dyn_value);
+        }
+
+        result
     }
 }
 
