@@ -13,10 +13,9 @@ use qbice_serialize::{
 };
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 use rust_rocksdb::{
-    BlockBasedIndexType, BlockBasedOptions, BoundColumnFamily,
-    ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
-    DBWithThreadMode, DataBlockIndexType, IteratorMode, MultiThreaded, Options,
-    SliceTransform, UniversalCompactOptions,
+    BlockBasedOptions, BoundColumnFamily, ColumnFamilyDescriptor,
+    DBCompactionStyle, DBCompressionType, DBWithThreadMode, DataBlockIndexType,
+    IteratorMode, MultiThreaded, Options, SliceTransform,
 };
 
 use crate::kv_database::{
@@ -68,7 +67,10 @@ enum ColumnKind {
 /// This implementation is fully thread-safe and can be shared across threads.
 /// Internally uses `DBWithThreadMode<MultiThreaded>`.
 #[derive(Debug)]
-pub struct RocksDB {
+pub struct RocksDB(Arc<Impl>);
+
+#[derive(Debug)]
+struct Impl {
     /// The underlying `RocksDB` instance.
     db: DBWithThreadMode<MultiThreaded>,
 
@@ -109,76 +111,11 @@ fn configure_rocksdb_for_small_kv_high_writes() -> Options {
     opts.create_missing_column_families(true);
     opts.set_atomic_flush(true);
 
-    // -------------------------------------------------------------------
-    // 1. Compaction Strategy: Universal (Crucial for Write Throughput)
-    // -------------------------------------------------------------------
-    opts.set_compaction_style(DBCompactionStyle::Universal);
-
-    let mut universal_opts = UniversalCompactOptions::default();
-    universal_opts.set_size_ratio(10);
-    universal_opts.set_min_merge_width(2);
-    universal_opts.set_max_size_amplification_percent(200); // 200% space amp limit (favors write speed)
-    opts.set_universal_compaction_options(&universal_opts);
-
-    // -------------------------------------------------------------------
-    // 2. Memtable / Write Buffer (Buffer writes in RAM)
-    // -------------------------------------------------------------------
-    // 128MB per memtable
-    opts.set_write_buffer_size(128 * 1024 * 1024);
-
-    // Allow up to 4 memtables (1 active + 3 flushing)
-    opts.set_max_write_buffer_number(4);
-
-    // Merge 2 memtables in memory before flushing to disk (Reduces small files
-    // on L0)
-    opts.set_min_write_buffer_number_to_merge(2);
-
-    // Match the target file size to the memtable size
-    opts.set_target_file_size_base(128 * 1024 * 1024);
-
-    // Parallelism (Background flushes and compactions)
+    // Shared Memtable Budget (e.g., 512MB total for all CFs)
+    opts.set_db_write_buffer_size(512 * 1024 * 1024);
     opts.set_max_background_jobs(6);
-
-    // -------------------------------------------------------------------
-    // 3. Block Table Options (The "Small Key" Optimization)
-    // -------------------------------------------------------------------
-    let mut table_opts = BlockBasedOptions::default();
-
-    // 16KB blocks (vs default 4KB).
-    // Reduces the number of blocks, significantly shrinking the index size.
-    table_opts.set_block_size(16 * 1024);
-
-    // Format Version 5 (Compresses the index blocks)
-    table_opts.set_format_version(5);
-
-    // Bloom Filter: 10 bits per key (~1% false positive).
-    // Note: rust-rocksdb may not expose Ribbon Filters easily yet.
-    // Standard Bloom is fine, just slightly more RAM usage.
-    table_opts.set_ribbon_filter(10.0);
-
-    // --- PARTITIONED INDEXES (Vital for small keys) ---
-    // Instead of one giant index block per file, break it into pieces.
-    table_opts.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
-    table_opts.set_partition_filters(true);
-    table_opts.set_metadata_block_size(4096);
-
-    // Caching strategies
-    table_opts.set_cache_index_and_filter_blocks(true);
-    table_opts.set_cache_index_and_filter_blocks_with_high_priority(true);
-    table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-
-    opts.set_block_based_table_factory(&table_opts);
-
-    // -------------------------------------------------------------------
-    // 4. Compression
-    // -------------------------------------------------------------------
-    // LZ4 is extremely fast for the upper levels (high throughput)
+    // Use LZ4 for speed
     opts.set_compression_type(DBCompressionType::Lz4);
-
-    // ZSTD for the bottommost level (best compression for data that settles)
-    // Note: If your rust-rocksdb version doesn't support this method,
-    // you can stick to Lz4 globally.
-    opts.set_bottommost_compression_type(DBCompressionType::Zstd);
 
     opts
 }
@@ -228,12 +165,12 @@ impl RocksDB {
             )?
         };
 
-        Ok(Self {
+        Ok(Self(Arc::new(Impl {
             db,
             plugin,
             column_families: DashMap::new(),
             buffer_pool: BufferPool::new(),
-        })
+        })))
     }
 
     /// Creates a factory for opening or creating a `RocksDB` database.
@@ -241,7 +178,9 @@ impl RocksDB {
     pub const fn factory<P: AsRef<Path>>(path: P) -> RocksDBFactory<P> {
         RocksDBFactory { path }
     }
+}
 
+impl Impl {
     /// Generates a column family name from a stable type ID.
     fn cf_name_from_id(id: StableTypeID, kind: ColumnKind) -> String {
         format!(
@@ -256,7 +195,7 @@ impl RocksDB {
 
     fn get_cf_options(kind: ColumnKind) -> Options {
         match kind {
-            ColumnKind::WideColumn => Options::default(),
+            ColumnKind::WideColumn => Self::get_point_lookup_options(),
             ColumnKind::KeyOfSet => Self::get_key_of_set_options(),
         }
     }
@@ -403,41 +342,57 @@ impl RocksDB {
         }
     }
 
+    fn get_point_lookup_options() -> Options {
+        let mut opts = Options::default();
+        opts.set_compaction_style(DBCompactionStyle::Universal);
+
+        // Low latency block settings
+        let mut table_opts = BlockBasedOptions::default();
+        table_opts.set_block_size(4 * 1024); // 4KB: Minimize unnecessary data load
+        table_opts.set_data_block_index_type(DataBlockIndexType::BinaryAndHash); // O(1) search inside block
+        table_opts.set_data_block_hash_ratio(0.75);
+
+        // Standard Bloom Filter
+        table_opts.set_bloom_filter(10.0, false);
+        table_opts.set_whole_key_filtering(true);
+
+        // Cache & Index
+        table_opts.set_cache_index_and_filter_blocks(true);
+        table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        table_opts.set_format_version(5);
+
+        opts.set_block_based_table_factory(&table_opts);
+        opts
+    }
+
     fn get_key_of_set_options() -> Options {
         let mut opts = Options::default();
+        opts.set_compaction_style(DBCompactionStyle::Universal);
+
         let mut table_opts = BlockBasedOptions::default();
 
-        // --- READ PATH OPTIMIZATIONS ---
+        // 8KB: Better compression for repetitive prefixes (the <K> part)
+        // Since values are 0-byte, 8KB still loads very fast.
+        table_opts.set_block_size(8 * 1024);
 
-        // Prefix Bloom Filter: Essential for checking if V exists in K
-        table_opts.set_bloom_filter(10.0, false);
+        // Increase restart interval to compress prefixes more aggressively
+        table_opts.set_block_restart_interval(32);
 
-        // CRITICAL: Set this to FALSE.
-        // This allows the Bloom Filter to store the PREFIX (K) rather than the
-        // whole key (<K><V>). This makes prefix scans (iterating Vs)
-        // skip files that don't have K.
-        table_opts.set_whole_key_filtering(false);
-
-        // Hash Index: Speeds up the Seek() to the beginning of your K range
-        table_opts.set_index_type(BlockBasedIndexType::HashSearch);
-
-        // Data Block Hash Index: Speeds up lookups within a single data block
+        // Hash index is STILL vital for membership test speed
         table_opts.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
+        table_opts.set_data_block_hash_ratio(0.75);
+
+        // Standard Bloom Filter
+        table_opts.set_bloom_filter(10.0, false);
+        table_opts.set_whole_key_filtering(true);
+
+        table_opts.set_cache_index_and_filter_blocks(true);
+        table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        table_opts.set_format_version(5);
 
         opts.set_block_based_table_factory(&table_opts);
 
-        // --- WRITE & MEMORY OPTIMIZATIONS ---
-
-        // Apply the variable-length extractor we built above
         opts.set_prefix_extractor(Self::create_key_of_set_prefix_extractor());
-
-        // Memtable Bloom Filter: Speeds up scans/gets for data not yet written
-        // to disk
-        opts.set_memtable_prefix_bloom_ratio(0.02);
-
-        // Optimize for computation graphs (high update rate)
-        opts.set_compression_type(DBCompressionType::Lz4);
-        opts.set_optimize_filters_for_hits(true); // Assumes you mostly query keys that exist
 
         opts
     }
@@ -447,15 +402,15 @@ impl RocksDB {
 ///
 /// Batches multiple write operations and commits them atomically when
 /// [`WriteTransaction::commit`] is called.
-pub struct RocksDBWriteTransaction<'a> {
+pub struct RocksDBWriteTransaction {
     /// Reference to the parent database.
-    db: &'a RocksDB,
+    db: Arc<Impl>,
 
     /// The write batch accumulating all operations.
     batch: Mutex<rust_rocksdb::WriteBatch>,
 }
 
-impl std::fmt::Debug for RocksDBWriteTransaction<'_> {
+impl std::fmt::Debug for RocksDBWriteTransaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RocksDBWriteTransaction")
             .field("db", &self.db)
@@ -464,14 +419,14 @@ impl std::fmt::Debug for RocksDBWriteTransaction<'_> {
     }
 }
 
-impl<'a> RocksDBWriteTransaction<'a> {
+impl RocksDBWriteTransaction {
     /// Creates a new write transaction.
-    fn new(db: &'a RocksDB) -> Self {
+    fn new(db: Arc<Impl>) -> Self {
         Self { db, batch: Mutex::new(rust_rocksdb::WriteBatch::default()) }
     }
 }
 
-impl WriteBatch for RocksDBWriteTransaction<'_> {
+impl WriteBatch for RocksDBWriteTransaction {
     fn put<W: WideColumn, C: WideColumnValue<W>>(
         &self,
         key: &W::Key,
@@ -555,31 +510,31 @@ impl WriteBatch for RocksDBWriteTransaction<'_> {
 }
 
 impl KvDatabase for RocksDB {
-    type WriteBatch<'a> = RocksDBWriteTransaction<'a>;
+    type WriteBatch = RocksDBWriteTransaction;
 
     fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
         &self,
         key: &W::Key,
     ) -> Option<C> {
-        let cf = self.get_or_create_cf::<W>(ColumnKind::WideColumn);
+        let cf = self.0.get_or_create_cf::<W>(ColumnKind::WideColumn);
 
-        let mut buffer = self.buffer_pool.get_buffer();
-        self.encode_wide_column_key::<W, C>(key, &mut buffer);
+        let mut buffer = self.0.buffer_pool.get_buffer();
+        self.0.encode_wide_column_key::<W, C>(key, &mut buffer);
 
-        match self.db.get_cf(&cf, &buffer) {
+        match self.0.db.get_cf(&cf, &buffer) {
             Ok(Some(value_bytes)) => {
                 let mut decoder =
                     PostcardDecoder::new(std::io::Cursor::new(value_bytes));
 
                 let value = decoder
-                    .decode::<C>(&self.plugin)
+                    .decode::<C>(&self.0.plugin)
                     .expect("decoding should not fail");
 
-                self.buffer_pool.return_buffer(buffer);
+                self.0.buffer_pool.return_buffer(buffer);
                 Some(value)
             }
             Ok(None) => {
-                self.buffer_pool.return_buffer(buffer);
+                self.0.buffer_pool.return_buffer(buffer);
                 None
             }
             Err(err) => {
@@ -593,18 +548,18 @@ impl KvDatabase for RocksDB {
         &'s self,
         key: &'s C::Key,
     ) -> impl Iterator<Item = C::Element> {
-        let cf = self.get_or_create_cf::<C>(ColumnKind::KeyOfSet);
-        let mut prefix_buffer = self.buffer_pool.get_buffer();
-        self.encode_value_length_prefixed(key, &mut prefix_buffer);
+        let cf = self.0.get_or_create_cf::<C>(ColumnKind::KeyOfSet);
+        let mut prefix_buffer = self.0.buffer_pool.get_buffer();
+        self.0.encode_value_length_prefixed(key, &mut prefix_buffer);
 
         let prefix_upper_bound =
-            Self::prefix_upper_bound(prefix_buffer.as_slice());
+            Impl::prefix_upper_bound(prefix_buffer.as_slice());
 
         // Use an iterator with prefix seek
         let mut read_opts = rust_rocksdb::ReadOptions::default();
         read_opts.set_iterate_upper_bound(prefix_upper_bound);
 
-        let iter = self.db.iterator_cf_opt(
+        let iter = self.0.db.iterator_cf_opt(
             &cf,
             read_opts,
             IteratorMode::From(
@@ -625,12 +580,12 @@ impl KvDatabase for RocksDB {
                 PostcardDecoder::new(std::io::Cursor::new(&key[8 + length..]));
 
             decoder
-                .decode::<C::Element>(&self.plugin)
+                .decode::<C::Element>(&self.0.plugin)
                 .expect("decoding should not fail")
         })
     }
 
-    fn write_transaction(&self) -> Self::WriteBatch<'_> {
-        RocksDBWriteTransaction::new(self)
+    fn write_transaction(&self) -> Self::WriteBatch {
+        RocksDBWriteTransaction::new(self.0.clone())
     }
 }

@@ -409,14 +409,14 @@ impl<C: Config> Engine<C> {
         notify.notify_waiters();
     }
 
-    pub(super) fn computing_lock_to_computed<'s, Q: Query>(
-        &'s self,
+    pub(super) fn computing_lock_to_computed<Q: Query>(
+        &self,
         query_id: &QueryWithID<'_, Q>,
         value: Q::Value,
         query_value_fingerprint: Option<Compact128>,
         lock_guard: ComputingLockGuard<'_, C>,
         has_pending_backward_projection: bool,
-        continuing_tx: Option<<C::Database as KvDatabase>::WriteBatch<'s>>,
+        continuing_tx: Option<<C::Database as KvDatabase>::WriteBatch>,
     ) {
         let dashmap::Entry::Occupied(mut entry_lock) =
             self.computation_graph.lock.lock.entry(query_id.id)

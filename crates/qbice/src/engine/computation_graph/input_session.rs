@@ -9,7 +9,7 @@ pub struct InputSession<'x, C: Config> {
     engine: &'x Engine<C>,
     incremented: bool,
     dirty_batch: VecDeque<QueryID>,
-    transaction: Option<<C::Database as KvDatabase>::WriteBatch<'x>>,
+    transaction: Option<<C::Database as KvDatabase>::WriteBatch>,
 }
 
 impl<C: Config> Drop for InputSession<'_, C> {

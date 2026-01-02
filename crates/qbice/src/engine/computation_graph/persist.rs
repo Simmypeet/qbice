@@ -476,8 +476,8 @@ impl<C: Config> ComputationGraph<C> {
 
 impl<C: Config> Engine<C> {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    pub(super) fn set_computed<'s, Q: Query>(
-        &'s self,
+    pub(super) fn set_computed<Q: Query>(
+        &self,
         query_id: &QueryWithID<'_, Q>,
         query_value: Q::Value,
         query_value_fingerprint: Option<Compact128>,
@@ -490,7 +490,7 @@ impl<C: Config> Engine<C> {
         >,
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
         has_pending_backward_projection: bool,
-        continuting_tx: Option<<C::Database as KvDatabase>::WriteBatch<'s>>,
+        continuting_tx: Option<<C::Database as KvDatabase>::WriteBatch>,
     ) {
         let query_value_fingerprint =
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
@@ -638,7 +638,7 @@ impl<C: Config> Engine<C> {
         query_hash_128: Compact128,
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
-        tx: &<C::Database as KvDatabase>::WriteBatch<'_>,
+        tx: &<C::Database as KvDatabase>::WriteBatch,
     ) {
         let query_id = QueryID::new::<Q>(query_hash_128);
 
@@ -749,7 +749,7 @@ impl<C: Config> Engine<C> {
         &self,
         from: QueryID,
         to: QueryID,
-        tx: &<C::Database as KvDatabase>::WriteBatch<'_>,
+        tx: &<C::Database as KvDatabase>::WriteBatch,
     ) {
         let edge = Edge { from, to };
 

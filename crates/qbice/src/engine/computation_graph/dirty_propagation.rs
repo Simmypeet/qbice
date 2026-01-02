@@ -10,7 +10,7 @@ impl<C: Config> Engine<C> {
     pub(super) fn dirty_propagate(
         &self,
         query_id: QueryID,
-        tx: &<C::Database as KvDatabase>::WriteBatch<'_>,
+        tx: &<C::Database as KvDatabase>::WriteBatch,
     ) {
         // has already been marked dirty
         if !self.insert_dirty_query(query_id) {

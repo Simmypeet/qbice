@@ -123,9 +123,7 @@ pub trait KvDatabaseFactory {
 /// don't outlive the database reference.
 pub trait KvDatabase: 'static + Send + Sync {
     /// The type of write transaction provided by this database implementation.
-    type WriteBatch<'a>: WriteBatch + Send + Sync
-    where
-        Self: 'a;
+    type WriteBatch: WriteBatch + Send + Sync;
 
     /// Retrieves a value from a wide column based on its key.
     fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
@@ -162,7 +160,7 @@ pub trait KvDatabase: 'static + Send + Sync {
     ///
     /// The returned transaction must be explicitly committed via
     /// [`WriteTransaction::commit`] for changes to be persisted.
-    fn write_transaction(&self) -> Self::WriteBatch<'_>;
+    fn write_transaction(&self) -> Self::WriteBatch;
 }
 
 /// Specifies how the discriminant is encoded in a wide column.
@@ -204,7 +202,7 @@ pub trait WideColumn: Identifiable + Send + Sync + 'static {
 
 /// A trait for values associated with a [`WideColumn`].
 pub trait WideColumnValue<W: WideColumn>:
-    Encode + Decode + Send + Sync + 'static
+    Encode + Decode + Clone + Send + Sync + 'static
 {
     /// Retrieves the discriminant for this value.
     ///
