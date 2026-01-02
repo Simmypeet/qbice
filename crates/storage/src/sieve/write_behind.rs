@@ -271,8 +271,70 @@ impl<Db: KvDatabase, S: BuildHasher> KeyOfSetWrites<Db, S> {
     }
 }
 
-/// Buffer that accumulates write operations before flushing them to the
-/// database.
+/// A buffer that accumulates write operations for batch processing.
+///
+/// `WriteBuffer` collects multiple cache write operations (both wide column
+/// and key-of-set writes) in memory before they are asynchronously flushed to
+/// the database. This enables write-back caching with significantly reduced
+/// database write amplification.
+///
+/// # Architecture
+///
+/// The buffer maintains two internal collections:
+/// - **Wide column writes**: Map of `(column, discriminant, key)` to values
+/// - **Key-of-set writes**: Map of `(column, key, element)` to operations
+///
+/// # Lifecycle
+///
+/// 1. **Creation**: Obtained from [`BackgroundWriter::new_write_buffer()`]
+/// 2. **Accumulation**: Writes are added via cache `put`, `insert_set_element`,
+///    `remove_set_element` methods
+/// 3. **Submission**: Buffer is submitted to [`BackgroundWriter`] for async
+///    flushing
+/// 4. **Processing**: Background thread writes to database and commits
+/// 5. **Recycling**: Buffer is returned to pool for reuse
+///
+/// # Epoch Ordering
+///
+/// Each buffer has an epoch number ensuring writes are committed in order:
+/// - Buffers are processed in epoch order
+/// - Later epochs wait for earlier epochs to commit
+/// - Ensures write consistency and prevents reordering
+///
+/// # Durability
+///
+/// **Important**: Writes in the buffer are **not durable** until:
+/// 1. Buffer is submitted via `submit_write_buffer()`
+/// 2. Background worker flushes to database
+/// 3. Database commit succeeds
+///
+/// **Data Loss Risk**: If the process crashes before flush, all buffered
+/// writes are lost.
+///
+/// # Active State
+///
+/// The buffer has an "active" flag:
+/// - Set when created from pool
+/// - Cleared when returned to pool
+/// - **Panics** if dropped while still active (indicates programming error)
+///
+/// # Example
+///
+/// ```ignore
+/// let writer = BackgroundWriter::new(4, db.clone());
+/// let cache = Arc::new(WideColumnSieve::new(...));
+///
+/// // Create buffer
+/// let mut buffer = writer.new_write_buffer();
+///
+/// // Accumulate writes
+/// cache.put::<ValueType>(key1, Some(value1), &mut buffer);
+/// cache.put::<ValueType>(key2, Some(value2), &mut buffer);
+///
+/// // Submit for async persistence
+/// writer.submit_write_buffer(buffer);
+/// // Writes will be flushed to database in background
+/// ```
 pub struct WriteBuffer<Db: KvDatabase, S: BuildHasher> {
     pub(super) wide_column_writes: WideColumnWrites<Db, S>,
     pub(super) key_of_set_writes: KeyOfSetWrites<Db, S>,
@@ -315,8 +377,81 @@ impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
     }
 }
 
-/// An asynchronous background writer that enables write-back strategy, allowing
-/// the system to batch and defer write operations to the database.
+/// An asynchronous background writer enabling write-back caching strategy.
+///
+/// `BackgroundWriter` manages a pool of worker threads that process write
+/// buffers asynchronously. This enables high-performance write-back caching
+/// where cache updates are fast (in-memory only) and persistence happens in the
+/// background.
+///
+/// # Architecture
+///
+/// ```text
+///                     WriteBuffer
+///                          |
+///                          v
+///                    Work Stealing
+///                       Queue
+///                         |
+///         +---------------+---------------+
+///         |               |               |
+///      Worker 1        Worker 2      Worker N
+///         |               |               |
+///         +-------+-------+-------+-------+
+///                 |               |
+///           WriteBatch      WriteBatch
+///                 |               |
+///                 v               v
+///                   Commit Thread
+///                         |
+///                         v
+///                      Database
+/// ```
+///
+///
+/// # Write Processing Pipeline
+///
+/// 1. **Buffer Creation**: Application obtains buffer from pool
+/// 2. **Accumulation**: Writes accumulate in buffer (fast, in-memory)
+/// 3. **Submission**: Buffer submitted to global work queue
+/// 4. **Worker Processing**: Worker picks up buffer, creates write batch
+/// 5. **Commit Ordering**: Commit thread applies batches in epoch order
+/// 6. **Notification**: Cache is notified to decrement pending write counts
+/// 7. **Buffer Recycling**: Buffer returned to pool
+///
+/// # Epoch-Based Ordering
+///
+/// Buffers are assigned monotonically increasing epoch numbers:
+/// - Ensures writes are committed in submission order
+/// - Later epochs wait for earlier epochs to commit
+/// - Critical for maintaining cache coherency
+///
+/// # Example
+///
+/// ```ignore
+/// use std::sync::Arc;
+///
+/// // Create background writer with 4 worker threads
+/// let writer = BackgroundWriter::new(4, Arc::new(database));
+/// let cache = Arc::new(WideColumnSieve::new(...));
+///
+/// // Application loop
+/// loop {
+///     let mut buffer = writer.new_write_buffer();
+///
+///     // Accumulate many writes (fast, in-memory)
+///     for (key, value) in updates {
+///         cache.put::<T>(key, Some(value), &mut buffer);
+///     }
+///
+///     // Submit entire batch for async persistence
+///     writer.submit_write_buffer(buffer);
+///     // Control returns immediately; writes happen in background
+/// }
+///
+/// // On shutdown, drop writer to gracefully drain queues
+/// drop(writer);
+/// ```
 pub struct BackgroundWriter<Db: KvDatabase, S: BuildHasher> {
     registry: Arc<Registry<Db, S>>,
     write_handles: Vec<thread::JoinHandle<()>>,
@@ -335,8 +470,42 @@ impl<Db: KvDatabase, S: BuildHasher> std::fmt::Debug
 }
 
 impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
-    /// Creates a new `BackgroundWriter` with the specified number of worker
+    /// Creates a new background writer with the specified number of worker
     /// threads.
+    ///
+    /// # Parameters
+    ///
+    /// * `num_threads` - The number of worker threads for processing write
+    ///   buffers. More threads increase throughput but also increase overhead.
+    ///
+    ///   **Note**: Returns diminish beyond database I/O capacity. If database
+    ///   is the bottleneck, more threads won't help.
+    ///
+    /// * `db` - The database instance to write to. Must be wrapped in `Arc` for
+    ///   sharing across worker threads.
+    ///
+    /// # Thread Spawning
+    ///
+    /// This method spawns `num_threads + 1` threads:
+    /// - `num_threads` worker threads (named "`bg_writer_0`", "`bg_writer_1`",
+    ///   ...)
+    /// - 1 commit thread (named "`bg_writer_commit`")
+    ///
+    /// All threads start immediately and begin waiting for work.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    ///
+    /// // Create writer with 4 workers
+    /// let writer = BackgroundWriter::new(4, Arc::new(database));
+    ///
+    /// // Use writer...
+    ///
+    /// // Shutdown gracefully on drop
+    /// drop(writer);
+    /// ```
     pub fn new(num_threads: usize, db: Arc<Db>) -> Self {
         let injector = Injector::new();
         let mut workers = Vec::new();
@@ -593,7 +762,7 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
     }
 
     fn process_task(&self, task: WriteTask<Db, S>) {
-        let write_batch = task.db.write_transaction();
+        let write_batch = task.db.write_batch();
         task.write_buffer.write_to_db(&write_batch);
 
         // send to commit thread

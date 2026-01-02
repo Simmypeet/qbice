@@ -11,33 +11,36 @@ use qbice_stable_type_id::Identifiable;
 
 pub mod rocksdb;
 
-/// A write transaction for batching multiple write operations atomically.
+/// A write batch for accumulating multiple write operations that are committed
+/// atomically.
 ///
-/// Write transactions provide atomicity: either all operations succeed, or none
-/// are applied. This is useful for ensuring consistency when multiple related
-/// changes must be made together.
+/// Write batches provide atomicity guarantees: either all operations in the
+/// batch are applied to the database, or none are. This is essential for
+/// maintaining data consistency when multiple related changes must be made
+/// as a single logical unit.
 ///
 /// # Visibility and Isolation
 ///
-/// - Changes made within a transaction are **not visible** to other readers
-///   until [`commit`](Self::commit) is called.
-/// - If the transaction is dropped without calling `commit`, all changes **must
-///   be rolled back** automatically.
-/// - Transactions provide snapshot isolation: reads within a transaction see a
-///   consistent view of the database from when the transaction started.
+/// - Changes made within a batch are **not visible** to other readers until
+///   [`commit`](Self::commit) is called.
+/// - If a batch is dropped without calling `commit`, all pending changes **must
+///   be rolled back** automatically by the implementation.
+/// - Implementations should provide snapshot isolation: reads see a consistent
+///   database state from when the batch was created.
 ///
-/// # Error Handling
+/// # Usage Pattern
 ///
-/// Individual operations (`put`, `delete`, `insert_member`, `delete_member`)
-/// are assumed to always succeed. If they cannot (e.g., due to serialization
-/// errors), they should panic. The `commit` operation is also assumed to
-/// succeed; if it cannot, the implementation should panic.
+/// ```ignore
+/// let batch = db.write_transaction();
 ///
-/// # Thread Safety
+/// // Accumulate operations
+/// batch.put::<MyColumn, MyValue>(&key1, &value1);
+/// batch.delete::<MyColumn, MyValue>(&key2);
+/// batch.insert_member::<SetColumn>(&key3, &member);
 ///
-/// Transactions are `Send + Sync` and can be shared across threads, but
-/// implementations should document any specific concurrency guarantees or
-/// limitations.
+/// // Commit atomically
+/// batch.commit();
+/// ```
 pub trait WriteBatch {
     /// Inserts or updates a value in a wide column.
     fn put<W: WideColumn, C: WideColumnValue<W>>(
@@ -50,7 +53,7 @@ pub trait WriteBatch {
     fn delete<W: WideColumn, C: WideColumnValue<W>>(&self, key: &W::Key);
 
     /// Inserts a member into the set associated with the given key in a
-    /// [`KeyOfSet`] mode column.
+    /// [`KeyOfSetColumn`] mode.
     fn insert_member<C: KeyOfSetColumn>(
         &self,
         key: &C::Key,
@@ -58,7 +61,7 @@ pub trait WriteBatch {
     );
 
     /// Deletes a member from the set associated with the given key in a
-    /// [`KeyOfSet`] mode column.
+    /// [`KeyOfSetColumn`] mode.
     fn delete_member<C: KeyOfSetColumn>(
         &self,
         key: &C::Key,
@@ -69,8 +72,7 @@ pub trait WriteBatch {
     ///
     /// After commit, all changes become visible to other readers.
     ///
-    /// Implementations should assume commit always succeeds; rollback on
-    /// failure is not supported.
+    /// The commit should always succeed, panic if it fails.
     fn commit(self);
 }
 
@@ -90,37 +92,44 @@ pub trait KvDatabaseFactory {
     ) -> Result<Self::KvDatabase, Self::Error>;
 }
 
-/// The main interface for a key-value database backend.
+/// The primary interface for key-value database backends with support for
+/// advanced storage patterns.
 ///
-/// This trait abstracts over different key-value storage implementations,
-/// allowing the system to work with various backends (e.g., `RocksDB`, `LMDB`,
-/// in-memory, etc.).
+/// This trait provides a backend-agnostic abstraction over various key-value
+/// storage implementations (e.g., `RocksDB`, LMDB, in-memory stores), enabling
+/// portable code that can work with different storage engines.
 ///
-/// # Thread Safety
+/// # Thread Safety and Concurrency
 ///
-/// All implementations of `KvDatabase` must be thread-safe (`Send + Sync`).
-/// Multiple threads can safely read from and write to the database
-/// concurrently. Reads never block other reads, and write transactions provide
-/// isolation guarantees.
+/// All `KvDatabase` implementations must be fully thread-safe (`Send + Sync`):
+/// - Multiple threads can safely perform concurrent reads without blocking
+/// - Write batches provide isolation, preventing visibility of partial updates
+/// - Implementations should support high-concurrency read workloads efficiently
 ///
-/// # Storage Modes
+/// # Storage Patterns
 ///
-/// The database supports two storage modes via the [`Column::Mode`] associated
-/// type:
+/// The database supports two distinct storage patterns:
 ///
-/// - **[`Normal`] mode**: Use [`get`](Self::get) to retrieve single values.
-///   Returns `None` if the key doesn't exist.
+/// ## Wide Columns
 ///
-/// - **[`KeyOfSet`] mode**: Use [`scan_members`](Self::scan_members) or
-///   [`collect_key_of_set`](Self::collect_key_of_set) to retrieve all members
-///   of the set. Returns an empty iterator/collection if the key has no
-///   members.
+/// Store multiple heterogeneous values under a single key, distinguished by
+/// discriminants. Use [`get_wide_column`](Self::get_wide_column) to retrieve
+/// specific value types. Returns `None` if the key-discriminant pair doesn't
+/// exist.
 ///
-/// # Lifetime Considerations
+/// ## Key-of-Set
 ///
-/// Methods like `get` and `scan_members` borrow `self` with lifetime `'s`.
-/// The returned iterators and values are tied to this lifetime, ensuring they
-/// don't outlive the database reference.
+/// Represent `HashMap<K, HashSet<V>>` relationships where each key maps to a
+/// set of elements. Use [`scan_members`](Self::scan_members) to iterate over
+/// all members. Returns an empty iterator if the key has no members.
+///
+/// # Write Operations
+///
+/// All writes must go through write batches obtained via
+/// [`write_batch`](Self::write_batch). This ensures:
+/// - Atomic application of multiple operations
+/// - Consistent isolation semantics
+/// - Efficient batching for better performance
 pub trait KvDatabase: 'static + Send + Sync {
     /// The type of write transaction provided by this database implementation.
     type WriteBatch: WriteBatch + Send + Sync;
@@ -132,7 +141,7 @@ pub trait KvDatabase: 'static + Send + Sync {
     ) -> Option<C>;
 
     /// Scans all members of the set associated with the given key in a
-    /// [`KeyOfSet`] mode column.
+    /// [`KeyOfSetColumn`] mode.
     ///
     /// This method returns an iterator over all values that are members of the
     /// set for the given key. If the key has no members, the iterator will be
@@ -160,28 +169,99 @@ pub trait KvDatabase: 'static + Send + Sync {
     ///
     /// The returned transaction must be explicitly committed via
     /// [`WriteTransaction::commit`] for changes to be persisted.
-    fn write_transaction(&self) -> Self::WriteBatch;
+    ///
+    /// [`WriteTransaction::commit`]: crate::kv_database::WriteBatch::commit
+    fn write_batch(&self) -> Self::WriteBatch;
 }
 
-/// Specifies how the discriminant is encoded in a wide column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Specifies how discriminants are encoded in composite keys for wide columns.
+///
+/// When databases don't natively support wide columns, they are emulated by
+/// encoding the discriminant into the key itself. This enum controls whether
+/// the discriminant appears before or after the logical key.
+///
+/// # Variants
+///
+/// - **Prefixed**: Discriminant is prepended to the key
+///   - Format: `[discriminant][key]`
+///   - Groups values by discriminant in key-space
+///   - Better for range queries over same value type
+///
+/// - **Suffixed**: Discriminant is appended to the key
+///   - Format: `[key][discriminant]`
+///   - Groups all values for same key together
+///   - Better for accessing multiple value types for one key
+///
+/// # Choosing an Encoding
+///
+/// Choose **Prefixed** when:
+/// - You often scan all values of the same type
+/// - Value types are queried independently
+///
+/// Choose **Suffixed** when:
+/// - You often access multiple value types for the same key
+/// - Logical key locality is more important
+///
+/// # Example
+///
+/// For key=`42` and discriminant=`1`:
+/// - Prefixed: stored as `[0x01, 0x2A]`
+/// - Suffixed: stored as `[0x2A, 0x01]`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiscriminantEncoding {
-    /// The discriminant is stored as a prefix to the key.
+    /// Discriminant is stored before the key.
     Prefixed,
-
-    /// The discriminant is stored as a suffix to the key.
+    /// Discriminant is stored after the key.
     Suffixed,
 }
 
-/// A trait representing a wide column storage structure.
+/// A trait representing a wide column storage structure for heterogeneous
+/// multi-value storage.
 ///
-/// Wide columns allow storing multiple related values under a single key,
-/// distinguished by a discriminant (e.g., a category or type identifier).
-/// Some databases support wide columns natively, while others may emulate them
-/// using composite keys.
+/// Wide columns enable storing multiple related but differently-typed values
+/// under a single logical key, distinguished by discriminants. Each
+/// discriminant identifies a specific value type, providing type-safe access to
+/// heterogeneous data within a single column family.
 ///
-/// For example, [`rocksdb::RocksDB`] doesn't natively support wide columns, but
-/// they can be emulated by encoding the discriminant into the key itself.
+/// This pattern is particularly useful when you need to:
+/// - Store multiple attributes of an entity with different types
+/// - Maintain type safety while avoiding separate column families
+/// - Enable efficient partial retrieval of entity data
+///
+/// # Storage Implementation
+///
+/// While some databases support wide columns natively, others emulate them
+/// by encoding the discriminant into the key. For example, `RocksDB` uses
+/// composite keys combining the logical key with the discriminant (either as
+/// prefix or suffix, controlled by
+/// [`discriminant_encoding`](Self::discriminant_encoding)).
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Identifiable)]
+/// struct UserColumn;
+///
+/// impl WideColumn for UserColumn {
+///     type Discriminant = u8;
+///     type Key = u64;
+///
+///     fn discriminant_encoding() -> DiscriminantEncoding {
+///         DiscriminantEncoding::Prefixed
+///     }
+/// }
+///
+/// // Different value types with unique discriminants
+/// struct UserName(String);
+/// impl WideColumnValue<UserColumn> for UserName {
+///     fn discriminant() -> u8 { 0 }
+/// }
+///
+/// struct UserAge(u32);
+/// impl WideColumnValue<UserColumn> for UserAge {
+///     fn discriminant() -> u8 { 1 }
+/// }
+/// ```
 pub trait WideColumn: Identifiable + Send + Sync + 'static {
     /// The type of the discriminant used to distinguish different values.
     type Discriminant: Encode
@@ -200,30 +280,118 @@ pub trait WideColumn: Identifiable + Send + Sync + 'static {
     fn discriminant_encoding() -> DiscriminantEncoding;
 }
 
-/// A trait for values associated with a [`WideColumn`].
-pub trait WideColumnValue<W: WideColumn>:
-    Encode + Decode + Clone + Send + Sync + 'static
+/// A trait for values stored in a [`WideColumn`] with a specific discriminant.
+///
+/// This trait associates a value type with a [`WideColumn`] and provides its
+/// unique discriminant. Each implementation represents one possible value type
+/// that can be stored in the wide column.
+///
+/// # Discriminant Uniqueness
+///
+/// **CRITICAL**: Each value type for a given wide column **must** have a unique
+/// discriminant. Violating this invariant will cause:
+/// - Data corruption (values overwriting each other)
+/// - Type confusion (wrong type returned from database)
+/// - Silent data loss
+///
+/// The discriminant is used by the storage layer to distinguish different value
+/// types stored under the same key. Reusing discriminants is undefined
+/// behavior.
+///
+/// # Type Requirements
+///
+/// Value types must be:
+/// - `Encode + Decode`: For serialization to/from the database
+/// - `Clone`: To allow caching and copying
+/// - `Send + Sync + 'static`: For thread-safe storage and caching
+///
+/// # Example
+///
+/// ```ignore
+/// // Good: Each value has a unique discriminant
+/// struct UserName(String);
+/// impl WideColumnValue<UserColumn> for UserName {
+///     fn discriminant() -> u8 { 0 }
+/// }
+///
+/// struct UserEmail(String);
+/// impl WideColumnValue<UserColumn> for UserEmail {
+///     fn discriminant() -> u8 { 1 }  // Different from UserName
+/// }
+///
+/// // BAD: DO NOT reuse discriminants!
+/// struct UserPhone(String);
+/// impl WideColumnValue<UserColumn> for UserPhone {
+///     fn discriminant() -> u8 { 0 }  // WRONG: conflicts with UserName!
+/// }
+/// ```
+pub trait WideColumnValue<C: WideColumn>:
+    Encode + Decode + Clone + 'static + Send + Sync
 {
-    /// Retrieves the discriminant for this value.
-    ///
-    /// **IMPORTANT:** This method should return a unique discriminant for each
-    /// variant of the wide column. Failing to do so may lead to data corruption
-    /// or loss, as multiple values could map to the same storage location.
-    fn discriminant() -> W::Discriminant;
+    /// Returns the unique discriminant for this value type within the
+    /// associated wide column.
+    fn discriminant() -> C::Discriminant;
 }
 
-/// A trait for columns that logically represent `HashMap<K, HashSet<V>>`.
+/// A trait for columns representing `HashMap<Key, HashSet<Element>>`
+/// relationships.
 ///
-/// This allows fast:
-/// - insertions
-/// - deletions
-/// - membership tests
+/// This storage pattern is optimized for managing set memberships, where each
+/// key is associated with a collection of unique elements. It provides
+/// efficient:
+/// - Element insertion into sets
+/// - Element deletion from sets
+/// - Membership testing
+/// - Full set scanning
 ///
-/// of elements in the set associated with a key.
+/// # Use Cases
+///
+/// Key-of-set columns are ideal for:
+/// - Tags or labels (e.g., user tags, article categories)
+/// - Relationships (e.g., user followers, group members)
+/// - Access control lists
+/// - Dependency tracking
+///
+/// # Type Requirements
+///
+/// - **Key**: Must be `Encode + Hash + Eq` for storage and lookup
+/// - **Element**: Must be `Encode + Decode + Hash + Eq` for storage, retrieval,
+///   and uniqueness checking
+///
+/// Both types must also be `Clone`, `Send`, `Sync`, and `'static` for
+/// thread-safe caching.
+///
+/// # Storage Implementation
+///
+/// Implementations may store set members using various strategies:
+/// - Individual key-value pairs per member (e.g., `RocksDB` with composite
+///   keys)
+/// - Serialized sets (compact but less efficient for single-member updates)
+/// - Native set types (if supported by the database)
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Identifiable)]
+/// struct UserTagsColumn;
+///
+/// impl KeyOfSetColumn for UserTagsColumn {
+///     type Key = u64;           // User ID
+///     type Element = String;     // Tag name
+/// }
+///
+/// // Operations:
+/// batch.insert_member::<UserTagsColumn>(&user_id, &"rust".to_string());
+/// batch.delete_member::<UserTagsColumn>(&user_id, &"python".to_string());
+///
+/// for tag in db.scan_members::<UserTagsColumn>(&user_id) {
+///     println!("Tag: {}", tag);
+/// }
+/// ```
 pub trait KeyOfSetColumn: Identifiable + Send + Sync + 'static {
-    /// The type of keys used in this column.
+    /// The type of keys used in this key-of-set column.
     type Key: Encode + Hash + Eq + Clone + 'static + Send + Sync;
 
-    /// The type of elements in the set.
+    /// The type of elements stored in the sets associated with each key.
     type Element: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;
 }

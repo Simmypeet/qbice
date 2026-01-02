@@ -1,28 +1,72 @@
 //! A sharded, concurrent cache implementation using the SIEVE eviction
-//! algorithm.
+//! algorithm with write-back support.
 //!
 //! This module provides [`Sieve`], a high-performance cache that integrates
-//! with key-value databases to provide transparent caching with lazy loading.
+//! with key-value databases to provide transparent caching with lazy loading
+//! and optional asynchronous write buffering.
 //!
 //! # SIEVE Algorithm
 //!
-//! SIEVE (Simple and Efficient Cache) is a modern eviction algorithm that
-//! provides excellent hit rates comparable to LRU (Least Recently Used) with
-//! significantly lower overhead. Unlike LRU, SIEVE uses a single "visited" bit
-//! per entry and a hand pointer that sweeps through entries, giving unvisited
-//! entries a "second chance" before eviction.
+//! SIEVE (Simpler Is Efficient Eviction) is a modern cache eviction algorithm
+//! that achieves excellent hit rates comparable to LRU with significantly
+//! lower overhead. Unlike LRU, SIEVE:
 //!
-//! Key benefits of SIEVE:
-//! - Lower overhead than LRU (no list reordering on access)
-//! - Better hit rates than simple FIFO
-//! - Scan-resistant (one-time accesses don't pollute the cache)
+//! - Uses a single "visited" bit per entry instead of maintaining access order
+//! - Employs a hand pointer that sweeps through entries circularly
+//! - Gives unvisited entries a "second chance" before eviction
+//! - Naturally resists scan pollution from one-time accesses
+//!
+//! ## Performance Benefits
+//!
+//! - **Lower CPU overhead**: No list reordering on every access (O(1) marking)
+//! - **Better memory locality**: Circular sweep pattern vs. linked list
+//!   traversal
+//! - **Scan resistance**: One-time accesses don't displace useful cached data
+//! - **Comparable hit rates**: Matches or exceeds LRU in most workloads
 //!
 //! # Sharding
 //!
-//! The cache is divided into multiple shards to reduce lock contention during
-//! concurrent access. Each shard maintains its own SIEVE state and capacity,
-//! allowing parallel operations on different keys to proceed without blocking
-//! each other.
+//! The cache divides entries across multiple shards to minimize lock
+//! contention. Each shard:
+//! - Maintains its own SIEVE state (hand pointer, visited bits)
+//! - Has independent capacity and eviction policy
+//! - Can be accessed in parallel without blocking other shards
+//!
+//! More shards reduce contention but increase memory overhead. Recommended:
+//! 16-32 shards for most multi-threaded workloads.
+//!
+//! # Write-Back Caching
+//!
+//! The module supports optional write-back caching via [`BackgroundWriter`],
+//! which:
+//! - Buffers writes in memory using [`WriteBuffer`]
+//! - Asynchronously flushes to database in batches
+//! - Maintains write ordering for consistency
+//! - Reduces database write amplification
+//!
+//! # Usage Patterns
+//!
+//! ## Read-Through Cache
+//!
+//! ```ignore
+//! let cache = WideColumnSieve::new(capacity, shards, db, hasher);
+//!
+//! // Automatically loads from DB on miss
+//! let value = cache.get_normal::<ValueType>(key);
+//! ```
+//!
+//! ## Write-Back Cache
+//!
+//! ```ignore
+//! let writer = BackgroundWriter::new(4, db.clone());
+//! let mut buffer = writer.new_write_buffer();
+//!
+//! // Write to cache and buffer
+//! cache.put::<ValueType>(key, Some(value), &mut buffer);
+//!
+//! // Async flush to database
+//! writer.submit_write_buffer(buffer);
+//! ```
 
 use core::fmt;
 use std::{
@@ -115,16 +159,36 @@ pub type WideColumnSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
 pub type KeyOfSetSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
     Sieve<KeyOfSetAdaptor<C>, DB, S>;
 
-/// A trait for removing an element from a set-like collection.
+/// A trait for removing elements from set-like collections.
 ///
-/// This trait provides a uniform interface for removing elements from various
-/// set implementations (e.g., `HashSet`, `DashSet`) used in the SIEVE cache.
-/// It enables the cache to work with different set types while providing
-/// consistent element removal semantics.
+/// This trait provides a uniform interface for element removal across different
+/// set implementations used in the SIEVE cache. It enables the cache to work
+/// with various set types (`HashSet`, `DashSet`, custom implementations) while
+/// maintaining consistent removal semantics.
 ///
-/// # Type Parameters
+/// # Generic Element Lookup
 ///
-/// - `Element`: The type of elements stored in the set.
+/// The `remove_element` method accepts any borrowed form `Q` of the element
+/// type through the `Borrow` trait. This allows efficient removal without
+/// requiring owned values, matching the flexibility of standard library
+/// collections.
+///
+/// # Implementations
+///
+/// The trait is implemented for:
+/// - `HashSet<T, S>`: Standard single-threaded set
+/// - `DashSet<T, S>`: Concurrent sharded set from `dashmap`
+///
+/// # Example
+///
+/// ```ignore
+/// let mut set = HashSet::new();
+/// set.insert("key".to_string());
+///
+/// // Remove using a borrowed form
+/// let removed = set.remove_element("key");
+/// assert!(removed);
+/// ```
 pub trait RemoveElementFromSet {
     /// The type of elements stored in the set.
     type Element;
@@ -164,25 +228,74 @@ impl<T: Eq + Hash, S: BuildHasher + Clone> RemoveElementFromSet
     }
 }
 
-/// A sharded cache implementation using the SIEVE eviction algorithm.
+/// A sharded cache using the SIEVE eviction algorithm with lazy loading.
 ///
-/// This cache provides concurrent access to cached values with lazy loading
-/// from a backing database. It uses the SIEVE (Simple and Efficient Cache)
-/// algorithm for cache eviction, which provides good hit rates with minimal
-/// overhead.
+/// `Sieve` provides a high-performance, thread-safe cache that transparently
+/// loads values from a backing database on cache misses. It uses the SIEVE
+/// (Simpler Is Efficient Eviction) algorithm for excellent hit rates with
+/// minimal overhead.
 ///
 /// # Type Parameters
 ///
-/// * `C` - The column type that defines the key-value schema for the cache.
-/// * `DB` - The backing database type used to fetch values on cache misses.
-/// * `S` - The hasher builder type used for hashing keys (defaults to
-///   `FxHasher`).
+/// * `B` - The backing storage adaptor ([`WideColumnAdaptor`] or
+///   [`KeyOfSetAdaptor`]) that defines the data schema
+/// * `DB` - The backing database implementation (must implement [`KvDatabase`])
+/// * `S` - The hash builder for key hashing (defaults to `FxHasher`)
 ///
-/// # Sharding
+/// # Architecture
 ///
-/// The cache is divided into multiple shards to reduce lock contention during
-/// concurrent access. Each shard maintains its own SIEVE state and can be
-/// accessed independently.
+/// The cache is divided into multiple independent shards:
+/// - Each shard has its own lock, capacity, and SIEVE state
+/// - Keys are distributed across shards using consistent hashing
+/// - Parallel operations on different shards don't block each other
+/// - More shards = less contention but higher memory overhead
+///
+/// # Cache Semantics
+///
+/// ## Read Operations
+///
+/// - **Cache hit**: Returns value immediately from cache
+/// - **Cache miss**: Fetches from backing database, caches, then returns
+/// - **Concurrent misses**: Only one fetch per key; other threads wait
+///
+/// ## Write Operations
+///
+/// When using write-back mode:
+/// - Updates cache immediately
+/// - Buffers writes in [`WriteBuffer`]
+/// - Background writer flushes to database asynchronously
+/// - Tracks pending writes to prevent premature eviction
+///
+/// # Deadlock Warning
+///
+/// **Do not** call cache methods while holding a read guard from the same
+/// cache. Although reads return read guards, internal implementation may
+/// acquire write locks on cache misses, leading to deadlock.
+///
+/// # Example
+///
+/// ```ignore
+/// use qbice_storage::sieve::WideColumnSieve;
+///
+/// let cache = WideColumnSieve::<MyColumn, _, _>::new(
+///     10_000,              // total capacity
+///     16,                  // shard count (power of 2)
+///     Arc::new(database),  // backing DB
+///     Default::default(),  // hasher
+/// );
+///
+/// // Read-through: fetches from DB on miss
+/// if let Some(value) = cache.get_normal::<MyValue>(key) {
+///     // Use value
+/// }
+/// ```
+///
+/// # Isolations of Write Operations
+///
+/// The Sieve cache doesn't guarantee isolation for write operations buffered
+/// in a `WriteBuffer`. If multiple write buffers are used concurrently,
+/// lost updates may occur. The user must ensure that write buffers are not
+/// used in overlapping contexts to maintain data consistency.
 #[allow(clippy::type_complexity)] // shards field
 pub struct Sieve<
     B: BackingStorage,
@@ -218,20 +331,49 @@ where
 impl<B: BackingStorage, DB, S: Clone> Sieve<B, DB, S> {
     /// Creates a new [`Sieve`] cache with the specified configuration.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `total_capacity` - The total number of entries the cache can hold
-    ///   across all shards. The capacity is distributed evenly among shards.
-    /// * `shard_amount` - The number of shards to divide the cache into. Using
-    ///   more shards reduces lock contention but increases memory overhead.
-    ///   This should typically be a power of two for efficient shard selection.
-    /// * `backing_db` - The database to fetch values from on cache misses.
-    /// * `hasher_builder` - The hasher builder used to hash keys for shard
-    ///   selection and internal hash maps.
+    ///   across all shards. The actual capacity is distributed evenly among
+    ///   shards (using ceiling division), so the real capacity may be slightly
+    ///   higher than specified.
+    ///
+    /// * `shard_amount` - The number of shards to divide the cache into. **Must
+    ///   be a power of two** for efficient shard selection via bit masking.
+    ///   More shards reduce lock contention but increase memory overhead.
+    ///   Recommended values:
+    ///   - Single-threaded: 1-4 shards
+    ///   - Multi-threaded: 16-32 shards
+    ///   - High contention: 64+ shards
+    ///
+    /// * `backing_db` - The database to fetch values from on cache misses. Must
+    ///   be wrapped in `Arc` for shared ownership across cache operations.
+    ///
+    /// * `hasher_builder` - The hash builder used to hash keys for shard
+    ///   selection and internal hash maps. Use `FxHasher` for speed or
+    ///   cryptographic hashers for security-sensitive applications.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `shard_amount` is not a power of two.
     ///
     /// # Returns
     ///
     /// A new `Sieve` cache instance ready to use.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use fxhash::FxBuildHasher;
+    ///
+    /// let cache = Sieve::new(
+    ///     10_000,                    // 10k entries total
+    ///     16,                        // 16 shards (~625 entries each)
+    ///     Arc::new(my_database),
+    ///     FxBuildHasher::default(),
+    /// );
+    /// ```
     pub fn new(
         total_capacity: usize,
         shard_amount: usize,
@@ -272,43 +414,72 @@ impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
 impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
     Sieve<WideColumnAdaptor<C>, DB, S>
 {
-    /// Retrieves a value from the cache, fetching from the backing database if
-    /// not present.
+    /// Retrieves a value from the cache for wide column storage, fetching from
+    /// the database if not present.
     ///
-    /// This method first checks if the value exists in the cache. On a cache
-    /// hit, it returns immediately with a read guard to the cached value.
-    /// On a cache miss, it fetches the value from the backing database,
-    /// inserts it into the cache, and returns the result.
+    /// This method implements read-through caching: it first checks the cache,
+    /// and on a miss, fetches from the backing database, caches the result, and
+    /// returns it. The returned guard provides read access to the cached value.
     ///
-    /// # Arguments
+    /// # Type Parameter
     ///
-    /// * `key` - The key to look up in the cache.
+    /// * `W` - The specific value type implementing [`WideColumnValue<C>`].
+    ///   This determines which discriminant to use when querying the database.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - The key to look up. Combined with `W::discriminant()` to form
+    ///   the complete lookup key.
     ///
     /// # Returns
     ///
-    /// * `Some(ReadGuard)` - If the key exists (either in cache or backing
-    ///   database), returns a guard providing read access to the value.
+    /// * `Some(ReadGuard<W>)` - If the value exists in cache or database. The
+    ///   guard provides read-only access and prevents eviction while held.
     /// * `None` - If the key does not exist in the backing database.
     ///
     /// # Concurrency
     ///
-    /// Multiple concurrent calls with the same key will coordinate to avoid
-    /// duplicate database fetches. Only one fetch will be performed, and other
-    /// callers will wait for the result.
+    /// When multiple threads request the same key simultaneously:
+    /// - Only one thread fetches from the database
+    /// - Other threads wait for the fetch to complete
+    /// - All threads receive the same cached result
+    ///
+    /// This prevents "cache stampede" where many threads redundantly fetch the
+    /// same data.
     ///
     /// # Cancellation Safety
     ///
-    /// This function is designed to be cancellation-safe. If the function is
-    /// dropped while a database fetch is in progress, the internal state
-    /// remains consistent. However, other threads waiting for the same key
-    /// may be woken up and will retry fetching the value.
+    /// This function is cancellation-safe. If dropped during a database fetch:
+    /// - Internal state remains consistent
+    /// - Other waiting threads will retry the fetch
+    /// - No partial updates or corruption occur
     ///
-    /// # Deadlocks
+    /// # Deadlock Warning
     ///
-    /// This function **can deadlock** if you hold another read guard from this
-    /// cache while calling this function. Even though this function returns a
-    /// read lock, its internal implementation may acquire write locks to insert
-    /// new values on cache misses.
+    /// **Never call this method while holding another read guard from this
+    /// cache.** Although it returns a read lock, the implementation may acquire
+    /// write locks internally when inserting new entries on cache misses.
+    ///
+    /// ```ignore
+    /// // DEADLOCK - DO NOT DO THIS:
+    /// let guard1 = cache.get_normal::<T>(key1)?;
+    /// let guard2 = cache.get_normal::<T>(key2)?; // May deadlock!
+    ///
+    /// // CORRECT - Drop guards before next call:
+    /// let value1 = cache.get_normal::<T>(key1)?.clone();
+    /// drop(guard1);  // Explicitly drop or let it go out of scope
+    /// let value2 = cache.get_normal::<T>(key2)?;
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(user_name) = cache.get_normal::<UserName>(user_id) {
+    ///     println!("User: {}", user_name.0);
+    /// } else {
+    ///     println!("User not found");
+    /// }
+    /// ```
     #[allow(clippy::cast_possible_truncation)] // from u64 to usize
     pub fn get_normal<W: WideColumnValue<C> + Send + Sync + 'static>(
         &self,
@@ -358,29 +529,62 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
 impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
     Sieve<WideColumnAdaptor<C>, DB, S>
 {
-    /// Inserts or updates a value in the cache for the given key.
+    /// Inserts or updates a value in the cache with write-back buffering.
     ///
-    /// This method allows direct insertion or update of a value in the cache,
-    /// bypassing the backing database.
+    /// This method updates the in-memory cache immediately and buffers the
+    /// write operation for asynchronous flushing to the database via
+    /// [`BackgroundWriter`]. The cache entry is marked with a pending write
+    /// count to prevent eviction before the write is persisted.
     ///
-    /// # Arguments
+    /// # Type Parameter
     ///
-    /// * `key` - The key to insert or update in the cache.
-    /// * `value` - The value to associate with the key. `None` can be used to
-    ///   represent deletion or absence of a value, depending on the column
-    ///   semantics.
+    /// * `W` - The specific value type implementing [`WideColumnValue<C>`].
+    ///   Determines the discriminant for the database write.
+    ///
+    /// # Parameters
+    ///
+    /// * `key` - The key to insert or update.
+    /// * `value` - The new value to cache. `None` represents deletion (caches
+    ///   the absence of the value).
+    /// * `write_buffer` - Buffer to accumulate this write operation. Must be
+    ///   eventually submitted to a [`BackgroundWriter`] for persistence.
     ///
     /// # Durability
     ///
-    /// This method only updates the in-memory cache and does not persist
-    /// changes to the backing database. It is the caller's responsibility to
-    /// ensure that the backing database is updated accordingly before or after
-    /// calling this method, if persistence is required.
+    /// This method only updates the in-memory cache. The write is **not
+    /// durable** until:
+    /// 1. The `write_buffer` is submitted to [`BackgroundWriter`]
+    /// 2. The background writer flushes and commits the batch
     ///
-    /// # Eviction
+    /// **Data Loss Risk**: If the process crashes before the write is flushed,
+    /// the update will be lost.
     ///
-    /// If the cache shard is at capacity, this insertion may trigger eviction
-    /// of another entry according to the SIEVE algorithm.
+    /// # Eviction Protection
+    ///
+    /// The cache tracks pending writes and prevents eviction of entries with
+    /// unflushed writes. The pending write count is decremented after the
+    /// background writer commits the batch to the database.
+    ///
+    /// # Write Ordering
+    ///
+    /// Multiple `put` calls to the same write buffer are applied in the order
+    /// they appear in the buffer. Write buffers are committed in epoch order
+    /// to ensure consistency.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cache = Arc::new(WideColumnSieve::new(...));
+    /// let writer = BackgroundWriter::new(4, db.clone());
+    /// let mut buffer = writer.new_write_buffer();
+    ///
+    /// // Update cache
+    /// cache.put::<UserName>(user_id, Some(name), &mut buffer);
+    /// cache.put::<UserEmail>(user_id, Some(email), &mut buffer);
+    ///
+    /// // Submit for async persistence
+    /// writer.submit_write_buffer(buffer);
+    /// ```
     pub fn put<W: WideColumnValue<C> + Send + Sync + 'static>(
         self: &Arc<Self>,
         key: C::Key,
@@ -418,11 +622,38 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
     }
 }
 
-/// A trait for determining the in-memory container type used for representing
-/// the set data strcture in key-of-set columns.
+/// A trait for specifying the in-memory container type for key-of-set caching.
+///
+/// This trait extends [`KeyOfSetColumn`] to specify which collection type
+/// should be used to represent sets in memory when caching key-of-set data.
+/// Different container types offer different trade-offs between performance,
+/// memory usage, and concurrency.
+///
+/// # Container Requirements
+///
+/// The container type must support:
+/// - `FromIterator<Element>`: Construction from database query results
+/// - `RemoveElementFromSet`: Efficient element removal
+/// - `Extend<Element>`: Adding new elements
+/// - `Send + Sync + 'static`: Thread-safe caching
+///
+/// # Common Implementations
+///
+/// - `HashSet<T>`: Standard single-threaded set with fast lookups
+/// - `DashSet<T>`: Concurrent sharded set from `dashmap` crate
+/// - `BTreeSet<T>`: Ordered set with range query support
+///
+/// # Example
+///
+/// ```ignore
+/// use std::collections::HashSet;
+///
+/// impl KeyOfSetContainer for UserTagsColumn {
+///     type Container = HashSet<String>;
+/// }
+/// ```
 pub trait KeyOfSetContainer: KeyOfSetColumn {
-    /// The set container type used to store the collection of elements for a
-    /// given key.
+    /// The in-memory container type used to represent the set.
     type Container: FromIterator<Self::Element>
         + RemoveElementFromSet<Element = Self::Element>
         + Extend<Self::Element>
@@ -434,46 +665,66 @@ pub trait KeyOfSetContainer: KeyOfSetColumn {
 impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
     Sieve<KeyOfSetAdaptor<C>, DB, S>
 {
-    /// Retrieves a set value from the cache, fetching from the backing database
-    /// if not present.
+    /// Retrieves a set from the cache for key-of-set storage, fetching from the
+    /// database if not present.
     ///
-    /// This method is designed for columns using the [`KeyOfSet`] storage mode,
-    /// where each key maps to a collection of values. On a cache hit, it
-    /// returns immediately with a read guard to the cached collection. On a
-    /// cache miss, it fetches all members of the set from the backing
-    /// database using [`KvDatabase::collect_key_of_set`], inserts the
-    /// result into the cache, and returns the collection.
+    /// This method implements read-through caching for set-based storage.
+    /// Unlike [`get_normal`](Self::get_normal), this always returns a valid
+    /// container (possibly empty) since key-of-set storage has a natural
+    /// default state.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
-    /// * `key` - The key to look up in the cache.
+    /// * `key` - The key identifying which set to retrieve.
     ///
     /// # Returns
     ///
-    /// A read guard providing access to the cached set value. Unlike
-    /// [`get_normal`](Self::get_normal), this always returns a value (possibly
-    /// an empty collection) since the set storage mode always has a valid
-    /// default state.
+    /// A read guard providing access to the cached set container. The container
+    /// contains all members of the set, either loaded from the database or
+    /// previously cached.
+    ///
+    /// # Caching Strategies
+    ///
+    /// The cache uses two internal representations:
+    ///
+    /// 1. **Full**: Complete set loaded from database
+    ///    - Used after initial database fetch
+    ///    - All members are materialized in memory
+    ///    - Efficient for reads
+    ///
+    /// 2. **Partial**: Delta operations only
+    ///    - Used when only insert/delete operations have been performed
+    ///    - Database fetch is deferred until this method is called
+    ///    - Operations are applied to database results before caching
     ///
     /// # Concurrency
     ///
-    /// Multiple concurrent calls with the same key will coordinate to avoid
-    /// duplicate database fetches. Only one fetch will be performed, and other
-    /// callers will wait for the result.
+    /// Multiple concurrent calls with the same key coordinate to avoid
+    /// duplicate database fetches. Only one thread performs the fetch while
+    /// others wait.
     ///
     /// # Cancellation Safety
     ///
-    /// This function is designed to be cancellation-safe. If the function is
-    /// dropped while a database fetch is in progress, the internal state
-    /// remains consistent. However, other threads waiting for the same key
-    /// may be woken up and will retry fetching the value.
+    /// This function is cancellation-safe. If dropped during a database fetch,
+    /// internal state remains consistent and other threads will retry.
     ///
-    /// # Deadlocks
+    /// # Deadlock Warning
     ///
-    /// This function **can deadlock** if you hold another read guard from this
-    /// cache while calling this function. Even though this function returns a
-    /// read lock, its internal implementation may acquire write locks to insert
-    /// new values on cache misses.
+    /// **Never call this method while holding another read guard from this
+    /// cache.** The implementation may acquire write locks internally when
+    /// materializing partial entries.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tags = cache.get_set(&user_id);
+    ///
+    /// for tag in tags.iter() {
+    ///     println!("Tag: {}", tag);
+    /// }
+    ///
+    /// println!("Total tags: {}", tags.len());
+    /// ```
     pub fn get_set(
         &self,
         key: &C::Key,
@@ -545,41 +796,54 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
 impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
     Sieve<KeyOfSetAdaptor<C>, DB, S>
 {
-    /// Inserts elements into a set stored in the cache for the given key.
+    /// Inserts an element into a set with write-back buffering.
     ///
-    /// This method is designed for columns using the [`KeyOfSet`] storage mode.
-    /// It retrieves the set associated with the key (loading it from the
-    /// backing database if necessary) and adds the provided elements to it.
+    /// This method updates the cached set immediately (creating a partial entry
+    /// if needed) and buffers the insert operation for asynchronous
+    /// persistence. The element is added to the set in cache, but the write
+    /// to the database is deferred until the buffer is flushed.
     ///
-    /// # Type Requirements
+    /// # Parameters
     ///
-    /// This method requires that:
-    /// - `C` implements [`Column`] with a [`KeyOfSetMode`] storage mode
-    /// - `C::Value` implements `Extend` to allow adding elements to the set
-    /// - `C::Value` implements `FromIterator` for loading from the database
+    /// * `key` - The key identifying which set to modify.
+    /// * `element` - The element to insert into the set.
+    /// * `write_buffer` - Buffer to accumulate this write operation.
     ///
-    /// # Arguments
+    /// # Behavior
     ///
-    /// - `key` - A reference to the key identifying the set in the cache
-    /// - `element` - An iterable of elements to insert into the set
+    /// - **If cache has full set**: Element is added to the materialized set
+    /// - **If cache has partial operations**: Insert operation is recorded
+    /// - **If cache miss**: A partial entry is created with this insert
+    ///
+    /// Partial entries defer database fetching until [`get_set`](Self::get_set)
+    /// is called, at which point all recorded operations are applied to the
+    /// database results.
     ///
     /// # Durability
     ///
-    /// This method only updates the in-memory cache. The caller is responsible
-    /// for persisting changes to the backing database if needed.
+    /// The insert is **not durable** until the write buffer is submitted to
+    /// [`BackgroundWriter`] and successfully flushed to the database.
+    ///
+    /// # Duplicate Elements
+    ///
+    /// If the element already exists in the set (either in cache or database),
+    /// this is a no-op from the perspective of the final state, though it still
+    /// generates a database write operation.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// // Insert values into a set associated with a key
-    /// cache.insert_set_element(&my_key, vec![elem1, elem2]);
+    /// let cache = Arc::new(KeyOfSetSieve::new(...));
+    /// let writer = BackgroundWriter::new(4, db.clone());
+    /// let mut buffer = writer.new_write_buffer();
+    ///
+    /// // Add tags
+    /// cache.insert_set_element(&user_id, "rust".to_string(), &mut buffer);
+    /// cache.insert_set_element(&user_id, "async".to_string(), &mut buffer);
+    ///
+    /// // Submit for persistence
+    /// writer.submit_write_buffer(buffer);
     /// ```
-    ///
-    /// # Concurrency
-    ///
-    /// This method coordinates with other cache operations to ensure only one
-    /// thread fetches data from the backing database if multiple threads access
-    /// the same key simultaneously.
     pub fn insert_set_element(
         self: &Arc<Self>,
         key: &C::Key,
@@ -620,35 +884,63 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
         }
     }
 
-    /// Removes an element from a set stored in the cache for the given key.
+    /// Removes an element from a set with write-back buffering.
     ///
-    /// This method is designed for columns using the [`KeyOfSet`] storage mode.
-    /// It retrieves the set associated with the key (loading it from the
-    /// backing database if necessary) and removes the specified element
-    /// from it.
+    /// This method updates the cached set immediately (creating a partial entry
+    /// if needed) and buffers the delete operation for asynchronous
+    /// persistence. The element is removed from the set in cache, but the
+    /// write to the database is deferred until the buffer is flushed.
     ///
-    /// # Type Requirements
+    /// # Parameters
     ///
-    /// This method requires that:
-    /// - `C` implements [`Column`] with a [`KeyOfSetMode`] storage mode
-    /// - `C::Value` implements [`RemoveElementFromSet`] for element removal
-    /// - `C::Value` implements `FromIterator` for loading from the database
+    /// * `key` - The key identifying which set to modify.
+    /// * `element` - The element to remove from the set.
+    /// * `write_buffer` - Buffer to accumulate this write operation.
     ///
-    /// # Arguments
+    /// # Behavior
     ///
-    /// - `key` - A reference to the key identifying the set in the cache
-    /// - `element` - A reference to the element to remove from the set
+    /// - **If cache has full set**: Element is removed from the materialized
+    ///   set
+    /// - **If cache has partial operations**: Delete operation is recorded
+    /// - **If cache miss**: A partial entry is created with this delete
+    ///
+    /// Partial entries defer database fetching until [`get_set`](Self::get_set)
+    /// is called, at which point all recorded operations are applied to the
+    /// database results.
     ///
     /// # Durability
     ///
-    /// This method only updates the in-memory cache. The caller is responsible
-    /// for persisting changes to the backing database if needed.
+    /// The removal is **not durable** until the write buffer is submitted to
+    /// [`BackgroundWriter`] and successfully flushed to the database.
     ///
-    /// # Concurrency
+    /// # Non-Existent Elements
     ///
-    /// This method coordinates with other cache operations to ensure only one
-    /// thread fetches data from the backing database if multiple threads access
-    /// the same key simultaneously.
+    /// If the element doesn't exist in the set (either in cache or database),
+    /// this is a no-op from the perspective of the final state, though it still
+    /// generates a database write operation.
+    ///
+    /// # Operation Ordering
+    ///
+    /// Operations within a write buffer maintain order. For example:
+    /// ```ignore
+    /// cache.insert_set_element(&key, "tag1", &mut buffer);
+    /// cache.remove_set_element(&key, &"tag1", &mut buffer);
+    /// // Final result: tag1 is not in the set
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cache = Arc::new(KeyOfSetSieve::new(...));
+    /// let writer = BackgroundWriter::new(4, db.clone());
+    /// let mut buffer = writer.new_write_buffer();
+    ///
+    /// // Remove tags
+    /// cache.remove_set_element(&user_id, &"deprecated".to_string(), &mut buffer);
+    ///
+    /// // Submit for persistence
+    /// writer.submit_write_buffer(buffer);
+    /// ```
     pub fn remove_set_element(
         self: &Arc<Self>,
         key: &C::Key,

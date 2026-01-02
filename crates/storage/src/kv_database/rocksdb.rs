@@ -402,6 +402,8 @@ impl Impl {
 ///
 /// Batches multiple write operations and commits them atomically when
 /// [`WriteTransaction::commit`] is called.
+///
+/// [`WriteTransaction::commit`]: crate::kv_database::WriteBatch::commit
 pub struct RocksDBWriteTransaction {
     /// Reference to the parent database.
     db: Arc<Impl>,
@@ -585,7 +587,7 @@ impl KvDatabase for RocksDB {
         })
     }
 
-    fn write_transaction(&self) -> Self::WriteBatch {
+    fn write_batch(&self) -> Self::WriteBatch {
         RocksDBWriteTransaction::new(self.0.clone())
     }
 }

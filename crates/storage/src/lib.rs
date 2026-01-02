@@ -1,59 +1,104 @@
 //! Storage abstractions and caching utilities for key-value databases.
 //!
-//! This crate provides a foundation for building persistent storage systems
-//! with efficient caching and data deduplication. It includes:
+//! This crate provides a comprehensive foundation for building high-performance
+//! persistent storage systems with efficient caching, data deduplication, and
+//! flexible storage modes. It includes:
 //!
 //! - **Key-Value Database Abstraction** ([`kv_database`]): A trait-based
-//!   abstraction layer for key-value databases, allowing interchangeable
-//!   backends (e.g., `RocksDB`, `LMDB`, in-memory storage).
+//!   abstraction layer supporting multiple storage backends (e.g., `RocksDB`,
+//!   LMDB, in-memory). Features include wide columns for multi-value storage
+//!   and key-of-set mode for efficient set operations.
 //!
-//! - **SIEVE Cache** ([`sieve`]): A high-performance, sharded cache
-//!   implementation using the SIEVE eviction algorithm, which provides
-//!   excellent hit rates with minimal overhead compared to LRU.
+//! - **SIEVE Cache** ([`sieve`]): A high-performance, sharded cache using the
+//!   SIEVE eviction algorithm with write-back support. Provides excellent hit
+//!   rates with significantly lower overhead than LRU, plus built-in support
+//!   for asynchronous background writes.
 //!
 //! - **Interning System** ([`intern`]): A thread-safe value interning system
-//!   for deduplicating immutable data based on stable hashing, with built-in
-//!   serialization support.
+//!   that deduplicates immutable data using stable hashing. Features
+//!   cross-execution stability and seamless serialization support for reducing
+//!   memory usage and serialized data size.
 //!
-//! # Architecture
+//! # Core Concepts
 //!
-//! The crate is designed around the [`kv_database::Column`] trait, which
-//! defines the schema for key-value pairs including their types and
-//! serialization requirements. This allows for type-safe database operations
-//! with compile-time guarantees.
+//! ## Storage Modes
 //!
-//! The [`sieve::Sieve`] cache integrates seamlessly with any
-//! [`kv_database::KvDatabase`] implementation, providing transparent caching
-//! with lazy loading from the backing store.
+//! The crate supports two primary storage patterns:
+//!
+//! - **Wide Columns**: Store multiple related values under a single key,
+//!   distinguished by discriminants. Each discriminant maps to a specific value
+//!   type, enabling type-safe heterogeneous storage.
+//!
+//! - **Key-of-Set**: Represent `HashMap<K, HashSet<V>>` relationships with
+//!   efficient member insertion, deletion, and scanning operations.
+//!
+//! ## Caching Strategy
+//!
+//! The [`sieve::Sieve`] cache provides:
+//! - Transparent lazy loading from the backing database on cache misses
+//! - Sharded architecture to minimize lock contention
+//! - Optional write-back buffering via [`sieve::BackgroundWriter`]
+//! - Protection against cache stampedes through coordinated fetch
+//!
+//! ## Value Interning
+//!
+//! The [`intern::Interner`] enables:
+//! - Automatic deduplication of equal values based on stable hash
+//! - Reference-counted memory management with automatic cleanup
+//! - Serialization optimization through hash-based value references
 //!
 //! # Example
 //!
 //! ```ignore
-//! use qbice_storage::{kv_database::{Column, Normal}, sieve::Sieve};
+//! use qbice_storage::{
+//!     kv_database::{WideColumn, WideColumnValue, DiscriminantEncoding},
+//!     sieve::WideColumnSieve,
+//! };
 //! use qbice_stable_type_id::Identifiable;
 //! use std::sync::Arc;
 //!
-//! // Define a column schema
+//! // Define a wide column
 //! #[derive(Identifiable)]
-//! struct UserColumn;
+//! struct UserDataColumn;
 //!
-//! impl Column for UserColumn {
+//! impl WideColumn for UserDataColumn {
+//!     type Discriminant = u8;
 //!     type Key = u64;
-//!     type Value = String;
-//!     type Mode = Normal;
+//!     fn discriminant_encoding() -> DiscriminantEncoding {
+//!         DiscriminantEncoding::Prefixed
+//!     }
 //! }
 //!
-//! // Create a cache backed by your database
-//! let cache = Sieve::<UserColumn, _, _>::new(
-//!     1000,                    // total capacity
-//!     16,                      // number of shards
-//!     Arc::new(db),           // backing database
-//!     Default::default(),
+//! // Define value types
+//! #[derive(Clone, Encode, Decode)]
+//! struct UserName(String);
+//!
+//! impl WideColumnValue<UserDataColumn> for UserName {
+//!     fn discriminant() -> u8 { 0 }
+//! }
+//!
+//! // Create a cache
+//! let cache = WideColumnSieve::<UserDataColumn, _, _>::new(
+//!     1000,                // total capacity
+//!     16,                  // shard count
+//!     Arc::new(db),        // backing database
+//!     Default::default(),  // hasher
 //! );
 //!
-//! // Retrieve values (automatically fetched from DB on cache miss)
-//! let value = cache.get_normal(&user_id);
+//! // Retrieve values (automatically fetched from DB on miss)
+//! if let Some(name) = cache.get_normal::<UserName>(user_id) {
+//!     println!("User: {}", name.0);
+//! }
 //! ```
+//!
+//! # Design Considerations
+//!
+//! - **Atomicity**: Ensures that batches of operations are applied to the
+//!   database atomically.
+//! - **Durability Tolerance**: In case of crashes, some recent writes may be
+//!   lost, at worst, there may be some recomputation in the next run.
+//! - **Write Efficiency**: Optimized for high-throughput write workloads with
+//!   batching and background writing.
 
 pub mod intern;
 pub mod kv_database;
