@@ -365,15 +365,22 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
         // Spawn Threads
         let handles = workers
             .into_iter()
-            .map(|local| {
+            .enumerate()
+            .map(|(i, local)| {
                 let registry = registry.clone();
                 let commit_sender = commit_sender.clone();
 
-                thread::spawn(move || {
-                    let worker =
-                        WorkerThread { local, registry, sender: commit_sender };
-                    worker.run();
-                })
+                thread::Builder::new()
+                    .name(format!("bg_writer_{i}"))
+                    .spawn(move || {
+                        let worker = WorkerThread {
+                            local,
+                            registry,
+                            sender: commit_sender,
+                        };
+                        worker.run();
+                    })
+                    .unwrap()
             })
             .collect();
 
@@ -386,9 +393,12 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
                 let commit_receiver = commit_receiver;
                 let pool = pool.clone();
 
-                thread::spawn(move || {
-                    Self::commit_worker(&commit_receiver, &pool);
-                })
+                thread::Builder::new()
+                    .name("bg_writer_commit".to_string())
+                    .spawn(move || {
+                        Self::commit_worker(&commit_receiver, &pool);
+                    })
+                    .unwrap()
             }),
             pool,
             db,
