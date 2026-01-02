@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
-use qbice_storage::kv_database::{KvDatabase, WriteBatch};
+use parking_lot::RwLock;
+use qbice_storage::sieve::WriteBuffer;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{Engine, Query, config::Config, query::QueryID};
@@ -9,7 +10,7 @@ pub struct InputSession<'x, C: Config> {
     engine: &'x Engine<C>,
     incremented: bool,
     dirty_batch: VecDeque<QueryID>,
-    transaction: Option<<C::Database as KvDatabase>::WriteBatch>,
+    transaction: Option<WriteBuffer<C::Database, C::BuildHasher>>,
 }
 
 impl<C: Config> Drop for InputSession<'_, C> {
@@ -18,6 +19,7 @@ impl<C: Config> Drop for InputSession<'_, C> {
         self.engine.clear_dirtied_queries();
 
         let tx = self.transaction.take().unwrap();
+        let tx = RwLock::new(tx);
 
         self.engine.rayon_thread_pool.install(|| {
             self.dirty_batch.par_iter().for_each(|x| {
@@ -25,7 +27,7 @@ impl<C: Config> Drop for InputSession<'_, C> {
             });
         });
 
-        tx.commit();
+        self.engine.submit_write_buffer(tx.into_inner());
     }
 }
 
@@ -50,7 +52,7 @@ impl<C: Config> Engine<C> {
         InputSession {
             incremented: false,
             dirty_batch: VecDeque::new(),
-            transaction: Some(self.database.write_transaction()),
+            transaction: Some(self.new_write_buffer()),
             engine: self,
         }
     }
@@ -100,9 +102,7 @@ impl<C: Config> InputSession<'_, C> {
 
             if fingerprint_diff && !self.incremented {
                 self.engine
-                    .computation_graph
-                    .timestamp_manager
-                    .increment(self.transaction.as_ref().unwrap());
+                    .increment_timestamp(self.transaction.as_mut().unwrap());
 
                 self.incremented = true;
             }
@@ -115,9 +115,7 @@ impl<C: Config> InputSession<'_, C> {
             // info
             if !self.incremented {
                 self.engine
-                    .computation_graph
-                    .timestamp_manager
-                    .increment(self.transaction.as_ref().unwrap());
+                    .increment_timestamp(self.transaction.as_mut().unwrap());
 
                 self.incremented = true;
             }
@@ -128,7 +126,7 @@ impl<C: Config> InputSession<'_, C> {
             query_hash,
             new_value,
             query_value_fingerprint,
-            self.transaction.as_ref().unwrap(),
+            self.transaction.as_mut().unwrap(),
         );
     }
 }

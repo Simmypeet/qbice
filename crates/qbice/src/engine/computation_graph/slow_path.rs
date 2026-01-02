@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use qbice_storage::kv_database::KvDatabase;
+use parking_lot::RwLock;
 
 use crate::{
     Engine, Query, TrackedEngine,
@@ -109,18 +109,17 @@ impl<C: Config> Engine<C> {
                      projection",
                 );
 
-            let tx = self.database.write_transaction();
-
             let fingerprint = self.hash(&value);
             let updated = old_node_info.value_fingerprint() != fingerprint;
+            let write_buffer = RwLock::new(self.new_write_buffer());
 
             // if fingerprint has changed, we do dirty propagation
             if updated {
-                self.dirty_propagate(query.id, &tx);
+                self.dirty_propagate(query.id, &write_buffer);
             }
 
             (
-                Some(tx),
+                Some(write_buffer.into_inner()),
                 Some(fingerprint),
                 // if the query is a firewall and its value has changed, it
                 // needs to invoke projection queries in the backward direction

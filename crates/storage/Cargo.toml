@@ -19,7 +19,9 @@ rust-rocksdb.workspace = true
 dashmap.workspace = true
 crossbeam-utils.workspace = true
 crossbeam-channel.workspace = true
+crossbeam-deque.workspace = true
 rayon.workspace = true
+enum-as-inner.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

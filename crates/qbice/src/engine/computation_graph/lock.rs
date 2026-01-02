@@ -9,7 +9,7 @@ use dashmap::{
     mapref::one::{Ref, RefMut},
 };
 use qbice_stable_hash::Compact128;
-use qbice_storage::{intern::Interned, kv_database::KvDatabase};
+use qbice_storage::{intern::Interned, sieve::WriteBuffer};
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
@@ -416,7 +416,7 @@ impl<C: Config> Engine<C> {
         query_value_fingerprint: Option<Compact128>,
         lock_guard: ComputingLockGuard<'_, C>,
         has_pending_backward_projection: bool,
-        continuing_tx: Option<<C::Database as KvDatabase>::WriteBatch>,
+        continuing_tx: Option<WriteBuffer<C::Database, C::BuildHasher>>,
     ) {
         let dashmap::Entry::Occupied(mut entry_lock) =
             self.computation_graph.lock.lock.entry(query_id.id)

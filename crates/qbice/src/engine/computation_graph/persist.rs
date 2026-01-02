@@ -10,10 +10,12 @@ use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{
     intern::Interned,
     kv_database::{
-        DiscriminantEncoding, KeyOfSetColumn, KvDatabase, WideColumn,
-        WideColumnValue, WriteBatch,
+        DiscriminantEncoding, KeyOfSetColumn, WideColumn, WideColumnValue,
     },
-    sieve::{KeyOfSetContainer, KeyOfSetSieve, RemoveElementFromSet, WideColumnSieve},
+    sieve::{
+        BackgroundWriter, KeyOfSetContainer, KeyOfSetSieve,
+        RemoveElementFromSet, WideColumnSieve, WriteBuffer,
+    },
 };
 use rayon::iter::IntoParallelRefIterator;
 
@@ -23,10 +25,44 @@ use crate::{
     engine::computation_graph::{
         ComputationGraph, QueryKind, QueryWithID, Sieve,
         lock::BackwardProjectionLockGuard,
-        tfc_achetype::TransitiveFirewallCallees, timestamp::Timestamp,
+        tfc_achetype::TransitiveFirewallCallees,
     },
     query::QueryID,
 };
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+pub struct TimestampColumn;
+
+impl WideColumn for TimestampColumn {
+    type Key = ();
+
+    type Discriminant = ();
+
+    fn discriminant_encoding() -> DiscriminantEncoding {
+        DiscriminantEncoding::Prefixed
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Encode,
+    Decode,
+    Identifiable,
+)]
+pub struct Timestamp(u64);
+
+impl WideColumnValue<TimestampColumn> for Timestamp {
+    fn discriminant() {}
+}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
@@ -365,44 +401,70 @@ impl<Q: Query> WideColumnValue<QueryStoreColumn> for QueryResult<Q> {
 }
 
 pub struct Persist<C: Config> {
-    query_node: WideColumnSieve<QueryNodeColumn, C::Database, C::BuildHasher>,
+    query_node:
+        Arc<WideColumnSieve<QueryNodeColumn, C::Database, C::BuildHasher>>,
     dirty_edge_set:
-        WideColumnSieve<DirtySetColumn, C::Database, C::BuildHasher>,
-    query_store: WideColumnSieve<QueryStoreColumn, C::Database, C::BuildHasher>,
-    backward_edges: KeyOfSetSieve<
-        BackwardEdgeColumn<C>,
-        C::Database,
-        C::BuildHasher,
-    >,
+        Arc<WideColumnSieve<DirtySetColumn, C::Database, C::BuildHasher>>,
+    query_store:
+        Arc<WideColumnSieve<QueryStoreColumn, C::Database, C::BuildHasher>>,
+    backward_edges:
+        Arc<KeyOfSetSieve<BackwardEdgeColumn<C>, C::Database, C::BuildHasher>>,
+
+    // need to be declared because of the the write buffer interface, we'll
+    // fix this later
+    timestamp_sieve:
+        Arc<WideColumnSieve<TimestampColumn, C::Database, C::BuildHasher>>,
+
+    background_writer: BackgroundWriter<C::Database, C::BuildHasher>,
 }
 
 impl<C: Config> Persist<C> {
     pub fn new(db: Arc<C::Database>, shard_amount: usize) -> Self {
+        let background_writer =
+            BackgroundWriter::<C::Database, C::BuildHasher>::new(8, db.clone());
+
+        let timestamp_sieve =
+            Arc::new(WideColumnSieve::<
+                TimestampColumn,
+                C::Database,
+                C::BuildHasher,
+            >::new(
+                1, 1, db.clone(), C::BuildHasher::default()
+            ));
+
+        if timestamp_sieve.get_normal::<Timestamp>(()).is_none() {
+            let mut tx = background_writer.new_write_buffer();
+            timestamp_sieve.put((), Some(Timestamp(0)), &mut tx);
+            background_writer.submit_write_buffer(tx);
+        }
+
         Self {
-            query_node: Sieve::<_, C>::new(
+            query_node: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 C::BuildHasher::default(),
-            ),
-            query_store: Sieve::<_, C>::new(
+            )),
+            query_store: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 C::BuildHasher::default(),
-            ),
-            dirty_edge_set: Sieve::<_, C>::new(
+            )),
+            dirty_edge_set: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
                 C::BuildHasher::default(),
-            ),
-            backward_edges: Sieve::<_, C>::new(
+            )),
+            backward_edges: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db,
                 C::BuildHasher::default(),
-            ),
+            )),
+            timestamp_sieve,
+            background_writer,
         }
     }
 }
@@ -493,7 +555,7 @@ impl<C: Config> Engine<C> {
         >,
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
         has_pending_backward_projection: bool,
-        continuting_tx: Option<<C::Database as KvDatabase>::WriteBatch>,
+        continuting_tx: Option<WriteBuffer<C::Database, C::BuildHasher>>,
     ) {
         let query_value_fingerprint =
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
@@ -508,8 +570,7 @@ impl<C: Config> Engine<C> {
             transitive_firewall_callees_fingerprint,
             tfc_achetype,
         );
-        let current_timestamp =
-            self.computation_graph.timestamp_manager.get_current();
+        let current_timestamp = self.get_current_timestamp();
 
         let existing_forward_edges =
             self.computation_graph.get_forward_edges_order(query_id.id);
@@ -517,60 +578,9 @@ impl<C: Config> Engine<C> {
         let query_input = QueryInput::<Q>(query_id.query.clone());
         let query_result = QueryResult::<Q>(query_value);
 
-        {
-            let tx = continuting_tx
-                .unwrap_or_else(|| self.database.write_transaction());
-
-            // mark pending backward projection if needed
-            if has_pending_backward_projection {
-                tx.put::<QueryNodeColumn, _>(
-                    &query_id.id,
-                    &PendingBackwardProjection(current_timestamp),
-                );
-            }
-
-            tx.put::<QueryNodeColumn, _>(&query_id.id, &node_info);
-
-            // remove prior backward edges
-            if let Some(forward_edges) = &existing_forward_edges {
-                for edge in forward_edges.iter() {
-                    tx.delete_member::<BackwardEdgeColumn<C>>(
-                        edge,
-                        &query_id.id,
-                    );
-                }
-            }
-
-            tx.put::<QueryNodeColumn, _>(
-                &query_id.id,
-                &LastVerified(current_timestamp),
-            );
-
-            for edge in forward_edge_order.0.iter() {
-                tx.insert_member::<BackwardEdgeColumn<C>>(edge, &query_id.id);
-            }
-
-            tx.put::<QueryNodeColumn, _>(&query_id.id, &forward_edge_order);
-
-            tx.put::<QueryNodeColumn, _>(
-                &query_id.id,
-                &forward_edge_observations,
-            );
-
-            tx.put::<QueryNodeColumn, _>(&query_id.id, &query_kind);
-
-            tx.put::<QueryStoreColumn, _>(
-                &query_id.id.compact_hash_128(),
-                &query_result,
-            );
-
-            tx.put::<QueryStoreColumn, _>(
-                &query_id.id.compact_hash_128(),
-                &query_input,
-            );
-
-            tx.commit();
-        }
+        let mut tx = continuting_tx.unwrap_or_else(|| {
+            self.computation_graph.persist.background_writer.new_write_buffer()
+        });
 
         {
             // remove prior backward edges
@@ -579,7 +589,7 @@ impl<C: Config> Engine<C> {
                     self.computation_graph
                         .persist
                         .backward_edges
-                        .remove_set_element(edge, &query_id.id);
+                        .remove_set_element(edge, &query_id.id, &mut tx);
                 }
             }
 
@@ -588,50 +598,58 @@ impl<C: Config> Engine<C> {
                 self.computation_graph.persist.query_node.put(
                     query_id.id,
                     Some(PendingBackwardProjection(current_timestamp)),
+                    &mut tx,
                 );
             }
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id.id, Some(node_info));
+            self.computation_graph.persist.query_node.put(
+                query_id.id,
+                Some(node_info),
+                &mut tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id.id, Some(query_kind));
+            self.computation_graph.persist.query_node.put(
+                query_id.id,
+                Some(query_kind),
+                &mut tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id.id, Some(LastVerified(current_timestamp)));
+            self.computation_graph.persist.query_node.put(
+                query_id.id,
+                Some(LastVerified(current_timestamp)),
+                &mut tx,
+            );
 
             for edge in forward_edge_order.0.iter() {
                 self.computation_graph
                     .persist
                     .backward_edges
-                    .insert_set_element(edge, std::iter::once(query_id.id));
+                    .insert_set_element(edge, query_id.id, &mut tx);
             }
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id.id, Some(forward_edge_order));
+            self.computation_graph.persist.query_node.put(
+                query_id.id,
+                Some(forward_edge_order),
+                &mut tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id.id, Some(forward_edge_observations));
+            self.computation_graph.persist.query_node.put(
+                query_id.id,
+                Some(forward_edge_observations),
+                &mut tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_store
-                .put(query_id.id.compact_hash_128(), Some(query_input));
+            self.computation_graph.persist.query_store.put(
+                query_id.id.compact_hash_128(),
+                Some(query_input),
+                &mut tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_store
-                .put(query_id.id.compact_hash_128(), Some(query_result));
+            self.computation_graph.persist.query_store.put(
+                query_id.id.compact_hash_128(),
+                Some(query_result),
+                &mut tx,
+            );
         }
     }
 
@@ -641,7 +659,7 @@ impl<C: Config> Engine<C> {
         query_hash_128: Compact128,
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
-        tx: &<C::Database as KvDatabase>::WriteBatch,
+        tx: &mut WriteBuffer<C::Database, C::BuildHasher>,
     ) {
         let query_id = QueryID::new::<Q>(query_hash_128);
 
@@ -664,42 +682,10 @@ impl<C: Config> Engine<C> {
             transitive_firewall_callees,
         );
 
-        let timestamp = self.computation_graph.timestamp_manager.get_current();
+        let timestamp = self.get_current_timestamp();
 
         let query_input = QueryInput::<Q>(query);
         let query_result = QueryResult::<Q>(query_value);
-
-        {
-            // remove prior backward edges
-            if let Some(forward_edges) = &existing_forward_edges {
-                for edge in forward_edges.iter() {
-                    tx.delete_member::<BackwardEdgeColumn<C>>(edge, &query_id);
-                }
-            }
-
-            tx.put::<QueryNodeColumn, _>(&query_id, &QueryKind::Input);
-
-            tx.put::<QueryNodeColumn, _>(&query_id, &LastVerified(timestamp));
-
-            tx.put::<QueryNodeColumn, _>(&query_id, &empty_forward_edges);
-
-            tx.put::<QueryNodeColumn, _>(
-                &query_id,
-                &empty_forward_edge_observations,
-            );
-
-            tx.put::<QueryNodeColumn, _>(&query_id, &node_info);
-
-            tx.put::<QueryStoreColumn, _>(
-                &query_id.compact_hash_128(),
-                &query_input,
-            );
-
-            tx.put::<QueryStoreColumn, _>(
-                &query_id.compact_hash_128(),
-                &query_result,
-            );
-        }
 
         {
             if let Some(forward_edges) = existing_forward_edges {
@@ -707,44 +693,51 @@ impl<C: Config> Engine<C> {
                     self.computation_graph
                         .persist
                         .backward_edges
-                        .remove_set_element(edge, &query_id);
+                        .remove_set_element(edge, &query_id, tx);
                 }
             }
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id, Some(QueryKind::Input));
+            self.computation_graph.persist.query_node.put(
+                query_id,
+                Some(QueryKind::Input),
+                tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id, Some(LastVerified(timestamp)));
+            self.computation_graph.persist.query_node.put(
+                query_id,
+                Some(LastVerified(timestamp)),
+                tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id, Some(empty_forward_edges));
+            self.computation_graph.persist.query_node.put(
+                query_id,
+                Some(empty_forward_edges),
+                tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id, Some(empty_forward_edge_observations));
+            self.computation_graph.persist.query_node.put(
+                query_id,
+                Some(empty_forward_edge_observations),
+                tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id, Some(node_info));
+            self.computation_graph.persist.query_node.put(
+                query_id,
+                Some(node_info),
+                tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_store
-                .put(query_id.compact_hash_128(), Some(query_input));
+            self.computation_graph.persist.query_store.put(
+                query_id.compact_hash_128(),
+                Some(query_input),
+                tx,
+            );
 
-            self.computation_graph
-                .persist
-                .query_store
-                .put(query_id.compact_hash_128(), Some(query_result));
+            self.computation_graph.persist.query_store.put(
+                query_id.compact_hash_128(),
+                Some(query_result),
+                tx,
+            );
         }
     }
 
@@ -752,14 +745,19 @@ impl<C: Config> Engine<C> {
         &self,
         from: QueryID,
         to: QueryID,
-        tx: &<C::Database as KvDatabase>::WriteBatch,
+        tx: &mut WriteBuffer<C::Database, C::BuildHasher>,
     ) {
         let edge = Edge { from, to };
 
-        tx.put::<DirtySetColumn, _>(&edge, &Unit);
+        self.computation_graph.persist.dirty_edge_set.put(edge, Some(Unit), tx);
 
-        self.computation_graph.persist.dirty_edge_set.put(edge, Some(Unit));
         self.computation_graph.add_dirtied_edge_count();
+    }
+
+    pub(super) fn new_write_buffer(
+        &self,
+    ) -> WriteBuffer<C::Database, C::BuildHasher> {
+        self.computation_graph.persist.background_writer.new_write_buffer()
     }
 
     #[allow(clippy::option_option)]
@@ -769,8 +767,7 @@ impl<C: Config> Engine<C> {
         clean_edges: &[QueryID],
         new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
     ) {
-        let current_timestamp =
-            self.computation_graph.timestamp_manager.get_current();
+        let current_timestamp = self.get_current_timestamp();
 
         let new_node_info = new_tfc.map(|x| {
             let mut current_node_info =
@@ -783,26 +780,8 @@ impl<C: Config> Engine<C> {
             current_node_info
         });
 
-        {
-            let tx = self.database.write_transaction();
-
-            for callee in clean_edges.iter().copied() {
-                let edge = Edge { from: query_id, to: callee };
-
-                tx.delete::<DirtySetColumn, Unit>(&edge);
-            }
-
-            tx.put::<QueryNodeColumn, _>(
-                &query_id,
-                &LastVerified(current_timestamp),
-            );
-
-            if let Some(node_info) = &new_node_info {
-                tx.put::<QueryNodeColumn, _>(&query_id, node_info);
-            }
-
-            tx.commit();
-        }
+        let mut tx =
+            self.computation_graph.persist.background_writer.new_write_buffer();
 
         {
             for callee in clean_edges.iter().copied() {
@@ -811,20 +790,22 @@ impl<C: Config> Engine<C> {
                 self.computation_graph
                     .persist
                     .dirty_edge_set
-                    .put::<Unit>(edge, None);
+                    .put::<Unit>(edge, None, &mut tx);
             }
 
             if let Some(node_info) = new_node_info {
-                self.computation_graph
-                    .persist
-                    .query_node
-                    .put(query_id, Some(node_info));
+                self.computation_graph.persist.query_node.put(
+                    query_id,
+                    Some(node_info),
+                    &mut tx,
+                );
             }
 
-            self.computation_graph
-                .persist
-                .query_node
-                .put(query_id, Some(LastVerified(current_timestamp)));
+            self.computation_graph.persist.query_node.put(
+                query_id,
+                Some(LastVerified(current_timestamp)),
+                &mut tx,
+            );
         }
     }
 
@@ -852,16 +833,13 @@ impl<C: Config> Engine<C> {
         query_id: &QueryID,
         backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
     ) {
-        let tx = self.database.write_transaction();
-
-        tx.delete::<QueryNodeColumn, PendingBackwardProjection>(query_id);
-
-        tx.commit();
+        let mut tx =
+            self.computation_graph.persist.background_writer.new_write_buffer();
 
         self.computation_graph
             .persist
             .query_node
-            .put::<PendingBackwardProjection>(*query_id, None);
+            .put::<PendingBackwardProjection>(*query_id, None, &mut tx);
 
         backward_projection_lock_guard.done();
     }
@@ -896,5 +874,40 @@ impl<C: Config> Engine<C> {
             input: format!("{query_input:?}"),
             output: format!("{query_value:?}"),
         })
+    }
+
+    pub(super) fn get_current_timestamp(&self) -> Timestamp {
+        *self
+            .computation_graph
+            .persist
+            .timestamp_sieve
+            .get_normal::<Timestamp>(())
+            .expect("Timestamp should always be initialized")
+    }
+
+    pub(super) fn submit_write_buffer(
+        &self,
+        tx: WriteBuffer<C::Database, C::BuildHasher>,
+    ) {
+        self.computation_graph
+            .persist
+            .background_writer
+            .submit_write_buffer(tx);
+    }
+
+    pub(super) fn increment_timestamp(
+        &self,
+        tx: &mut WriteBuffer<C::Database, C::BuildHasher>,
+    ) -> Timestamp {
+        let current = self.get_current_timestamp();
+        let new_timestamp = Timestamp(current.0 + 1);
+
+        self.computation_graph.persist.timestamp_sieve.put(
+            (),
+            Some(new_timestamp),
+            tx,
+        );
+
+        new_timestamp
     }
 }

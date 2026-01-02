@@ -116,8 +116,7 @@ impl<C: Config> Engine<C> {
             Ok(FastPathResult::TryAgain)
         } else {
             // check if we have the existing query info
-            let current_timestamp =
-                self.computation_graph.timestamp_manager.get_current();
+            let current_timestamp = self.get_current_timestamp();
 
             let (Some(query_info), Some(last_verified)) = (
                 self.computation_graph.get_node_info(query_id),

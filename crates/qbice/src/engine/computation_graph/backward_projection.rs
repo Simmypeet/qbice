@@ -76,8 +76,7 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         query_id: QueryID,
     ) {
-        let current_timestamp =
-            self.computation_graph.timestamp_manager.get_current();
+        let current_timestamp = self.get_current_timestamp();
 
         loop {
             // no more pending backward projection

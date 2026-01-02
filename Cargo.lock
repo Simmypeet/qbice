@@ -847,8 +847,10 @@ name = "qbice_storage"
 version = "0.1.2"
 dependencies = [
  "crossbeam-channel",
+ "crossbeam-deque",
  "crossbeam-utils",
  "dashmap",
+ "enum-as-inner",
  "futures",
  "fxhash",
  "parking_lot",

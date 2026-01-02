@@ -1,4 +1,5 @@
-use qbice_storage::kv_database::KvDatabase;
+use parking_lot::RwLock;
+use qbice_storage::sieve::WriteBuffer;
 use rayon::prelude::ParallelIterator;
 
 use crate::{
@@ -10,7 +11,7 @@ impl<C: Config> Engine<C> {
     pub(super) fn dirty_propagate(
         &self,
         query_id: QueryID,
-        tx: &<C::Database as KvDatabase>::WriteBatch,
+        tx: &RwLock<WriteBuffer<C::Database, C::BuildHasher>>,
     ) {
         // has already been marked dirty
         if !self.insert_dirty_query(query_id) {
@@ -24,7 +25,11 @@ impl<C: Config> Engine<C> {
             backward_edges.par_iter().for_each(|id| {
                 let caller_query_id = *id;
 
-                self.mark_dirty_forward_edge(caller_query_id, query_id, tx);
+                self.mark_dirty_forward_edge(
+                    caller_query_id,
+                    query_id,
+                    &mut tx.write(),
+                );
 
                 let query_kind = self
                     .computation_graph

@@ -76,7 +76,6 @@ pub(super) mod computation_graph;
 /// - `&mut Engine`: Required for registration and input modification
 /// - `Arc<Engine>`: The typical way to share the engine for querying
 pub struct Engine<C: Config> {
-    database: Arc<C::Database>,
     interner: SharedInterner,
     computation_graph: ComputationGraph<C>,
     executor_registry: Registry<C>,
@@ -142,10 +141,9 @@ impl<C: Config> Engine<C> {
 
         Ok(Self {
             computation_graph: ComputationGraph::new(
-                database.clone(),
+                database,
                 default_shard_amount(),
             ),
-            database,
             interner: shared_interner,
             executor_registry: Registry::default(),
             build_stable_hasher: stable_hasher,

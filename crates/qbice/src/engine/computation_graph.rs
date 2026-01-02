@@ -12,7 +12,7 @@ use crate::{
     config::{Config, DefaultConfig},
     engine::computation_graph::{
         fast_path::FastPathResult, lock::Lock, persist::Persist,
-        statistic::Statistic, timestamp::TimestampManager,
+        statistic::Statistic,
     },
     executor::CyclicError,
     query::{DynValue, DynValueBox, QueryID},
@@ -30,7 +30,6 @@ mod repair;
 mod slow_path;
 mod statistic;
 mod tfc_achetype;
-mod timestamp;
 mod visualization;
 
 type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
@@ -76,13 +75,11 @@ pub struct ComputationGraph<C: Config> {
     lock: Lock<C>,
     dirtied_queries: DashSet<QueryID, C::BuildHasher>,
     statistic: Statistic,
-    timestamp_manager: TimestampManager,
 }
 
 impl<C: Config> ComputationGraph<C> {
     pub fn new(db: Arc<<C as Config>::Database>, shard_amount: usize) -> Self {
         Self {
-            timestamp_manager: TimestampManager::new(&*db),
             persist: Persist::new(db, shard_amount),
             dirtied_queries: DashSet::default(),
             statistic: Statistic::default(),

@@ -33,10 +33,14 @@ use std::{
     hash::{BuildHasher, BuildHasherDefault, Hash},
     marker::PhantomData,
     option::Option,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize},
+    },
 };
 
 use dashmap::DashSet;
+use enum_as_inner::EnumAsInner;
 use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 
 use crate::{
@@ -44,7 +48,9 @@ use crate::{
     sharded::Sharded,
 };
 
-mod write_buffer;
+mod write_behind;
+
+pub use write_behind::{BackgroundWriter, WriteBuffer};
 
 /// An internal trait abstracting the key and value types used for backing
 /// storage in the SIEVE cache.
@@ -74,9 +80,31 @@ impl<C: WideColumn> BackingStorage for WideColumnAdaptor<C> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyOfSetAdaptor<C>(pub PhantomData<(C,)>);
 
+/// An enumeration representing set operations for key-of-set columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(missing_docs)]
+pub enum Operation {
+    Insert,
+    Delete,
+}
+
+/// An entry in the key-of-set cache, representing either the full set of
+/// elements or a partial set of operations to apply.
+#[derive(Debug, EnumAsInner)]
+#[allow(missing_docs)]
+pub enum KeyOfSetEntry<C: KeyOfSetContainer> {
+    /// The complete set was fetched from the backing storage. Contains the full
+    /// container.
+    Full(C::Container),
+
+    /// The complete set is not stored; instead, a list of operations to apply
+    /// is kept.
+    Partial(HashMap<C::Element, Operation>),
+}
+
 impl<C: KeyOfSetContainer> BackingStorage for KeyOfSetAdaptor<C> {
     type Key = C::Key;
-    type Value = C::Container;
+    type Value = KeyOfSetEntry<C>;
 }
 
 /// A sharded sieve cache operating on wide columns data schema.
@@ -223,6 +251,19 @@ impl<B: BackingStorage, DB, S: Clone> Sieve<B, DB, S> {
 }
 
 impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
+    fn decrement_pending_write(&self, key: &B::Key) {
+        let shard_index = self.shard_index(key);
+
+        let read = self.shards.read_shard(shard_index);
+
+        if let Retrieve::Hit(node) = read.get(key, false) {
+            node.pending_writes
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
     fn shard_index(&self, key: &B::Key) -> usize {
         self.shards.shard_index(self.hasher_builder.hash_one(key))
     }
@@ -230,9 +271,6 @@ impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
 
 impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
     Sieve<WideColumnAdaptor<C>, DB, S>
-where
-    C::Key: Eq + Hash,
-    C::Discriminant: Eq + Hash,
 {
     /// Retrieves a value from the cache, fetching from the backing database if
     /// not present.
@@ -283,14 +321,14 @@ where
             let read_lock = self.shards.read_shard(shard_index);
 
             if let Ok(guard) = RwLockReadGuard::try_map(read_lock, |x| match x
-                .get(&combined_key)
+                .get(&combined_key, true)
             {
                 Retrieve::Hit(entry) => Some(entry),
                 Retrieve::Miss => None,
             }) {
                 return MappedRwLockReadGuard::try_map(guard, |entry| {
-                    entry.as_ref().map(|boxed| {
-                        let any_ref: &dyn Any = boxed.as_ref();
+                    entry.value.as_ref().map(|node| {
+                        let any_ref: &dyn Any = node.as_ref();
                         any_ref.downcast_ref::<W>().unwrap()
                     })
                 })
@@ -299,7 +337,7 @@ where
 
             let mut write_lock = self.shards.write_shard(shard_index);
 
-            if let Retrieve::Hit(_) = write_lock.get(&combined_key) {
+            if let Retrieve::Hit(_) = write_lock.get(&combined_key, false) {
                 // another thread already filled the cache while we were
                 // acquiring the write lock, retry read
                 continue;
@@ -311,10 +349,15 @@ where
             write_lock.insert(
                 combined_key.clone(),
                 db_value.map(|x| Box::new(x) as Box<dyn Any + Send + Sync>),
+                0,
             );
         }
     }
+}
 
+impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
+    Sieve<WideColumnAdaptor<C>, DB, S>
+{
     /// Inserts or updates a value in the cache for the given key.
     ///
     /// This method allows direct insertion or update of a value in the cache,
@@ -339,19 +382,39 @@ where
     /// If the cache shard is at capacity, this insertion may trigger eviction
     /// of another entry according to the SIEVE algorithm.
     pub fn put<W: WideColumnValue<C> + Send + Sync + 'static>(
-        &self,
+        self: &Arc<Self>,
         key: C::Key,
         value: Option<W>,
+        write_buffer: &mut write_behind::WriteBuffer<DB, S>,
     ) {
         let combined_key = (key, W::discriminant());
         let shard_index = self.shard_index(&combined_key);
 
         let mut write_lock = self.shards.write_shard(shard_index);
 
-        write_lock.insert(
-            combined_key,
-            value.map(|x| Box::new(x) as Box<dyn Any + Send + Sync>),
+        let updated = write_buffer.wide_column_writes.put(
+            combined_key.0.clone(),
+            value.clone(),
+            self,
         );
+
+        if let RetrieveMut::Hit(node) = write_lock.get_mut(&combined_key, true)
+        {
+            node.value =
+                value.map(|v| Box::new(v) as Box<dyn Any + Send + Sync>);
+            // Relaxed is fine since we've already acquired the write lock
+            *node.visited.get_mut() = true;
+
+            if updated {
+                *node.pending_writes.get_mut() += 1;
+            }
+        } else {
+            write_lock.insert(
+                combined_key,
+                value.map(|v| Box::new(v) as Box<dyn Any + Send + Sync>),
+                usize::from(updated),
+            );
+        }
     }
 }
 
@@ -362,7 +425,10 @@ pub trait KeyOfSetContainer: KeyOfSetColumn {
     /// given key.
     type Container: FromIterator<Self::Element>
         + RemoveElementFromSet<Element = Self::Element>
-        + Extend<Self::Element>;
+        + Extend<Self::Element>
+        + Send
+        + Sync
+        + 'static;
 }
 
 impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
@@ -416,28 +482,69 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
         loop {
             let read_lock = self.shards.read_shard(shard_index);
 
-            if let Ok(guard) =
-                RwLockReadGuard::try_map(read_lock, |x| match x.get(key) {
-                    Retrieve::Hit(entry) => Some(entry),
-                    Retrieve::Miss => None,
-                })
+            if let Ok(guard) = RwLockReadGuard::try_map(read_lock, |x| match x
+                .get(key, true)
             {
-                return MappedRwLockReadGuard::map(guard, |entry| entry);
+                Retrieve::Hit(entry) => entry.value.as_full(),
+                Retrieve::Miss => None,
+            }) {
+                return guard;
             }
 
             let mut write_lock = self.shards.write_shard(shard_index);
 
-            if let Retrieve::Hit(_) = write_lock.get(key) {
-                // another thread already filled the cache while we were
-                // acquiring the write lock, retry read
-                continue;
+            // the deltas that have to be applied to the full set
+            let entry = write_lock.get_mut(key, false);
+
+            let partial = if let RetrieveMut::Hit(en) = &entry {
+                match &en.value {
+                    KeyOfSetEntry::Full(_) => {
+                        // another thread already filled the cache while we were
+                        // acquiring the write lock, retry read
+                        continue;
+                    }
+
+                    KeyOfSetEntry::Partial(hash_map) => Some(hash_map),
+                }
+            } else {
+                None
+            };
+
+            let mut db_value: C::Container =
+                self.backing_db.scan_members::<C>(key).collect();
+
+            if let Some(partial_ops) = partial {
+                for (element, operation) in partial_ops {
+                    match operation {
+                        Operation::Insert => {
+                            db_value.extend(std::iter::once(element.clone()));
+                        }
+                        Operation::Delete => {
+                            db_value.remove_element(element);
+                        }
+                    }
+                }
             }
 
-            let db_value = self.backing_db.scan_members::<C>(key).collect();
-
-            write_lock.insert(key.clone(), db_value);
+            match entry {
+                RetrieveMut::Hit(node) => {
+                    node.value = KeyOfSetEntry::Full(db_value);
+                }
+                RetrieveMut::Miss => {
+                    write_lock.insert(
+                        key.clone(),
+                        KeyOfSetEntry::Full(db_value),
+                        0,
+                    );
+                }
+            }
         }
     }
+}
+
+impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
+    Sieve<KeyOfSetAdaptor<C>, DB, S>
+{
     /// Inserts elements into a set stored in the cache for the given key.
     ///
     /// This method is designed for columns using the [`KeyOfSet`] storage mode.
@@ -474,16 +581,42 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
     /// thread fetches data from the backing database if multiple threads access
     /// the same key simultaneously.
     pub fn insert_set_element(
-        &self,
+        self: &Arc<Self>,
         key: &C::Key,
-        element: impl IntoIterator<Item = C::Element>,
+        element: C::Element,
+        write_buffer: &mut write_behind::WriteBuffer<DB, S>,
     ) {
         let shard_index = self.shard_index(key);
 
         let mut write_lock = self.shards.write_shard(shard_index);
 
-        if let RetrieveMut::Hit(entry) = write_lock.get_mut(key) {
-            entry.extend(element);
+        write_buffer.key_of_set_writes.put(
+            key.clone(),
+            element.clone(),
+            Operation::Insert,
+            self,
+        );
+
+        match write_lock.get_mut(key, true) {
+            RetrieveMut::Hit(entry) => match &mut entry.value {
+                KeyOfSetEntry::Full(container) => {
+                    container.extend(std::iter::once(element));
+                }
+                KeyOfSetEntry::Partial(partial) => {
+                    partial.insert(element, Operation::Insert);
+                }
+            },
+
+            RetrieveMut::Miss => {
+                let mut partial = HashMap::new();
+                partial.insert(element, Operation::Insert);
+
+                write_lock.insert(
+                    key.clone(),
+                    KeyOfSetEntry::Partial(partial),
+                    0,
+                );
+            }
         }
     }
 
@@ -516,19 +649,43 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
     /// This method coordinates with other cache operations to ensure only one
     /// thread fetches data from the backing database if multiple threads access
     /// the same key simultaneously.
-    pub fn remove_set_element<Q: ?Sized + Eq + Hash>(
-        &self,
+    pub fn remove_set_element(
+        self: &Arc<Self>,
         key: &C::Key,
-        element: &Q,
-    ) where
-        C::Element: Borrow<Q>,
-    {
+        element: &C::Element,
+        write_buffer: &mut write_behind::WriteBuffer<DB, S>,
+    ) {
         let shard_index = self.shard_index(key);
 
         let mut write_lock = self.shards.write_shard(shard_index);
 
-        if let RetrieveMut::Hit(entry) = write_lock.get_mut(key) {
-            entry.remove_element(element);
+        write_buffer.key_of_set_writes.put(
+            key.clone(),
+            element.clone(),
+            Operation::Delete,
+            self,
+        );
+
+        match write_lock.get_mut(key, true) {
+            RetrieveMut::Hit(entry) => match &mut entry.value {
+                KeyOfSetEntry::Full(container) => {
+                    container.remove_element(element);
+                }
+                KeyOfSetEntry::Partial(partial) => {
+                    partial.insert(element.clone(), Operation::Delete);
+                }
+            },
+
+            RetrieveMut::Miss => {
+                let mut partial = HashMap::new();
+                partial.insert(element.clone(), Operation::Delete);
+
+                write_lock.insert(
+                    key.clone(),
+                    KeyOfSetEntry::Partial(partial),
+                    0,
+                );
+            }
         }
     }
 }
@@ -536,6 +693,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
 struct Node<B: BackingStorage> {
     key: B::Key,
     value: B::Value,
+    pending_writes: AtomicUsize,
     visited: AtomicBool,
 }
 
@@ -559,19 +717,27 @@ impl<B: BackingStorage, S> SieveShard<B, S> {
 }
 
 enum Retrieve<'x, B: BackingStorage> {
-    Hit(&'x B::Value),
+    Hit(&'x Node<B>),
     Miss,
 }
 
 enum RetrieveMut<'x, B: BackingStorage> {
-    Hit(&'x mut B::Value),
+    Hit(&'x mut Node<B>),
     Miss,
 }
 
 impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
-    fn insert(&mut self, key: B::Key, value: B::Value) {
+    fn insert(&mut self, key: B::Key, value: B::Value, pending_writes: usize) {
         // scan for an empty slot
+        let mut scanned = 0;
+        let max_scan = self.nodes.len() * 2;
+
         loop {
+            if scanned > max_scan {
+                // cache is full break from the loop to evict
+                break;
+            }
+
             let index = self.hand;
             self.hand = (self.hand + 1) % self.nodes.len();
 
@@ -579,8 +745,13 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
                 if node
                     .visited
                     .swap(false, std::sync::atomic::Ordering::Relaxed)
+                    && node
+                        .pending_writes
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        == 0
                 {
                     // give a second chance
+                    scanned += 1;
                     continue;
                 }
 
@@ -589,6 +760,7 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
                 *node = Node {
                     key: key.clone(),
                     value,
+                    pending_writes: AtomicUsize::new(pending_writes),
                     visited: AtomicBool::new(true),
                 };
                 self.map.insert(key, index);
@@ -599,30 +771,49 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
             self.nodes[index] = Some(Node {
                 key: key.clone(),
                 value,
+                pending_writes: AtomicUsize::new(pending_writes),
                 visited: AtomicBool::new(true),
             });
             self.map.insert(key, index);
             self.active += 1;
             return;
         }
+
+        // unconditionally increases the size by appending to the end
+        self.nodes.push(Some(Node {
+            key: key.clone(),
+            value,
+            pending_writes: AtomicUsize::new(pending_writes),
+            visited: AtomicBool::new(true),
+        }));
+        self.map.insert(key, self.nodes.len() - 1);
+        self.active += 1;
+        self.hand = 0; // reset hand to start scanning from beginning next time
     }
 
-    fn get(&self, key: &B::Key) -> Retrieve<'_, B> {
+    fn get(&self, key: &B::Key, visit: bool) -> Retrieve<'_, B> {
         if let Some(&index) = self.map.get(key) {
             let node = self.nodes[index].as_ref().unwrap();
-            node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
-            return Retrieve::Hit(&node.value);
+
+            if visit {
+                node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            return Retrieve::Hit(node);
         }
 
         Retrieve::Miss
     }
 
-    fn get_mut(&mut self, key: &B::Key) -> RetrieveMut<'_, B> {
+    fn get_mut(&mut self, key: &B::Key, visit: bool) -> RetrieveMut<'_, B> {
         if let Some(&index) = self.map.get(key) {
             let node = self.nodes[index].as_mut().unwrap();
-            node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
 
-            return RetrieveMut::Hit(&mut node.value);
+            if visit {
+                node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            return RetrieveMut::Hit(node);
         }
 
         RetrieveMut::Miss
