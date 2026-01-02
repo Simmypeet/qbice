@@ -789,6 +789,7 @@ version = "0.1.0"
 dependencies = [
  "flexstr",
  "qbice",
+ "rayon",
  "tempfile",
  "tokio",
  "tracing",

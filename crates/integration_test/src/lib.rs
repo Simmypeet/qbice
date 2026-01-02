@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use qbice::{
     Decode, Encode, Engine, Identifiable, StableHash, TrackedEngine,
-    config::{Config, DefaultConfig},
+    config::Config,
     executor::{CyclicError, Executor},
     query::Query,
     serialize::Plugin,
@@ -301,8 +301,39 @@ impl<C: Config> Executor<SlowQuery, C> for SlowExecutor {
     }
 }
 
-pub fn create_test_engine(tempdir: &TempDir) -> Engine<DefaultConfig> {
-    Engine::<DefaultConfig>::new_with(
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Identifiable,
+)]
+pub struct TestingConfig;
+
+impl Config for TestingConfig {
+    type Storage = [u8; 16];
+
+    type Database = RocksDB;
+
+    type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
+
+    type BuildHasher = std::collections::hash_map::RandomState;
+
+    // set the cache entry small for stress testing the cache eviction
+    fn cache_entry_capacity() -> usize { 4 }
+
+    fn rayon_thread_pool_builder() -> rayon::ThreadPoolBuilder {
+        rayon::ThreadPoolBuilder::new()
+    }
+}
+
+pub fn create_test_engine(tempdir: &TempDir) -> Engine<TestingConfig> {
+    Engine::<TestingConfig>::new_with(
         Plugin::default(),
         RocksDB::factory(tempdir.path()),
         SeededStableHasherBuilder::<Sip128Hasher>::new(0),

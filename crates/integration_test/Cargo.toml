@@ -15,6 +15,7 @@ tokio.workspace = true
 flexstr.workspace = true
 tracing-test.workspace = true
 tracing.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true
