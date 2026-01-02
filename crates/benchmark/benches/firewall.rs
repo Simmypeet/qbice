@@ -233,7 +233,7 @@ impl DiffSquaredChain1 {
     ) -> Result<i64, CyclicError> {
         let diff = tracked_engine.query(&DiffSquared(self.0)).await?;
 
-        Ok(diff * diff)
+        Ok(diff)
     }
 }
 
@@ -277,7 +277,7 @@ impl DiffSquaredChain2 {
     ) -> Result<i64, CyclicError> {
         let diff = tracked_engine.query(&DiffSquaredChain1(self.0)).await?;
 
-        Ok(diff * diff)
+        Ok(diff)
     }
 }
 
