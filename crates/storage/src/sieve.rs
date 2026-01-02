@@ -44,6 +44,8 @@ use crate::{
     sharded::Sharded,
 };
 
+mod write_buffer;
+
 /// An internal trait abstracting the key and value types used for backing
 /// storage in the SIEVE cache.
 pub trait BackingStorage {
@@ -70,11 +72,11 @@ impl<C: WideColumn> BackingStorage for WideColumnAdaptor<C> {
 ///
 /// See [`KeyOfSetSieve`] for details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyOfSetAdaptor<C, V>(pub PhantomData<(C, V)>);
+pub struct KeyOfSetAdaptor<C>(pub PhantomData<(C,)>);
 
-impl<C: KeyOfSetColumn, V> BackingStorage for KeyOfSetAdaptor<C, V> {
+impl<C: KeyOfSetContainer> BackingStorage for KeyOfSetAdaptor<C> {
     type Key = C::Key;
-    type Value = V;
+    type Value = C::Container;
 }
 
 /// A sharded sieve cache operating on wide columns data schema.
@@ -82,8 +84,8 @@ pub type WideColumnSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
     Sieve<WideColumnAdaptor<C>, DB, S>;
 
 /// A sharded sieve cache operating on key-of-set columns data schema.
-pub type KeyOfSetSieve<C, V, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
-    Sieve<KeyOfSetAdaptor<C, V>, DB, S>;
+pub type KeyOfSetSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
+    Sieve<KeyOfSetAdaptor<C>, DB, S>;
 
 /// A trait for removing an element from a set-like collection.
 ///
@@ -226,11 +228,6 @@ impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
     }
 }
 
-impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
-    Sieve<KeyOfSetAdaptor<C, V>, DB, S>
-{
-}
-
 impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
     Sieve<WideColumnAdaptor<C>, DB, S>
 where
@@ -358,8 +355,18 @@ where
     }
 }
 
-impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
-    Sieve<KeyOfSetAdaptor<C, V>, DB, S>
+/// A trait for determining the in-memory container type used for representing
+/// the set data strcture in key-of-set columns.
+pub trait KeyOfSetContainer: KeyOfSetColumn {
+    /// The set container type used to store the collection of elements for a
+    /// given key.
+    type Container: FromIterator<Self::Element>
+        + RemoveElementFromSet<Element = Self::Element>
+        + Extend<Self::Element>;
+}
+
+impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
+    Sieve<KeyOfSetAdaptor<C>, DB, S>
 {
     /// Retrieves a set value from the cache, fetching from the backing database
     /// if not present.
@@ -401,10 +408,10 @@ impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
     /// cache while calling this function. Even though this function returns a
     /// read lock, its internal implementation may acquire write locks to insert
     /// new values on cache misses.
-    pub fn get_set(&self, key: &C::Key) -> MappedRwLockReadGuard<'_, V>
-    where
-        V: FromIterator<C::Element>,
-    {
+    pub fn get_set(
+        &self,
+        key: &C::Key,
+    ) -> MappedRwLockReadGuard<'_, C::Container> {
         let shard_index = self.shard_index(key);
         loop {
             let read_lock = self.shards.read_shard(shard_index);
@@ -470,9 +477,7 @@ impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
         &self,
         key: &C::Key,
         element: impl IntoIterator<Item = C::Element>,
-    ) where
-        V: Extend<C::Element>,
-    {
+    ) {
         let shard_index = self.shard_index(key);
 
         let mut write_lock = self.shards.write_shard(shard_index);
@@ -516,7 +521,6 @@ impl<C: KeyOfSetColumn, V, DB: KvDatabase, S: BuildHasher>
         key: &C::Key,
         element: &Q,
     ) where
-        V: RemoveElementFromSet<Element = C::Element>,
         C::Element: Borrow<Q>,
     {
         let shard_index = self.shard_index(key);

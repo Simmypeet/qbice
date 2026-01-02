@@ -13,7 +13,7 @@ use qbice_storage::{
         DiscriminantEncoding, KeyOfSetColumn, KvDatabase, WideColumn,
         WideColumnValue, WriteBatch,
     },
-    sieve::{KeyOfSetSieve, RemoveElementFromSet, WideColumnSieve},
+    sieve::{KeyOfSetContainer, KeyOfSetSieve, RemoveElementFromSet, WideColumnSieve},
 };
 use rayon::iter::IntoParallelRefIterator;
 
@@ -225,6 +225,10 @@ impl<C: Config> KeyOfSetColumn for BackwardEdgeColumn<C> {
     type Element = QueryID;
 }
 
+impl<C: Config> KeyOfSetContainer for BackwardEdgeColumn<C> {
+    type Container = BackwardEdge<C>;
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
 )]
@@ -367,7 +371,6 @@ pub struct Persist<C: Config> {
     query_store: WideColumnSieve<QueryStoreColumn, C::Database, C::BuildHasher>,
     backward_edges: KeyOfSetSieve<
         BackwardEdgeColumn<C>,
-        BackwardEdge<C>,
         C::Database,
         C::BuildHasher,
     >,
