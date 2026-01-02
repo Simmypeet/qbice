@@ -15,10 +15,9 @@ tempfile.workspace = true
 criterion.workspace = true
 tokio.workspace = true
 
-[[bench]]
+[[bin]]
 name = "firewall"
 path = "benches/firewall.rs"
-harness = false
 
 
 [lints]

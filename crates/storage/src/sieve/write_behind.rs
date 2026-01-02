@@ -276,7 +276,14 @@ impl<Db: KvDatabase, S: BuildHasher> KeyOfSetWrites<Db, S> {
 pub struct WriteBuffer<Db: KvDatabase, S: BuildHasher> {
     pub(super) wide_column_writes: WideColumnWrites<Db, S>,
     pub(super) key_of_set_writes: KeyOfSetWrites<Db, S>,
-    pub(super) epoch: usize,
+    epoch: usize,
+    active: bool,
+}
+
+impl<Db: KvDatabase, S: BuildHasher> Drop for WriteBuffer<Db, S> {
+    fn drop(&mut self) {
+        assert!(!self.active, "WriteBuffer dropped while still active");
+    }
 }
 
 impl<Db: KvDatabase, S: BuildHasher> std::fmt::Debug for WriteBuffer<Db, S> {
@@ -298,10 +305,11 @@ impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
 }
 
 impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
-    fn new(epoch: usize) -> Self {
+    fn new(epoch: usize, active: bool) -> Self {
         Self {
             wide_column_writes: WideColumnWrites::new(),
             key_of_set_writes: KeyOfSetWrites::new(),
+            active,
             epoch,
         }
     }
@@ -313,8 +321,7 @@ pub struct BackgroundWriter<Db: KvDatabase, S: BuildHasher> {
     registry: Arc<Registry<Db, S>>,
     write_handles: Vec<thread::JoinHandle<()>>,
     commit_handle: Option<thread::JoinHandle<()>>,
-    pool: Mutex<Vec<WriteBuffer<Db, S>>>,
-    epoch: AtomicUsize,
+    pool: Arc<Mutex<WriteBufferPool<Db, S>>>,
 
     db: Arc<Db>,
 }
@@ -370,32 +377,29 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
             })
             .collect();
 
+        let pool = Arc::new(Mutex::new(WriteBufferPool::new()));
+
         Self {
             registry,
             write_handles: handles,
-            commit_handle: Some(thread::spawn(move || {
-                Self::commit_worker(&commit_receiver);
-            })),
-            pool: Mutex::new(Vec::new()),
-            epoch: AtomicUsize::new(0),
+            commit_handle: Some({
+                let commit_receiver = commit_receiver;
+                let pool = pool.clone();
+
+                thread::spawn(move || {
+                    Self::commit_worker(&commit_receiver, &pool);
+                })
+            }),
+            pool,
             db,
         }
     }
 
     /// Creates a new write buffer for accumulating write operations.
+    #[must_use]
     pub fn new_write_buffer(&self) -> WriteBuffer<Db, S> {
-        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst);
         let mut pool = self.pool.lock();
-
-        match pool.pop() {
-            Some(mut buffer) => {
-                // reset epoch
-                buffer.epoch = epoch;
-
-                buffer
-            }
-            None => WriteBuffer::new(epoch),
-        }
+        pool.get_buffer()
     }
 
     /// Submits a write buffer to be processed by the background writer.
@@ -416,6 +420,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
 
     fn commit_worker(
         receiver: &crossbeam_channel::Receiver<CommitTask<Db, S>>,
+        pool: &Mutex<WriteBufferPool<Db, S>>,
     ) {
         let mut expected_epoch = 0;
         let mut pending_commits = BinaryHeap::new();
@@ -426,6 +431,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
             Self::process_pending_commits(
                 &mut pending_commits,
                 &mut expected_epoch,
+                pool,
             );
         }
 
@@ -433,6 +439,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
         Self::process_pending_commits(
             &mut pending_commits,
             &mut expected_epoch,
+            pool,
         );
 
         // should be empty now
@@ -442,6 +449,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
     fn process_pending_commits(
         pending_commits: &mut BinaryHeap<CommitTask<Db, S>>,
         expected_epoch: &mut usize,
+        pool: &Mutex<WriteBufferPool<Db, S>>,
     ) {
         while let Some(top) = pending_commits.peek() {
             if top.write_task.write_buffer.epoch == *expected_epoch {
@@ -449,6 +457,10 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
                 task.write_batch.commit();
                 task.write_task.write_buffer.after_commit();
                 *expected_epoch += 1;
+
+                // return write buffer to pool
+                let mut pool_guard = pool.lock();
+                pool_guard.return_buffer(task.write_task.write_buffer);
             } else {
                 break;
             }
@@ -633,5 +645,37 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
 
         // 5. We woke up! Mark ourselves as active.
         self.registry.sleeping_threads.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct WriteBufferPool<Db: KvDatabase, S: BuildHasher> {
+    pool: Vec<WriteBuffer<Db, S>>,
+    epoch: usize,
+}
+
+impl<Db: KvDatabase, S: BuildHasher> WriteBufferPool<Db, S> {
+    #[must_use]
+    pub const fn new() -> Self { Self { pool: Vec::new(), epoch: 0 } }
+
+    pub fn get_buffer(&mut self) -> WriteBuffer<Db, S> {
+        if let Some(mut buffer) = self.pool.pop() {
+            // reset epoch
+            buffer.epoch = self.epoch;
+            buffer.active = true;
+
+            self.epoch += 1;
+
+            buffer
+        } else {
+            let epoch = self.epoch;
+            self.epoch += 1;
+
+            WriteBuffer::new(epoch, true)
+        }
+    }
+
+    pub fn return_buffer(&mut self, mut buffer: WriteBuffer<Db, S>) {
+        buffer.active = false;
+        self.pool.push(buffer);
     }
 }
