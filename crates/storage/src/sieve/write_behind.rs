@@ -536,8 +536,8 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
         loop {
             // A. CHECK SHUTDOWN
             if self.registry.shutdown.load(Ordering::Relaxed) {
-                // Drain local queue before exiting
-                while let Some(task) = self.local.pop() {
+                // Drain all queues: local, global, and steal from others
+                while let Some(task) = self.find_work() {
                     self.process_task(task);
                 }
                 break;
