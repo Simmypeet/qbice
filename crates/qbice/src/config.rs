@@ -218,10 +218,10 @@ pub trait Config:
     ///
     /// # Default Value
     ///
-    /// The default is 65,536 (2^16) entries, which provides a good balance
+    /// The default is 262,144 (2^18) entries, which provides a good balance
     /// between memory usage and cache hit rate for typical workloads.
     #[must_use]
-    fn cache_entry_capacity() -> usize { 2usize.pow(16) }
+    fn cache_entry_capacity() -> usize { 2usize.pow(18) }
 
     /// The number of background threads for writing data to the database.
     ///
@@ -306,7 +306,7 @@ pub trait Config:
 /// - **Database**: `RocksDB` for persistent storage
 /// - **Stable Hasher**: SipHash-128 for deterministic query identification
 /// - **Standard Hasher**: `FxHash` for fast internal hash maps
-/// - **Cache Capacity**: 65,536 entries (2^16)
+/// - **Cache Capacity**: 262,144 entries (2^18)
 /// - **Writer Threads**: 2 background writers
 ///
 /// # When to Use
