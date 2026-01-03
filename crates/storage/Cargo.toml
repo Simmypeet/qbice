@@ -22,6 +22,7 @@ crossbeam-channel.workspace = true
 crossbeam-deque.workspace = true
 rayon.workspace = true
 enum-as-inner.workspace = true
+fjall.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

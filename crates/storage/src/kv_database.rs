@@ -10,6 +10,7 @@ use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
 
 pub mod rocksdb;
+pub mod fjall;
 
 /// A write batch for accumulating multiple write operations that are committed
 /// atomically.
