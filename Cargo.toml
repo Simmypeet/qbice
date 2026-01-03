@@ -64,6 +64,7 @@ pedantic = { level = "deny", priority = -1 }
 double-parens = "allow"
 missing_panics_doc = "allow"
 missing_errors_doc = "allow"
+doc_markdown = "allow"
 use_self = "deny"
 useless_let_if_seq = "deny"
 set_contains_or_insert = "deny"

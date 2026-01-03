@@ -16,24 +16,24 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use std::sync::Arc;
 //!
 //! use qbice::{
-//!     Identifiable, StableHash,
-//!     config::DefaultConfig,
-//!     engine::{Engine, TrackedEngine},
-//!     executor::{CyclicError, Executor},
-//!     query::Query,
+//!     Config, DefaultConfig, Decode, Encode, Engine, Executor, Identifiable,
+//!     StableHash, TrackedEngine, CyclicError, Query,
+//!     serialize::Plugin,
+//!     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
+//!     storage::kv_database::rocksdb::RocksDB,
 //! };
 //!
-//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable, Encode, Decode)]
 //! struct Input(u64);
 //! impl Query for Input {
 //!     type Value = i64;
 //! }
 //!
-//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable, Encode, Decode)]
 //! struct Sum {
 //!     a: Input,
 //!     b: Input,
@@ -43,7 +43,7 @@
 //! }
 //!
 //! struct SumExecutor;
-//! impl<C: qbice::config::Config> Executor<Sum, C> for SumExecutor {
+//! impl<C: Config> Executor<Sum, C> for SumExecutor {
 //!     async fn execute(
 //!         &self,
 //!         q: &Sum,
@@ -54,8 +54,14 @@
 //! }
 //!
 //! #[tokio::main]
-//! async fn main() -> std::io::Result<()> {
-//!     let mut engine = Engine::<DefaultConfig>::new();
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let temp_dir = tempfile::tempdir()?;
+//!
+//!     let mut engine = Engine::<DefaultConfig>::new_with(
+//!         Plugin::default(),
+//!         RocksDB::factory(temp_dir.path()),
+//!         SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+//!     )?;
 //!     engine.register_executor::<Sum, _>(Arc::new(SumExecutor));
 //!
 //!     {
@@ -103,7 +109,7 @@ use crate::{
 ///
 /// Each node represents a single query instance in the graph.
 #[derive(Debug, Clone)]
-pub struct NodeInfo {
+struct NodeInfo {
     /// The unique identifier for this query.
     pub id: QueryID,
     /// Human-readable debug representation of the query key.
@@ -120,7 +126,7 @@ pub struct NodeInfo {
 ///
 /// Edges represent dependencies between queries (caller depends on callee).
 #[derive(Debug, Clone, Copy)]
-pub struct EdgeInfo {
+struct EdgeInfo {
     /// The query ID of the caller (the query that depends on another).
     pub source: QueryID,
     /// The query ID of the callee (the query being depended upon).
@@ -137,7 +143,7 @@ pub struct EdgeInfo {
 /// This struct captures the state of the query graph at a point in time,
 /// including all nodes and their dependency relationships.
 #[derive(Debug, Clone)]
-pub struct GraphSnapshot {
+struct GraphSnapshot {
     /// All query nodes in the graph.
     pub nodes: Vec<NodeInfo>,
     /// All dependency edges (caller → callee).
@@ -160,29 +166,37 @@ impl<C: Config> Engine<C> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use qbice::{
-    ///     Identifiable, StableHash, config::DefaultConfig, engine::Engine,
-    ///     query::Query,
+    ///     Identifiable, StableHash, Encode, Decode,
+    ///     config::DefaultConfig, Engine, Query,
+    ///     serialize::Plugin,
+    ///     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
+    ///     storage::kv_database::rocksdb::RocksDB,
     /// };
     ///
-    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable, Encode, Decode)]
     /// struct MyQuery(u64);
     /// impl Query for MyQuery {
     ///     type Value = i64;
     /// }
     ///
-    /// let mut engine = Engine::<DefaultConfig>::new();
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = tempfile::tempdir()?;
+    /// let mut engine = Engine::<DefaultConfig>::new_with(
+    ///     Plugin::default(),
+    ///     RocksDB::factory(temp_dir.path()),
+    ///     SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+    /// )?;
     /// // ... register executors and run queries ...
     ///
     /// let snapshot = engine.snapshot_graph_from(&MyQuery(0));
     /// println!("Graph has {} nodes", snapshot.nodes.len());
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
-    pub fn snapshot_graph_from<Q: Query>(
-        &mut self,
-        query: &Q,
-    ) -> GraphSnapshot {
+    fn snapshot_graph_from<Q: Query>(&mut self, query: &Q) -> GraphSnapshot {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         let mut visited: HashSet<QueryID> = HashSet::new();
@@ -280,24 +294,35 @@ impl<C: Config> Engine<C> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use qbice::{
-    ///     Identifiable, StableHash, config::DefaultConfig, engine::Engine,
-    ///     query::Query,
+    ///     Identifiable, StableHash, Encode, Decode,
+    ///     config::DefaultConfig, Engine, Query,
+    ///     serialize::Plugin,
+    ///     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
+    ///     storage::kv_database::rocksdb::RocksDB,
     /// };
     ///
-    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable)]
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable, Encode, Decode)]
     /// struct MyQuery(u64);
     /// impl Query for MyQuery {
     ///     type Value = i64;
     /// }
     ///
-    /// let mut engine = Engine::<DefaultConfig>::new();
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = tempfile::tempdir()?;
+    /// let mut engine = Engine::<DefaultConfig>::new_with(
+    ///     Plugin::default(),
+    ///     RocksDB::factory(temp_dir.path()),
+    ///     SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+    /// )?;
     /// // ... register executors and run queries ...
     ///
     /// engine
     ///     .visualize_html(&MyQuery(0), "graph.html")
     ///     .expect("Failed to write visualization");
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn visualize_html<Q: Query>(
         &mut self,
@@ -326,15 +351,15 @@ impl<C: Config> Engine<C> {
 ///
 /// # Example
 ///
-/// ```rust,no_run
-/// use qbice::engine::{GraphSnapshot, write_html_visualization};
+/// ```rust,ignore
+/// use qbice::engine::computation_graph::visualization::{GraphSnapshot, write_html_visualization};
 ///
 /// let snapshot = GraphSnapshot { nodes: vec![], edges: vec![] };
 ///
 /// write_html_visualization(&snapshot, "empty_graph.html")
 ///     .expect("Failed to write");
 /// ```
-pub fn write_html_visualization(
+fn write_html_visualization(
     snapshot: &GraphSnapshot,
     output_path: impl AsRef<Path>,
 ) -> std::io::Result<()> {

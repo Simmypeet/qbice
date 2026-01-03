@@ -42,11 +42,63 @@ impl<C: Config> std::fmt::Debug for InputSession<'_, C> {
 }
 
 impl<C: Config> Engine<C> {
-    /// Creates an input session for setting query input values.
+    /// Creates an input session for setting or updating input query values.
     ///
-    /// The returned session allows you to set values for input queries. When
-    /// the session is dropped, dirty propagation is triggered for any changed
-    /// inputs.
+    /// An input session provides a transactional interface for modifying
+    /// input values. All changes are batched and committed atomically when
+    /// the session is dropped.
+    ///
+    /// # Lifecycle
+    ///
+    /// 1. **Create**: Call this method to begin a session
+    /// 2. **Modify**: Use [`set_input`](InputSession::set_input) to update
+    ///    values
+    /// 3. **Commit**: Drop the session to apply changes and propagate dirtiness
+    ///
+    /// # Dirty Propagation
+    ///
+    /// When the session is dropped, the engine:
+    /// - Compares new values with existing ones via fingerprints
+    /// - Marks changed queries and their dependents as dirty
+    /// - Increments the global timestamp (if any changes occurred)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use qbice::Engine;
+    ///
+    /// // Set initial inputs
+    /// {
+    ///     let mut session = engine.input_session();
+    ///     session.set_input(InputA, 10);
+    ///     session.set_input(InputB, 20);
+    /// } // Changes committed here
+    ///
+    /// // Later, update an input
+    /// {
+    ///     let mut session = engine.input_session();
+    ///     session.set_input(InputA, 15); // Triggers dirty propagation
+    /// }
+    /// ```
+    ///
+    /// # Performance Considerations
+    ///
+    /// - **Batching**: All changes in a single session share one timestamp
+    ///   increment
+    /// - **Unchanged values**: If a value's fingerprint matches the existing
+    ///   one, no dirty propagation occurs
+    /// - **Parallel propagation**: Dirty propagation uses the Rayon thread pool
+    ///   for parallelism
+    ///
+    /// # Mutable Access Requirement
+    ///
+    /// This method requires `&mut self` to ensure exclusive access during
+    /// input modification. You cannot create an input session while:
+    /// - A `TrackedEngine` exists (holds `Arc` reference)
+    /// - Another input session is active
+    ///
+    /// Use `Arc::get_mut` if you need to modify inputs while keeping the
+    /// engine in an `Arc`.
     #[must_use]
     pub fn input_session(&mut self) -> InputSession<'_, C> {
         InputSession {

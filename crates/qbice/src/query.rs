@@ -145,37 +145,116 @@ pub trait Query:
 /// Specifies the execution style of a query.
 ///
 /// The execution style determines how a query participates in the dependency
-/// tracking and dirty propagation system. Most queries should use
-/// [`ExecutionStyle::Normal`].
+/// tracking and dirty propagation system. Different styles offer trade-offs
+/// between fine-grained reactivity and computational efficiency.
+///
+/// # Choosing an Execution Style
+///
+/// - **Most queries**: Use [`Normal`](ExecutionStyle::Normal) - it provides
+///   standard incremental computation semantics
+/// - **External data**: Use [`ExternalInput`](ExecutionStyle::ExternalInput)
+///   for queries that read from files, network, or other external sources
+/// - **Dirty Popagation Optimization**: Use
+///   [`Firewall`](ExecutionStyle::Firewall) and
+///   [`Projection`](ExecutionStyle::Projection) to optimize dirty propagation
+///   in large dependency graphs
 ///
 /// # Variants
 ///
 /// ## Normal
 ///
-/// Standard queries with full dependency tracking. Changes to dependencies
-/// cause the query to be marked dirty and recomputed on the next request.
+/// Standard queries with full dependency tracking. This is the default and
+/// appropriate for most use cases.
+///
+/// **Behavior:**
+/// - Dependencies are tracked automatically
+/// - Changes to dependencies cause immediate dirty propagation
+/// - Results are cached and reused when dependencies haven't changed
+///
+/// **When to use:**
+/// - Most computation queries
+/// - Queries with stable, well-defined dependencies
+/// - When you want automatic reactivity to changes
+///
+/// ## Firewall
+///
+/// Boundary queries that limit dirty propagation based on output changes
+/// rather than input changes. This is a key optimization for reducing
+/// unnecessary dirty propagation in large computation graphs.
+///
+/// **Behavior:**
+/// - When dependencies change, the firewall is recomputed
+/// - Downstream queries are marked dirty **only if** the firewall's output
+///   value actually changed (based on fingerprint)
+/// - Acts as an incremental **dirty propagation boundary** in the large
+///   computation graph system
+///
+/// **When to use:**
+/// - A computation that has a large graph, the dirty propagation of which
+///   becomes expensive
+/// - When many inputs change frequently, but the overall output is stable
+///
+/// **Note:** You almost always want to visualize your computation graph first
+/// to identify where firewalls will be most effective. Moreover, firewalls
+/// often work best when paired with projections downstream to minimize dirty
+/// propagation.
 ///
 /// ## Projection
 ///
 /// Lightweight queries that extract data from firewall queries. Projections
-/// are designed to be very fast (essentially field access) and are used
-/// internally to optimize dependency tracking.
+/// are designed to be very fast (essentially field access) and work in
+/// conjunction with firewalls to provide fine-grained access to coarse
+/// computations.
 ///
-/// Use projections when you need to extract a small piece of a larger
-/// computed value without creating a full dependency on that value.
+/// **Behavior:**
+/// - Must be extremely fast to execute (no expensive computation)
+/// - Used internally to extract specific fields from firewall results
+/// - Prevents unnecessary full recomputation when only a small part is needed
 ///
-/// ## Firewall
+/// **Example pattern:**
+/// ```text
+/// Firewall Query: ComputeAllMetrics
+///   ├─ Projection: ExtractMetricA
+///   ├─ Projection: ExtractMetricB
+///   └─ Projection: ExtractMetricC
+/// ```
 ///
-/// Boundary queries that limit dirty propagation. When a firewall query's
-/// dependencies change, the dirty flag doesn't automatically propagate to
-/// queries that depend on the firewall - instead, the firewall is
-/// recomputed, and propagation only continues if the firewall's *output*
-/// actually changes.
+/// ## `ExternalInput`
 ///
-/// Firewalls are useful for:
-/// - Isolating volatile inputs from stable computations
-/// - Creating natural boundaries in the dependency graph
-/// - Optimizing rebuild times in large systems
+/// Queries that interact with the outside world (files, network, system time,
+/// etc.). These are leaf queries that don't depend on other queries but can
+/// be explicitly refreshed during input sessions.
+///
+/// **Behavior:**
+/// - Cannot depend on other queries (must be leaf nodes)
+/// - Not automatically refreshed when other inputs change
+/// - Can be explicitly refreshed via input session methods
+/// - Executor may perform I/O or other impure operations
+///
+/// **When to use:**
+/// - Reading configuration files
+/// - Fetching data from network APIs
+/// - Querying databases
+/// - Reading system time or environment variables
+/// - Any external state that should be explicitly controlled
+///
+/// **Example:**
+/// ```rust,ignore
+/// #[derive(Query)]
+/// struct ConfigFileQuery;
+///
+/// impl Executor<ConfigFileQuery> for ConfigFileExecutor {
+///     fn execution_style() -> ExecutionStyle {
+///         ExecutionStyle::ExternalInput
+///     }
+///
+///     async fn execute(&self, ...) -> Result<Config, CyclicError> {
+///         // Read from file system
+///         let config = read_config_from_disk()?;
+///         Ok(config)
+///     }
+/// }
+/// ```
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]

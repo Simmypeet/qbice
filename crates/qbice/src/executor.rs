@@ -64,60 +64,211 @@ pub struct CyclicError;
 
 /// Defines the computation logic for a specific query type.
 ///
-/// An executor is responsible for computing the value associated with a
-/// query key. Executors are registered with the engine and invoked
-/// automatically when a query is requested.
+/// An executor is the "implementation" side of the query system - it defines
+/// **how** to compute a value for a given query key. Each query type should
+/// have exactly one executor registered with the engine.
+///
+/// # Core Responsibilities
+///
+/// Executors must:
+///
+/// 1. **Compute values**: Implement the [`execute`](Executor::execute) method
+///    to derive a result from the query key
+/// 2. **Maintain purity**: Behave as pure functions for correctness
+/// 3. **Handle dependencies**: Query other values via [`TrackedEngine`] as
+///    needed
 ///
 /// # Type Parameters
 ///
-/// - `Q`: The query type this executor handles
-/// - `C`: The engine configuration type
+/// - `Q`: The query type this executor handles (must implement [`Query`])
+/// - `C`: The engine configuration type (must implement [`Config`])
 ///
 /// # Pure Function Semantics
 ///
-/// **Executors must behave as pure functions** - given the same query key
-/// and the same values from dependent queries, they must return the same
-/// result. This is critical for correctness of the incremental computation
-/// system.
+/// **Critical: Executors must behave as pure functions** - given the same
+/// query key and the same values from dependent queries, they must return the
+/// same result. This is fundamental to the correctness of incremental
+/// computation.
 ///
-/// The engine relies on this property to:
-/// - Cache and reuse computed values safely
-/// - Skip recomputation when dependencies haven't changed
-/// - Detect changes via fingerprint comparison
+/// ## What "Pure" Means
 ///
-/// ## What "Pure" Means Here
+/// ✅ **Allowed:**
+/// - Reading query parameters
+/// - Querying other values via `engine.query(...)`
+/// - Deterministic computation
+/// - Allocating and returning new values
 ///
-/// - **Deterministic**: Same inputs → same output, always
-/// - **No hidden state**: Don't read from global mutable state, files, network,
-///   or system time without modeling them as query dependencies
-/// - **No side effects**: Don't write to files, databases, or external systems
+/// ❌ **Not Allowed:**
+/// - Reading files, network, or system time (use
+///   [`ExternalInput`](crate::ExecutionStyle::ExternalInput) style instead)
+/// - Accessing global mutable state
+/// - Random number generation with non-deterministic seeds
+/// - Side effects (writing files, printing, etc.)
 ///
-/// If you need external data, model it as an input query that you update
-/// via an input session when the external state changes.
+/// ## Why Purity Matters
+///
+/// The engine relies on purity to:
+/// - **Cache safely**: Reuse results without re-execution
+/// - **Detect changes**: Compare fingerprints to skip recomputation
+/// - **Track dependencies**: Build correct dependency graphs
+///
+/// Violating purity leads to:
+/// - Stale values being returned
+/// - Missing updates when dependencies change
+/// - Undefined behavior in the incremental computation system
 ///
 /// # Thread Safety
 ///
-/// Executors must be `Send + Sync` since they may be called from multiple
-/// threads concurrently. Use interior mutability (e.g., `Mutex`, `RwLock`,
-/// atomics) if the executor needs mutable state.
+/// Executors must be `Send + Sync` because:
+/// - They may be called from multiple threads concurrently
+/// - The engine is designed for parallel query execution
+///
+/// # Example: Basic Executor
+///
+/// ```rust,ignore
+/// use qbice::{Executor, Query, TrackedEngine, CyclicError, Config};
+///
+/// // The query type
+/// #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// struct Add { a: u64, b: u64 }
+///
+/// impl Query for Add {
+///     type Value = u64;
+/// }
+///
+/// // The executor implementation
+/// struct AddExecutor;
+///
+/// impl<C: Config> Executor<Add, C> for AddExecutor {
+///     async fn execute(
+///         &self,
+///         query: &Add,
+///         _engine: &TrackedEngine<C>,
+///     ) -> Result<u64, CyclicError> {
+///         // Simple, pure computation
+///         Ok(query.a + query.b)
+///     }
+/// }
+/// ```
+///
+/// # Example: Executor with Dependencies
+///
+/// ```rust,ignore
+/// struct MultiplyExecutor;
+///
+/// impl<C: Config> Executor<Multiply, C> for MultiplyExecutor {
+///     async fn execute(
+///         &self,
+///         query: &Multiply,
+///         engine: &TrackedEngine<C>,
+///     ) -> Result<u64, CyclicError> {
+///         // Query dependencies
+///         let a = engine.query(&query.a).await?;
+///         let b = engine.query(&query.b).await?;
+///
+///         // Compute based on dependencies
+///         Ok(a * b)
+///     }
+/// }
+/// ```
+///
+/// # Example: Executor with State (Instrumentation)
+///
+/// ```rust,ignore
+/// use std::sync::atomic::{AtomicUsize, Ordering};
+///
+/// struct InstrumentedExecutor {
+///     call_count: AtomicUsize,
+/// }
+///
+/// impl<C: Config> Executor<MyQuery, C> for InstrumentedExecutor {
+///     async fn execute(
+///         &self,
+///         query: &MyQuery,
+///         engine: &TrackedEngine<C>,
+///     ) -> Result<Value, CyclicError> {
+///         // Track calls (doesn't affect purity of result)
+///         self.call_count.fetch_add(1, Ordering::Relaxed);
+///
+///         // Pure computation
+///         // ...
+///     }
+/// }
+/// ```
 pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     /// Executes the query and returns its computed value.
     ///
+    /// This is the core method that defines your computation logic. It takes
+    /// a query key and an engine reference, and returns the computed value.
+    ///
     /// # Arguments
     ///
-    /// - `query`: The query key to compute
-    /// - `engine`: The tracked engine for querying dependencies
+    /// * `query` - The query key containing the inputs to the computation
+    /// * `engine` - The tracked engine for querying dependencies
     ///
     /// # Returns
     ///
     /// Returns `Ok(value)` on success, or `Err(CyclicError)` if a cyclic
-    /// dependency is detected.
+    /// dependency is detected during execution.
     ///
-    /// # Cancellation Safety
+    /// # Dependency Queries
     ///
-    /// This method should be cancellation-safe. If the future is dropped
-    /// before completion, the engine will properly clean up any partial
-    /// state.
+    /// Use `engine.query(&dep_query)` to access dependent values. Each such
+    /// call:
+    /// - Records a dependency edge in the computation graph
+    /// - May trigger recursive execution if the dependency is stale
+    /// - May detect cycles and return `CyclicError`
+    ///
+    /// # Async Execution
+    ///
+    /// This method is async, allowing you to:
+    /// - Query multiple dependencies concurrently using `tokio::join!` or
+    ///   `futures::join!`
+    /// - Perform async computations
+    /// - Cooperate with the runtime for cancellation
+    ///
+    /// # Error Handling
+    ///
+    /// Currently, only `CyclicError` can be returned. If your computation can
+    /// fail in other ways, encode the error in the value type:
+    ///
+    /// ```rust,ignore
+    /// impl Query for Fallible {
+    ///     type Value = Result<Success, MyError>;
+    /// }
+    ///
+    /// impl<C: Config> Executor<Fallible, C> for FallibleExecutor {
+    ///     async fn execute(...) -> Result<Result<Success, MyError>, CyclicError> {
+    ///         let result = try_computation();
+    ///         Ok(result) // Wrap your Result in Ok
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Example: Concurrent Dependency Queries
+    ///
+    /// ```rust,ignore
+    /// async fn execute(
+    ///     &self,
+    ///     query: &ComplexQuery,
+    ///     engine: &TrackedEngine<C>,
+    /// ) -> Result<Value, CyclicError> {
+    ///     // Query multiple dependencies in parallel
+    ///     let (a, b, c) = tokio::join!(
+    ///         engine.query(&query.dep_a),
+    ///         engine.query(&query.dep_b),
+    ///         engine.query(&query.dep_c),
+    ///     );
+    ///
+    ///     // All three must succeed
+    ///     let a = a?;
+    ///     let b = b?;
+    ///     let c = c?;
+    ///
+    ///     // Compute based on dependencies
+    ///     Ok(combine(a, b, c))
+    /// }
+    /// ```
     fn execute<'s, 'q, 'e>(
         &'s self,
         query: &'q Q,
@@ -143,15 +294,80 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     /// Returns the default value for strongly-connected component (SCC)
     /// resolution.
     ///
-    /// When a query is part of a cycle and another query outside the SCC
-    /// tries to access it, this value is returned instead of causing a
-    /// deadlock or infinite recursion.
+    /// When a query is part of a cycle (a strongly-connected component in the
+    /// dependency graph), and another query outside the SCC tries to access
+    /// it, this value is returned instead of deadlocking or causing infinite
+    /// recursion.
+    ///
+    /// # What are SCCs?
+    ///
+    /// A strongly-connected component is a set of queries that form a cycle:
+    ///
+    /// ```text
+    /// Query A → Query B → Query C → Query A  (forms an SCC)
+    /// ```
+    ///
+    /// # When This is Used
+    ///
+    /// The SCC value is used when:
+    /// 1. A cycle is detected during execution
+    /// 2. A query outside the SCC queries a member of the SCC
+    /// 3. The SCC hasn't been fully resolved yet
+    ///
+    /// # Default Behavior
+    ///
+    /// The default implementation **panics**. Override this method if your
+    /// query intentionally participates in cycles.
+    ///
+    /// # Use Cases
+    ///
+    /// ## Fixed-Point Computation
+    ///
+    /// Some algorithms require iterative refinement until a fixed point:
+    ///
+    /// ```rust,ignore
+    /// impl<C: Config> Executor<IterativeQuery, C> for IterativeExecutor {
+    ///     fn scc_value() -> Value {
+    ///         // Start with a conservative initial value
+    ///         Value::default()
+    ///     }
+    ///
+    ///     async fn execute(...) -> Result<Value, CyclicError> {
+    ///         // Compute based on previous iteration
+    ///         let prev = engine.query(&self).await?;  // May get SCC value
+    ///         let next = refine(prev);
+    ///         Ok(next)
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// ## Graph Analysis
+    ///
+    /// Queries representing graph nodes that reference each other:
+    ///
+    /// ```rust,ignore
+    /// impl<C: Config> Executor<NodeQuery, C> for NodeExecutor {
+    ///     fn scc_value() -> NodeInfo {
+    ///         // Provide a default for cyclic references
+    ///         NodeInfo::unresolved()
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Best Practices
+    ///
+    /// - **Most queries should NOT implement this** - cycles usually indicate
+    ///   design issues
+    /// - If you do implement it, ensure the SCC value is "safe" (won't cause
+    ///   incorrect results)
+    /// - Document why cycles are intentional in your executor
+    /// - Consider alternative designs that avoid cycles
     ///
     /// # Panics
     ///
-    /// The default implementation panics. Override this method if your
-    /// query intentionally participates in cycles (e.g., fixed-point
-    /// computations).
+    /// The default implementation panics with message "SCC value is not
+    /// specified". Override this method to provide a value if your query
+    /// type participates in cycles.
     #[must_use]
     fn scc_value() -> Q::Value { panic!("SCC value is not specified") }
 }

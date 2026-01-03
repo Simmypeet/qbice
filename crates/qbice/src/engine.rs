@@ -54,27 +54,77 @@ pub(super) mod computation_graph;
 
 /// The central query database engine.
 ///
-/// The `Engine` is the core component of QBICE, responsible for:
-/// - Storing cached query results
-/// - Tracking dependencies between queries
-/// - Managing dirty propagation when inputs change
-/// - Coordinating query execution through registered executors
+/// `Engine` is the core component of QBICE, serving as the orchestrator for
+/// incremental computation. It manages:
+///
+/// - **Query result caching**: Stores computed values in memory and on disk
+/// - **Dependency tracking**: Records which queries depend on which other
+///   queries
+/// - **Change propagation**: Marks affected queries as dirty when inputs change
+/// - **Executor coordination**: Routes query execution to registered executors
+/// - **Persistence**: Saves and loads computation state across program runs
+///
+/// # Architecture
+///
+/// The engine consists of several key components:
+///
+/// - **Computation Graph**: Tracks query dependencies and verification
+///   timestamps
+/// - **Value Cache**: Stores computed results with fingerprints for change
+///   detection
+/// - **Executor Registry**: Maps query types to their computation logic
+/// - **Database Backend**: Persists query results and metadata
 ///
 /// # Usage Pattern
 ///
-/// The engine is typically used through an ownership cycle:
+/// The typical lifecycle of an engine involves these steps:
 ///
-/// 1. Create and configure the engine (register executors, set inputs)
-/// 2. Wrap in `Arc` and create a [`crate::TrackedEngine`] for querying
-/// 3. Drop the `TrackedEngine` to release the Arc reference
-/// 4. Use `Arc::get_mut` to modify inputs
-/// 5. Repeat from step 2
+/// 1. **Creation**: Instantiate with [`new_with`](Engine::new_with)
+/// 2. **Registration**: Add executors via
+///    [`register_executor`](Engine::register_executor)
+/// 3. **Input Setup**: Set initial values with
+///    [`input_session`](Engine::input_session)
+/// 4. **Wrapping**: Convert to `Arc<Engine>` for shared ownership
+/// 5. **Querying**: Create [`TrackedEngine`](crate::TrackedEngine) via
+///    [`tracked`](Engine::tracked) and execute queries
+/// 6. **Updates**: Drop `TrackedEngine`, modify inputs, repeat from step 5
+///
+/// # Example
+///
+/// See the [crate-level documentation](crate) for a complete example of
+/// creating and using an engine.
 ///
 /// # Thread Safety
 ///
-/// - `&Engine`: Safe to share across threads (read-only access)
-/// - `&mut Engine`: Required for registration and input modification
-/// - `Arc<Engine>`: The typical way to share the engine for querying
+/// - **`&Engine`**: Safe to share across threads for read-only operations
+/// - **`&mut Engine`**: Required for executor registration and input
+///   modification
+/// - **`Arc<Engine>`**: The standard way to share an engine for querying across
+///   threads
+///
+/// The engine uses internal synchronization (locks, atomic operations) to
+/// allow concurrent query execution from multiple threads.
+///
+/// # Persistence
+///
+/// Query results and metadata are automatically persisted to the database
+/// backend. When you create a new `Engine` instance pointing to the same
+/// database, previously computed results are reloaded, enabling:
+///
+/// - **Restart recovery**: Resume computation after program restart
+/// - **Cross-process sharing**: Multiple processes can share computation state
+///   (with appropriate database backend support)
+///
+/// # Memory Management
+///
+/// The engine maintains both in-memory and on-disk caches:
+///
+/// - **In-memory**: Fast access with cache eviction (size controlled by
+///   [`Config::cache_entry_capacity`])
+/// - **On-disk**: Persistent storage in the database backend
+///
+/// Large result sets should use shared ownership (`Arc`, `Arc<[T]>`) to avoid
+/// expensive cloning.
 pub struct Engine<C: Config> {
     interner: SharedInterner,
     computation_graph: ComputationGraph<C>,
@@ -84,15 +134,63 @@ pub struct Engine<C: Config> {
 }
 
 impl<C: Config> Engine<C> {
-    /// Registers an executor for the given query type.
+    /// Registers an executor for a specific query type.
     ///
-    /// Each query type should have exactly one executor registered. If an
-    /// executor is already registered for the type, it will be replaced.
+    /// Each query type should have exactly one executor registered. The
+    /// executor defines how to compute the value for queries of that type.
+    /// If an executor is already registered for the type, it will be silently
+    /// replaced.
     ///
     /// # Type Parameters
     ///
-    /// - `Q`: The query type this executor handles
-    /// - `E`: The executor implementation type
+    /// - `Q`: The query type this executor handles (must implement [`Query`])
+    /// - `E`: The executor implementation (must implement [`Executor<Q, C>`])
+    ///
+    /// # Arguments
+    ///
+    /// * `executor` - The executor instance, wrapped in `Arc` for shared
+    ///   ownership
+    ///
+    /// # Panics
+    ///
+    /// The executor will panic during query execution if:
+    /// - No executor is registered when a query of that type is executed
+    /// - The executor violates purity requirements (non-deterministic behavior)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use std::sync::Arc;
+    /// use qbice::{Engine, Executor, Query, TrackedEngine, CyclicError};
+    ///
+    /// struct AddQuery { a: u64, b: u64 }
+    /// impl Query for AddQuery {
+    ///     type Value = u64;
+    /// }
+    ///
+    /// struct AddExecutor;
+    /// impl<C: qbice::Config> Executor<AddQuery, C> for AddExecutor {
+    ///     async fn execute(
+    ///         &self,
+    ///         query: &AddQuery,
+    ///         _: &TrackedEngine<C>,
+    ///     ) -> Result<u64, CyclicError> {
+    ///         Ok(query.a + query.b)
+    ///     }
+    /// }
+    ///
+    /// // Register the executor
+    /// engine.register_executor::<AddQuery, _>(Arc::new(AddExecutor));
+    /// ```
+    ///
+    /// # Notes
+    ///
+    /// - Executors must be registered **before** queries of that type are
+    ///   executed
+    /// - Executors must be re-registered each time a new `Engine` instance is
+    ///   created, even when reusing the same database
+    /// - The executor is stored behind `Arc`, so it can be shared with multiple
+    ///   engines or cloned cheaply
     pub fn register_executor<Q: Query, E: Executor<Q, C>>(
         &mut self,
         executor: Arc<E>,
@@ -112,18 +210,65 @@ fn default_shard_amount() -> usize {
 }
 
 impl<C: Config> Engine<C> {
-    /// Creates a new engine instance.
+    /// Creates a new engine instance with the specified configuration.
+    ///
+    /// This is the primary constructor for creating an engine. It initializes
+    /// all internal components including the computation graph, database
+    /// connection, and thread pools.
     ///
     /// # Arguments
     ///
-    /// * `serialization_plugin` - A plugin for serializing and deserializing
-    ///   data.
-    /// * `database_factory` - A factory for creating a database.
-    /// * `stable_hasher` - A stable hasher for generating stable hashes.
+    /// * `serialization_plugin` - A [`Plugin`] for serializing and
+    ///   deserializing query keys and values. Use [`Plugin::default()`] for
+    ///   standard types.
+    /// * `database_factory` - A factory that creates the database backend.
+    ///   Common choice: `RocksDB::factory(path)`
+    /// * `stable_hasher` - A hasher builder for computing stable query IDs. Use
+    ///   `SeededStableHasherBuilder::new(seed)` with a fixed seed.
     ///
     /// # Returns
     ///
-    /// A new `Engine` instance.
+    /// Returns `Ok(Engine)` on success, or `Err` if the database cannot be
+    /// opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database factory's error type if:
+    /// - The database path is invalid or inaccessible
+    /// - The database is corrupted
+    /// - Insufficient permissions to open the database
+    /// - The database is already locked by another process
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use qbice::{DefaultConfig, Engine, serialize::Plugin};
+    /// use qbice::stable_hash::{SeededStableHasherBuilder, Sip128Hasher};
+    /// use qbice::storage::kv_database::rocksdb::RocksDB;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = tempfile::tempdir()?;
+    ///
+    /// let engine = Engine::<DefaultConfig>::new_with(
+    ///     Plugin::default(),                           // Serialization
+    ///     RocksDB::factory(temp_dir.path()),          // Database
+    ///     SeededStableHasherBuilder::<Sip128Hasher>::new(0),  // Hasher
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Seed Stability
+    ///
+    /// **Important**: The seed passed to the stable hasher must be the same
+    /// across runs if you want to reuse cached results. Using different seeds
+    /// will cause query IDs to differ, making cached results inaccessible.
+    ///
+    /// # Thread Pool Creation
+    ///
+    /// This method creates the Rayon thread pool specified by
+    /// [`Config::rayon_thread_pool_builder()`]. If thread pool creation fails,
+    /// this method panics.
     pub fn new_with<F: KvDatabaseFactory<KvDatabase = C::Database>>(
         mut serialization_plugin: Plugin,
         database_factory: F,

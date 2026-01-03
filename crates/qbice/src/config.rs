@@ -1,7 +1,82 @@
 //! Configuration module for customizing QBICE engine behavior.
 //!
-//! This module provides the [`Config`] trait for customizing engine parameters
-//! and the [`DefaultConfig`] implementation for typical use cases.
+//! This module provides the [`Config`] trait for customizing various aspects
+//! of the QBICE engine, including storage, database backend, hashing, and
+//! caching parameters. The [`DefaultConfig`] implementation provides sensible
+//! defaults suitable for most use cases.
+//!
+//! # Overview
+//!
+//! The `Config` trait allows you to customize:
+//!
+//! - **Storage allocation**: Size of inline storage for query keys and values
+//! - **Database backend**: Choice of key-value database (e.g., `RocksDB`)
+//! - **Hashing**: Stable and standard hasher implementations
+//! - **Cache sizing**: Memory limits for query result caching
+//! - **Concurrency**: Background thread counts and parallelism settings
+//!
+//! # Creating Custom Configurations
+//!
+//! To create a custom configuration, implement the `Config` trait:
+//!
+//! ```rust
+//! use fxhash::FxBuildHasher;
+//! use qbice::{
+//!     Config,
+//!     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
+//!     storage::kv_database::rocksdb::RocksDB,
+//! };
+//!
+//! #[derive(
+//!     Debug,
+//!     Clone,
+//!     Copy,
+//!     PartialEq,
+//!     Eq,
+//!     PartialOrd,
+//!     Ord,
+//!     Hash,
+//!     Default,
+//!     qbice::Identifiable,
+//! )]
+//! struct MyConfig;
+//!
+//! impl Config for MyConfig {
+//!     // Use larger inline storage for bigger query keys
+//!     type Storage = [u8; 64];
+//!     type Database = RocksDB;
+//!     type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
+//!     type BuildHasher = FxBuildHasher;
+//!
+//!     // Increase cache capacity for larger workloads
+//!     fn cache_entry_capacity() -> usize {
+//!         2usize.pow(20) // 1M entries
+//!     }
+//!
+//!     // Use more background writers for write-heavy workloads
+//!     fn background_writer_thread_count() -> usize { 4 }
+//! }
+//! ```
+//!
+//! # Using `DefaultConfig`
+//!
+//! For most applications, [`DefaultConfig`] provides a good starting point:
+//!
+//! ```rust,ignore
+//! use qbice::{DefaultConfig, Engine, serialize::Plugin};
+//! use qbice::stable_hash::{SeededStableHasherBuilder, Sip128Hasher};
+//! use qbice::storage::kv_database::rocksdb::RocksDB;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let temp_dir = tempfile::tempdir()?;
+//! let engine = Engine::<DefaultConfig>::new_with(
+//!     Plugin::default(),
+//!     RocksDB::factory(temp_dir.path()),
+//!     SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+//! )?;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::{
     fmt::Debug,
@@ -15,8 +90,69 @@ use qbice_stable_hash::{
 use qbice_stable_type_id::Identifiable;
 use qbice_storage::kv_database::{KvDatabase, rocksdb::RocksDB};
 
-/// Configuration trait for QBICE engine, allowing customization of various
-/// parameters.
+/// Configuration trait for the QBICE engine.
+///
+/// This trait defines all configurable aspects of the engine's behavior,
+/// including storage, database backend, hashing algorithms, and performance
+/// tuning parameters. Implement this trait to customize the engine for your
+/// specific use case.
+///
+/// # Required Associated Types
+///
+/// ## `Storage`
+///
+/// The inline storage buffer size for query keys and values. This determines
+/// how much data can be stored on the stack before heap allocation is needed.
+/// Larger values reduce allocations but increase per-query memory overhead.
+///
+/// **Common choices:**
+/// - `[u8; 16]` - Small keys (integers, small tuples)
+/// - `[u8; 32]` - Medium keys (default, good balance)
+/// - `[u8; 64]` - Large keys (structs with many fields)
+///
+/// ## `Database`
+///
+/// The key-value database backend for persistent storage. The engine uses
+/// this to cache query results across runs.
+///
+/// **Available backends:**
+/// - [`RocksDB`] - Default, high-performance embedded database
+///
+/// ## `BuildStableHasher`
+///
+/// The hasher builder for stable hashing across program runs. Used to
+/// compute query IDs and fingerprints.
+///
+/// **Requirements:**
+/// - Must produce 128-bit hashes
+/// - Must be deterministic across program runs
+///
+/// ## `BuildHasher`
+///
+/// The standard hasher for internal hash maps and sets. Does not need to
+/// be stable across runs.
+///
+/// # Configurable Methods
+///
+/// The trait provides several methods with default implementations that can
+/// be overridden:
+///
+/// - [`cache_entry_capacity()`](Config::cache_entry_capacity) - In-memory cache
+///   size
+/// - [`background_writer_thread_count()`](Config::background_writer_thread_count)
+///   \- Database write parallelism
+/// - [`rayon_thread_pool_builder()`](Config::rayon_thread_pool_builder) - Query
+///   execution parallelism
+///
+/// # Thread Safety
+///
+/// All Config implementations must be `Send + Sync` since the engine may be
+/// accessed from multiple threads.
+///
+/// # Example
+///
+/// See the [module-level documentation](crate::config) for a complete example
+/// of implementing a custom configuration.
 pub trait Config:
     Identifiable
     + Default
@@ -35,14 +171,30 @@ pub trait Config:
     /// The size of static storage allocated for query keys and values.
     ///
     /// This determines how much data can be stored inline (on the stack)
-    /// before falling back to heap allocation. Larger values reduce
-    /// allocations for queries with bigger keys/values but increase
-    /// memory overhead per query.
+    /// before falling back to heap allocation. The engine uses this for
+    /// type-erased query storage via `smallbox`.
     ///
-    /// Common choices:
-    /// - `[u8; 16]` - Good for small keys (e.g., simple integers, small tuples)
-    /// - `[u8; 32]` - Balanced for moderate-sized keys
-    /// - `[u8; 64]` - For larger query keys with multiple fields
+    /// # Choosing a Size
+    ///
+    /// Consider the typical size of your query keys and values:
+    ///
+    /// - **Small (16 bytes)**: Good for simple types like `u64`, small enums,
+    ///   or references. Minimizes memory overhead.
+    /// - **Medium (32 bytes)**: Balanced choice for structs with a few fields.
+    ///   This is the default.
+    /// - **Large (64+ bytes)**: For complex query keys with many fields or
+    ///   nested structures.
+    ///
+    /// # Trade-offs
+    ///
+    /// - **Smaller storage**: Lower memory usage per query, but more heap
+    ///   allocations
+    /// - **Larger storage**: Fewer allocations, but higher memory overhead
+    ///
+    /// # Performance Impact
+    ///
+    /// The engine frequently clones queries and values. Keeping them within
+    /// the inline storage size avoids allocation overhead on these operations.
     type Storage: Send + Sync + 'static;
 
     /// The key-value database backend used by the engine.
@@ -58,27 +210,142 @@ pub trait Config:
     /// The standard hasher builder used by the engine.
     type BuildHasher: BuildHasher + Default + Clone + Send + Sync + 'static;
 
-    /// The number of query entries the engine's cache can hold before dropping
-    /// them for memory cache.
+    /// The maximum number of query entries to keep in the in-memory cache.
+    ///
+    /// This controls the size of the cache that stores recently computed
+    /// query results in memory. When the cache exceeds this capacity, the
+    /// entries are evicted.
+    ///
+    /// # Default Value
+    ///
+    /// The default is 65,536 (2^16) entries, which provides a good balance
+    /// between memory usage and cache hit rate for typical workloads.
     #[must_use]
     fn cache_entry_capacity() -> usize { 2usize.pow(16) }
 
-    /// The number of background writer threads for persisting data to the
-    /// database.
+    /// The number of background threads for writing data to the database.
+    ///
+    /// These threads handle asynchronous persistence of query results and
+    /// metadata to the database backend. Increasing this count can improve
+    /// write throughput for write-heavy workloads.
+    ///
+    /// # Default Value
+    ///
+    /// The default is 2 threads, which provides adequate performance for most
+    /// use cases without excessive thread overhead.
+    ///
+    /// # Note
+    ///
+    /// The effectiveness of additional threads depends on your database
+    /// backend's write concurrency capabilities. Some backends may not benefit
+    /// from many writers.
     #[must_use]
     fn background_writer_thread_count() -> usize { 2 }
 
     /// Creates a Rayon thread pool builder for parallel query execution.
+    ///
+    /// QBICE uses Rayon for parallelizing certain operations, such as dirty
+    /// propagation during input updates. This method allows you to customize
+    /// the thread pool configuration.
+    ///
+    /// # Default Configuration
+    ///
+    /// The default uses Rayon's default thread pool configuration, which
+    /// typically creates one thread per logical CPU core.
+    ///
+    /// # Customization Examples
+    ///
+    /// ## Limit Thread Count
+    ///
+    /// ```rust
+    /// use qbice::Config;
+    ///
+    /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, qbice::Identifiable)]
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Storage = [u8; 16];
+    /// #     type Database = qbice::storage::kv_database::rocksdb::RocksDB;
+    /// #     type BuildStableHasher = qbice::stable_hash::SeededStableHasherBuilder<qbice::stable_hash::Sip128Hasher>;
+    /// #     type BuildHasher = fxhash::FxBuildHasher;
+    /// fn rayon_thread_pool_builder() -> rayon::ThreadPoolBuilder {
+    ///     rayon::ThreadPoolBuilder::new().num_threads(4)
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// ## Set Thread Names
+    ///
+    /// ```rust
+    /// use qbice::Config;
+    ///
+    /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, qbice::Identifiable)]
+    /// # struct MyConfig;
+    /// # impl Config for MyConfig {
+    /// #     type Storage = [u8; 16];
+    /// #     type Database = qbice::storage::kv_database::rocksdb::RocksDB;
+    /// #     type BuildStableHasher = qbice::stable_hash::SeededStableHasherBuilder<qbice::stable_hash::Sip128Hasher>;
+    /// #     type BuildHasher = fxhash::FxBuildHasher;
+    /// fn rayon_thread_pool_builder() -> rayon::ThreadPoolBuilder {
+    ///     rayon::ThreadPoolBuilder::new()
+    ///         .thread_name(|i| format!("qbice-worker-{}", i))
+    /// }
+    /// # }
+    /// ```
     #[must_use]
     fn rayon_thread_pool_builder() -> rayon::ThreadPoolBuilder {
         rayon::ThreadPoolBuilder::new()
     }
 }
 
-/// The default configuration for QBICE engine, suitable for most use cases.
+/// The default configuration for the QBICE engine.
 ///
-/// It uses [`RocksDB`] as the database backend and use [`Sip128Hasher`] for
-/// stable hashing.
+/// This configuration provides sensible defaults suitable for most
+/// applications. It uses:
+///
+/// - **Storage**: 16-byte inline storage (suitable for small to medium keys)
+/// - **Database**: `RocksDB` for persistent storage
+/// - **Stable Hasher**: SipHash-128 for deterministic query identification
+/// - **Standard Hasher**: `FxHash` for fast internal hash maps
+/// - **Cache Capacity**: 65,536 entries (2^16)
+/// - **Writer Threads**: 2 background writers
+///
+/// # When to Use
+///
+/// `DefaultConfig` is appropriate for:
+/// - Quick prototyping and development
+/// - Applications with typical query sizes and workload patterns
+/// - Projects that don't require specialized performance tuning
+///
+/// # When to Customize
+///
+/// Consider implementing a custom [`Config`] if you need:
+/// - Different inline storage sizes for larger/smaller query keys
+/// - Alternative database backends
+/// - Tuned cache capacities for your workload
+/// - Custom thread pool configurations
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::sync::Arc;
+/// use qbice::{DefaultConfig, Engine, serialize::Plugin};
+/// use qbice::stable_hash::{SeededStableHasherBuilder, Sip128Hasher};
+/// use qbice::storage::kv_database::rocksdb::RocksDB;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let temp_dir = tempfile::tempdir()?;
+///
+/// // Create an engine with default configuration
+/// let engine = Engine::<DefaultConfig>::new_with(
+///     Plugin::default(),
+///     RocksDB::factory(temp_dir.path()),
+///     SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+/// )?;
+///
+/// // Ready to use!
+/// # Ok(())
+/// # }
+/// ```
 #[derive(
     Debug,
     Clone,
