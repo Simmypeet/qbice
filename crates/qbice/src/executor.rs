@@ -64,6 +64,14 @@ use crate::{
 #[error("cyclic query detected")]
 pub struct CyclicError;
 
+/// An error type indicating that a query executor panicked during execution.
+pub(crate) struct Panicked(Box<dyn Any + Send + 'static>);
+
+impl Panicked {
+    /// Resumes unwinding the panic with the original payload.
+    pub fn resume_unwind(self) -> ! { std::panic::resume_unwind(self.0) }
+}
+
 /// Payload used to indicate a cyclic panic during executor invocation.
 pub(crate) struct CyclicPanicPayload;
 
@@ -389,33 +397,23 @@ fn invoke_executor<
     key: &'a dyn Any,
     executor: &'a dyn Any,
     engine: &'a mut TrackedEngine<C>,
-    result: &'a mut (dyn Any + Send + Sync),
+    result: &'a mut (dyn Any + Send),
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     let key = key.downcast_ref::<K>().expect("Key type mismatch");
     let executor =
         executor.downcast_ref::<E>().expect("Executor type mismatch");
 
     Box::pin(async {
-        let result_buffer: &mut MaybeUninit<Result<K::Value, CyclicError>> =
+        let result_buffer: &mut MaybeUninit<Result<K::Value, Panicked>> =
             result.downcast_mut().expect("Result type mismatch");
 
         let result = AssertUnwindSafe(executor.execute(key, engine))
             .catch_unwind()
-            .await;
+            .await
+            .map_err(Panicked);
 
-        // must've been `CyclicPanicPayload` if it panicked
-        match result {
-            Ok(val) => {
-                result_buffer.write(Ok(val));
-            }
-            Err(err) => {
-                if err.is::<CyclicPanicPayload>() {
-                    result_buffer.write(Err(CyclicError));
-                } else {
-                    std::panic::resume_unwind(err);
-                }
-            }
-        }
+        // SAFETY: we're initializing the buffer here
+        result_buffer.write(result);
     })
 }
 
@@ -424,7 +422,7 @@ type InvokeExecutorFn<C> =
         key: &'a dyn Any,
         executor: &'a dyn Any,
         engine: &'a mut TrackedEngine<C>,
-        result: &'a mut (dyn Any + Send + Sync),
+        result: &'a mut (dyn Any + Send),
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 type RepairQueryFn<C> = for<'a> fn(
@@ -495,9 +493,9 @@ impl<C: Config> Entry<C> {
         &self,
         query_key: &Q,
         engine: &mut TrackedEngine<C>,
-    ) -> Result<Q::Value, CyclicError> {
+    ) -> Result<Q::Value, Panicked> {
         let mut result_buffer =
-            MaybeUninit::<Result<Q::Value, CyclicError>>::uninit();
+            MaybeUninit::<Result<Q::Value, Panicked>>::uninit();
 
         (self.invoke_executor)(
             query_key,

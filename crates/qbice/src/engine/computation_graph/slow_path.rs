@@ -80,15 +80,15 @@ impl<C: Config> Engine<C> {
         // value should be an error, otherwise, it
         // should be a valid value.
 
-        assert_eq!(
-            is_in_scc,
-            result.is_err(),
-            "Cyclic dependency state mismatch: expected {}, got {}",
-            result.is_err(),
-            is_in_scc
-        );
-
-        let value = result.unwrap_or_else(|_| entry.obtain_scc_value::<Q>());
+        let value = if is_in_scc {
+            // obtain the SCC value
+            entry.obtain_scc_value::<Q>()
+        } else {
+            match result {
+                Ok(value) => value,
+                Err(panic) => panic.resume_unwind(),
+            }
+        };
 
         let old_kind = self.computation_graph.get_query_kind(query.id);
 
