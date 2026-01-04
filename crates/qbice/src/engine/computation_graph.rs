@@ -14,7 +14,7 @@ use crate::{
         fast_path::FastPathResult, lock::Lock, persist::Persist,
         statistic::Statistic,
     },
-    executor::CyclicError,
+    executor::{CyclicError, CyclicPanicPayload},
     query::{DynValue, DynValueBox, QueryID},
 };
 
@@ -226,10 +226,7 @@ impl<C: Config> TrackedEngine<C> {
     ///
     /// Returns [`CyclicError`] if a cyclic dependency is detected (the query
     /// directly or indirectly depends on itself).
-    pub async fn query<Q: Query>(
-        &self,
-        query: &Q,
-    ) -> Result<Q::Value, CyclicError> {
+    pub async fn query<Q: Query>(&self, query: &Q) -> Q::Value {
         // YIELD POINT: query function will be called very often, this is a
         // good point for yielding to allow cancelation.
         tokio::task::yield_now().await;
@@ -241,10 +238,10 @@ impl<C: Config> TrackedEngine<C> {
             // cache hit! don't have to go through central database
             let value: &dyn DynValue<C> = &**value;
 
-            return Ok(value
+            return value
                 .downcast_value::<Q::Value>()
                 .expect("should've been a correct type")
-                .clone());
+                .clone();
         }
 
         // run the main process
@@ -261,7 +258,8 @@ impl<C: Config> TrackedEngine<C> {
             self.cache.insert(query_with_id.id, dyn_value);
         }
 
-        result
+        // panic! with CyclicPanicPayload if cyclic error detected
+        result.unwrap_or_else(|_| CyclicPanicPayload::unwind())
     }
 }
 

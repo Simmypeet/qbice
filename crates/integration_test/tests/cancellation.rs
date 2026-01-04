@@ -13,10 +13,8 @@ use std::{
 };
 
 use qbice::{
-    Decode, Encode, Identifiable, StableHash, TrackedEngine,
-    config::Config,
-    executor::{CyclicError, Executor},
-    query::Query,
+    Decode, Encode, Identifiable, StableHash, TrackedEngine, config::Config,
+    executor::Executor, query::Query,
 };
 use qbice_integration_test::{
     SlowExecutor, SlowQuery, Variable, create_test_engine,
@@ -61,7 +59,7 @@ async fn cancellation_safety() {
     // query again
     slow_executor.make_it_stuck.store(false, Ordering::Relaxed);
 
-    let result = tracked_engine.query(&SlowQuery(0)).await.unwrap();
+    let result = tracked_engine.query(&SlowQuery(0)).await;
 
     assert_eq!(result, 123);
 }
@@ -121,11 +119,11 @@ impl<C: Config> Executor<CancellableChainA, C> for CancellableChainAExecutor {
         &self,
         query: &CancellableChainA,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         // Query the dependency
-        let b_value = engine.query(&CancellableChainB(query.0)).await?;
+        let b_value = engine.query(&CancellableChainB(query.0)).await;
 
         // Simulate work after dependency query
         if self.should_cancel.load(Ordering::Relaxed) {
@@ -134,7 +132,7 @@ impl<C: Config> Executor<CancellableChainA, C> for CancellableChainAExecutor {
             }
         }
 
-        Ok(b_value + 10)
+        b_value + 10
     }
 }
 
@@ -148,12 +146,12 @@ impl<C: Config> Executor<CancellableChainB, C> for CancellableChainBExecutor {
         &self,
         query: &CancellableChainB,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
-        let var_value = engine.query(&Variable(query.0)).await?;
+        let var_value = engine.query(&Variable(query.0)).await;
 
-        Ok(var_value * 2)
+        var_value * 2
     }
 }
 
@@ -200,7 +198,7 @@ async fn cancellation_with_dependency_chain() {
     let a_call_count_before = executor_a.call_count.load(Ordering::SeqCst);
     let b_call_count_before = executor_b.call_count.load(Ordering::SeqCst);
 
-    let result = tracked_engine.query(&CancellableChainA(0)).await.unwrap();
+    let result = tracked_engine.query(&CancellableChainA(0)).await;
     assert_eq!(result, 110); // (50 * 2) + 10
 
     // A should have been called again, but B should be reused from cache
@@ -251,7 +249,7 @@ impl<C: Config> Executor<ParallelCancellableQuery, C>
         &self,
         query: &ParallelCancellableQuery,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         let delay = self.delay_ms.load(Ordering::Relaxed);
@@ -320,14 +318,13 @@ async fn parallel_queries_with_cancellation() {
     assert_eq!(result3, None);
 
     // Second query should succeed
-    assert_eq!(result2, Ok(200));
+    assert_eq!(result2, 200);
 
     // Now query again with no delay - should use cached values
     executor.delay_ms.store(0, Ordering::Relaxed);
 
     let tracked_engine = engine.clone().tracked();
-    let result =
-        tracked_engine.query(&ParallelCancellableQuery(0)).await.unwrap();
+    let result = tracked_engine.query(&ParallelCancellableQuery(0)).await;
     assert_eq!(result, 100);
 
     // Query for Variable(0) should have completed despite cancellations
@@ -372,14 +369,14 @@ impl<C: Config> Executor<MultiDependencyQuery, C> for MultiDependencyExecutor {
         &self,
         query: &MultiDependencyQuery,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         let mut sum = 0;
         let cancel_after = self.cancel_after_deps.load(Ordering::Relaxed);
 
         for (i, &var) in query.deps.iter().enumerate() {
-            let value = engine.query(&var).await?;
+            let value = engine.query(&var).await;
             sum += value;
 
             // If cancel_after is set and we've reached that point, hang
@@ -390,7 +387,7 @@ impl<C: Config> Executor<MultiDependencyQuery, C> for MultiDependencyExecutor {
             }
         }
 
-        Ok(sum)
+        sum
     }
 }
 
@@ -441,7 +438,7 @@ async fn cancellation_with_partial_dependencies() {
     // Now allow full execution
     executor.cancel_after_deps.store(0, Ordering::Relaxed);
 
-    let result = tracked_engine.query(&query).await.unwrap();
+    let result = tracked_engine.query(&query).await;
 
     assert_eq!(result, 15 + 20 + 30);
 
@@ -486,10 +483,10 @@ impl<C: Config> Executor<RepairableCancellableQuery, C>
         &self,
         query: &RepairableCancellableQuery,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
-        let value = engine.query(&query.0).await?;
+        let value = engine.query(&query.0).await;
 
         if self.should_hang.load(Ordering::Relaxed) {
             loop {
@@ -497,7 +494,7 @@ impl<C: Config> Executor<RepairableCancellableQuery, C>
             }
         }
 
-        Ok(value * 3)
+        value * 3
     }
 }
 
@@ -517,10 +514,9 @@ async fn cancellation_during_repair() {
     let tracked_engine = engine.clone().tracked();
 
     // First, compute the query successfully
-    let result = tracked_engine
-        .query(&RepairableCancellableQuery(Variable(0)))
-        .await
-        .unwrap();
+    let result =
+        tracked_engine.query(&RepairableCancellableQuery(Variable(0))).await;
+
     assert_eq!(result, 300);
     assert_eq!(executor.call_count.load(Ordering::SeqCst), 1);
 
@@ -556,10 +552,9 @@ async fn cancellation_during_repair() {
     // Query again - repair should succeed this time
     let call_count_before = executor.call_count.load(Ordering::SeqCst);
 
-    let result = tracked_engine
-        .query(&RepairableCancellableQuery(Variable(0)))
-        .await
-        .unwrap();
+    let result =
+        tracked_engine.query(&RepairableCancellableQuery(Variable(0))).await;
+
     assert_eq!(result, 600); // 200 * 3
 
     // Should have been called again during repair
@@ -624,7 +619,7 @@ impl<C: Config> Executor<NestedCancellableQuery, C>
         &self,
         query: &NestedCancellableQuery,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         if self.hang_before_inner.load(Ordering::Relaxed) {
@@ -633,8 +628,7 @@ impl<C: Config> Executor<NestedCancellableQuery, C>
             }
         }
 
-        let inner_value =
-            engine.query(&NestedCancellableInner(query.0)).await?;
+        let inner_value = engine.query(&NestedCancellableInner(query.0)).await;
 
         if self.hang_after_inner.load(Ordering::Relaxed) {
             loop {
@@ -642,7 +636,7 @@ impl<C: Config> Executor<NestedCancellableQuery, C>
             }
         }
 
-        Ok(inner_value + 100)
+        inner_value + 100
     }
 }
 
@@ -658,7 +652,7 @@ impl<C: Config> Executor<NestedCancellableInner, C>
         &self,
         query: &NestedCancellableInner,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         engine.query(&Variable(query.0)).await
@@ -728,8 +722,7 @@ async fn cancellation_at_different_nesting_levels() {
         let inner_calls_before =
             inner_executor.call_count.load(Ordering::SeqCst);
 
-        let result =
-            tracked_engine.query(&NestedCancellableQuery(0)).await.unwrap();
+        let result = tracked_engine.query(&NestedCancellableQuery(0)).await;
         assert_eq!(result, 150); // 50 + 100
 
         // Inner should be cached from previous attempt

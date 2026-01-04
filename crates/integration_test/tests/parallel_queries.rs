@@ -14,12 +14,8 @@ use std::{
 };
 
 use qbice::{
-    Decode, Encode, TrackedEngine,
-    config::Config,
-    executor::{CyclicError, Executor},
-    query::Query,
-    stable_hash::StableHash,
-    stable_type_id::Identifiable,
+    Decode, Encode, TrackedEngine, config::Config, executor::Executor,
+    query::Query, stable_hash::StableHash, stable_type_id::Identifiable,
 };
 use qbice_integration_test::{Variable, create_test_engine};
 use tempfile::tempdir;
@@ -57,7 +53,7 @@ impl<C: Config> Executor<CollectVariables, C> for CollectVariablesExecutor {
         &self,
         query: &CollectVariables,
         engine: &TrackedEngine<C>,
-    ) -> Result<HashMap<Variable, i64>, CyclicError> {
+    ) -> HashMap<Variable, i64> {
         // track usage
         self.0.fetch_add(1, Ordering::Relaxed);
 
@@ -67,12 +63,12 @@ impl<C: Config> Executor<CollectVariables, C> for CollectVariablesExecutor {
             // simulate some async work
             tokio::time::sleep(Duration::from_millis(16)).await;
 
-            let value = engine.query(&var).await?;
+            let value = engine.query(&var).await;
 
             result.insert(var, value);
         }
 
-        Ok(result)
+        result
     }
 }
 
@@ -112,7 +108,7 @@ impl<C: Config> Executor<ReadVariableMap, C> for ReadVariableMapExecutor {
         &self,
         query: &ReadVariableMap,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         // track usage
         self.0.fetch_add(1, Ordering::Relaxed);
 
@@ -120,9 +116,9 @@ impl<C: Config> Executor<ReadVariableMap, C> for ReadVariableMapExecutor {
             .query(&CollectVariables {
                 vars: Arc::new([Variable(0), Variable(1), Variable(2)]),
             })
-            .await?;
+            .await;
 
-        Ok(*var_map.get(&query.0).unwrap())
+        *var_map.get(&query.0).unwrap()
     }
 }
 
@@ -159,7 +155,7 @@ async fn parallel_read_variable_map() {
         .collect();
 
     for (i, handle) in handles.into_iter().enumerate() {
-        let result = handle.await.unwrap().unwrap();
+        let result = handle.await.unwrap();
         assert_eq!(result, (i as i64 + 1) * 10);
     }
 

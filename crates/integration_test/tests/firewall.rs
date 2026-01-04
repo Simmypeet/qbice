@@ -8,10 +8,8 @@ use std::sync::{
 };
 
 use qbice::{
-    Decode, Encode, Identifiable, StableHash, TrackedEngine,
-    config::Config,
-    executor::{CyclicError, Executor},
-    query::Query,
+    Decode, Encode, Identifiable, StableHash, TrackedEngine, config::Config,
+    executor::Executor, query::Query,
 };
 use qbice_integration_test::{Variable, create_test_engine};
 use tempfile::tempdir;
@@ -41,16 +39,12 @@ impl Query for Square {
 pub struct SquareExecutor(pub AtomicUsize);
 
 impl<C: Config> Executor<Square, C> for SquareExecutor {
-    async fn execute(
-        &self,
-        query: &Square,
-        engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    async fn execute(&self, query: &Square, engine: &TrackedEngine<C>) -> i64 {
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let value = engine.query(&query.0).await?;
+        let value = engine.query(&query.0).await;
 
-        Ok(value * value)
+        value * value
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -86,12 +80,12 @@ impl<C: Config> Executor<NegativeSquare, C> for NegativeSquareExecutor {
         &self,
         query: &NegativeSquare,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let value = engine.query(&Square(query.0)).await?;
+        let value = engine.query(&Square(query.0)).await;
 
-        Ok(-value)
+        -value
     }
 }
 
@@ -125,12 +119,12 @@ impl<C: Config> Executor<NegativeSquareToString, C>
         &self,
         query: &NegativeSquareToString,
         engine: &TrackedEngine<C>,
-    ) -> Result<String, CyclicError> {
+    ) -> String {
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let value = engine.query(&NegativeSquare(query.0)).await?;
+        let value = engine.query(&NegativeSquare(query.0)).await;
 
-        Ok(value.to_string())
+        value.to_string()
     }
 }
 
@@ -160,7 +154,7 @@ async fn firewall() {
 
     assert_eq!(
         tracked_engine.query(&NegativeSquareToString(Variable(0))).await,
-        Ok("-9".into())
+        "-9"
     );
 
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 1);
@@ -185,7 +179,7 @@ async fn firewall() {
 
     assert_eq!(
         tracked_engine.query(&NegativeSquareToString(Variable(0))).await,
-        Ok("-9".into())
+        "-9"
     );
 
     // square_ex should be called again, others should not
@@ -214,7 +208,7 @@ async fn firewall() {
 
     assert_eq!(
         tracked_engine.query(&NegativeSquareToString(Variable(0))).await,
-        Ok("-16".into())
+        "-16"
     );
 
     // all executors should be called again
@@ -259,10 +253,10 @@ impl<C: Config> Executor<AbsoluteFirewall, C> for AbsoluteFirewallExecutor {
         &self,
         query: &AbsoluteFirewall,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
-        let value = engine.query(&query.0).await?;
-        Ok(value.abs())
+        let value = engine.query(&query.0).await;
+        value.abs()
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -299,10 +293,10 @@ impl<C: Config> Executor<ClampFirewall, C> for ClampFirewallExecutor {
         &self,
         query: &ClampFirewall,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
-        let value = engine.query(&AbsoluteFirewall(query.0)).await?;
-        Ok(value.min(100))
+        let value = engine.query(&AbsoluteFirewall(query.0)).await;
+        value.min(100)
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -339,10 +333,11 @@ impl<C: Config> Executor<DoubleClampedValue, C> for DoubleClampedValueExecutor {
         &self,
         query: &DoubleClampedValue,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
-        let value = engine.query(&ClampFirewall(query.0)).await?;
-        Ok(value * 2)
+        let value = engine.query(&ClampFirewall(query.0)).await;
+
+        value * 2
     }
 }
 
@@ -376,7 +371,7 @@ async fn chained_firewalls() {
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
-        Ok(100) // abs(50) = 50, min(50, 100) = 50, 50 * 2 = 100
+        100 // abs(50) = 50, min(50, 100) = 50, 50 * 2 = 100
     );
 
     assert_eq!(abs_ex.0.load(Ordering::Relaxed), 1);
@@ -399,7 +394,7 @@ async fn chained_firewalls() {
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
-        Ok(100) // same result
+        100 // same result
     );
 
     // Only first firewall re-executed, second firewall and final not touched
@@ -427,7 +422,7 @@ async fn chained_firewalls() {
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
-        Ok(160) // abs(80) = 80, min(80, 100) = 80, 80 * 2 = 160
+        160 // abs(80) = 80, min(80, 100) = 80, 80 * 2 = 160
     );
 
     // All executors called again since values changed
@@ -457,7 +452,7 @@ async fn chained_firewalls() {
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
-        Ok(200) // abs(150) = 150, min(150, 100) = 100, 100 * 2 = 200
+        200 // abs(150) = 150, min(150, 100) = 100, 100 * 2 = 200
     );
 
     assert_eq!(abs_ex.0.load(Ordering::Relaxed), 4);
@@ -484,7 +479,7 @@ async fn chained_firewalls() {
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
-        Ok(200) // abs(200) = 200, min(200, 100) = 100, 100 * 2 = 200 (same!)
+        200 // abs(200) = 200, min(200, 100) = 100, 100 * 2 = 200 (same!)
     );
 
     // First firewall changes, second doesn't propagate further
@@ -532,11 +527,11 @@ impl<C: Config> Executor<SumOfSquares, C> for SumOfSquaresExecutor {
         &self,
         query: &SumOfSquares,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
-        let a_squared = engine.query(&Square(query.a)).await?;
-        let b_squared = engine.query(&Square(query.b)).await?;
-        Ok(a_squared + b_squared)
+        let a_squared = engine.query(&Square(query.a)).await;
+        let b_squared = engine.query(&Square(query.b)).await;
+        a_squared + b_squared
     }
 }
 
@@ -578,7 +573,7 @@ async fn diamond_dependency_with_firewalls() {
         tracked_engine
             .query(&SumOfSquares { a: Variable(0), b: Variable(1) })
             .await,
-        Ok(25) // 9 + 16 = 25
+        25 // 9 + 16 = 25
     );
 
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 2); // Both squares computed
@@ -599,7 +594,7 @@ async fn diamond_dependency_with_firewalls() {
         tracked_engine
             .query(&SumOfSquares { a: Variable(0), b: Variable(1) })
             .await,
-        Ok(25) // Still 25
+        25 // Still 25
     );
 
     // Square(0) re-executed but SumOfSquares not (firewall blocked)
@@ -621,7 +616,7 @@ async fn diamond_dependency_with_firewalls() {
         tracked_engine
             .query(&SumOfSquares { a: Variable(0), b: Variable(1) })
             .await,
-        Ok(25) // Still 25
+        25 // Still 25
     );
 
     // Square(1) re-executed but SumOfSquares not (firewall blocked)
@@ -643,7 +638,7 @@ async fn diamond_dependency_with_firewalls() {
         tracked_engine
             .query(&SumOfSquares { a: Variable(0), b: Variable(1) })
             .await,
-        Ok(41) // 25 + 16 = 41
+        41 // 25 + 16 = 41
     );
 
     // Both firewalls repaired, SumOfSquares recomputed
@@ -684,10 +679,10 @@ impl<C: Config> Executor<SquareTimesTwo, C> for SquareTimesTwoExecutor {
         &self,
         query: &SquareTimesTwo,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
-        let squared = engine.query(&Square(query.0)).await?;
-        Ok(squared * 2)
+        let squared = engine.query(&Square(query.0)).await;
+        squared * 2
     }
 }
 
@@ -720,10 +715,11 @@ impl<C: Config> Executor<SquarePlusOne, C> for SquarePlusOneExecutor {
         &self,
         query: &SquarePlusOne,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
-        let squared = engine.query(&Square(query.0)).await?;
-        Ok(squared + 1)
+        let squared = engine.query(&Square(query.0)).await;
+
+        squared + 1
     }
 }
 
@@ -765,11 +761,11 @@ async fn firewall_multiple_callers() {
     // Query both consumers
     assert_eq!(
         tracked_engine.query(&SquareTimesTwo(Variable(0))).await,
-        Ok(18) // 9 * 2 = 18
+        18 // 9 * 2 = 18
     );
     assert_eq!(
         tracked_engine.query(&SquarePlusOne(Variable(0))).await,
-        Ok(10) // 9 + 1 = 10
+        10 // 9 + 1 = 10
     );
 
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 1);
@@ -788,11 +784,8 @@ async fn firewall_multiple_callers() {
     let tracked_engine = engine.clone().tracked();
 
     // Both queries should return same values without re-executing
-    assert_eq!(
-        tracked_engine.query(&SquareTimesTwo(Variable(0))).await,
-        Ok(18)
-    );
-    assert_eq!(tracked_engine.query(&SquarePlusOne(Variable(0))).await, Ok(10));
+    assert_eq!(tracked_engine.query(&SquareTimesTwo(Variable(0))).await, 18);
+    assert_eq!(tracked_engine.query(&SquarePlusOne(Variable(0))).await, 10);
 
     // Square re-executed, but neither consumer re-executed
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 2);
@@ -812,11 +805,11 @@ async fn firewall_multiple_callers() {
 
     assert_eq!(
         tracked_engine.query(&SquareTimesTwo(Variable(0))).await,
-        Ok(50) // 25 * 2 = 50
+        50 // 25 * 2 = 50
     );
     assert_eq!(
         tracked_engine.query(&SquarePlusOne(Variable(0))).await,
-        Ok(26) // 25 + 1 = 26
+        26 // 25 + 1 = 26
     );
 
     // All re-executed since firewall changed
@@ -861,16 +854,16 @@ impl<C: Config> Executor<ConditionalSquare, C> for ConditionalSquareExecutor {
         &self,
         query: &ConditionalSquare,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
-        let condition = engine.query(&query.condition).await?;
+        let condition = engine.query(&query.condition).await;
 
         if condition > 0 {
             // Only depend on Square when condition > 0
             engine.query(&Square(query.value)).await
         } else {
             // Return -1 without querying Square
-            Ok(-1)
+            -1
         }
     }
 }
@@ -907,7 +900,7 @@ async fn firewall_conditional_dependency() {
                 value: Variable(1)
             })
             .await,
-        Ok(9) // Square(3) = 9
+        9 // Square(3) = 9
     );
 
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 1);
@@ -931,7 +924,7 @@ async fn firewall_conditional_dependency() {
                 value: Variable(1)
             })
             .await,
-        Ok(9) // Still 9
+        9 // Still 9
     );
 
     // Square re-executed but ConditionalSquare not (firewall blocked)
@@ -960,7 +953,7 @@ async fn firewall_conditional_dependency() {
                 value: Variable(1)
             })
             .await,
-        Ok(-1) // Condition is false, return -1
+        -1 // Condition is false, return -1
     );
 
     // the square_ex is still re-executed because the ConditionalSquare has
@@ -993,7 +986,7 @@ async fn firewall_conditional_dependency() {
                 value: Variable(1)
             })
             .await,
-        Ok(-1) // Still -1, condition is still false
+        -1 // Still -1, condition is still false
     );
 
     // no new edges dirtied
@@ -1031,7 +1024,7 @@ async fn firewall_dirty_propagation_on_change() {
 
     assert_eq!(
         tracked_engine.query(&NegativeSquare(Variable(0))).await,
-        Ok(-4) // -(2^2) = -4
+        -4 // -(2^2) = -4
     );
 
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 1);
@@ -1056,7 +1049,7 @@ async fn firewall_dirty_propagation_on_change() {
 
     assert_eq!(
         tracked_engine.query(&NegativeSquare(Variable(0))).await,
-        Ok(-9) // -(3^2) = -9
+        -9 // -(3^2) = -9
     );
 
     // After querying, firewall changed so propagation happened
@@ -1078,7 +1071,7 @@ async fn firewall_dirty_propagation_on_change() {
 
     assert_eq!(
         tracked_engine.query(&NegativeSquare(Variable(0))).await,
-        Ok(-9) // Still -9
+        -9 // Still -9
     );
 
     // Only 1 edge dirtied because firewall blocked propagation

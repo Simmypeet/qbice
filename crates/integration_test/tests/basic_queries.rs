@@ -34,7 +34,7 @@ async fn safe_division_basic() {
         tracked_engine
             .query(&SafeDivision::new(Variable(0), Variable(1)))
             .await,
-        Ok(Some(21))
+        Some(21)
     );
 
     assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);

@@ -11,9 +11,11 @@
 //! [`TrackedEngine`].
 
 use std::{
-    any::Any, collections::HashMap, mem::MaybeUninit, pin::Pin, sync::Arc,
+    any::Any, collections::HashMap, mem::MaybeUninit, panic::AssertUnwindSafe,
+    pin::Pin, sync::Arc,
 };
 
+use futures::FutureExt;
 use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::StableTypeID;
 
@@ -61,6 +63,14 @@ use crate::{
 )]
 #[error("cyclic query detected")]
 pub struct CyclicError;
+
+/// Payload used to indicate a cyclic panic during executor invocation.
+pub(crate) struct CyclicPanicPayload;
+
+impl CyclicPanicPayload {
+    /// Unwinds the current thread with a `CyclicPanicPayload`.
+    pub fn unwind() -> ! { std::panic::panic_any(Self) }
+}
 
 /// Defines the computation logic for a specific query type.
 ///
@@ -273,9 +283,7 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
         &'s self,
         query: &'q Q,
         engine: &'e TrackedEngine<C>,
-    ) -> impl Future<Output = Result<Q::Value, CyclicError>>
-    + Send
-    + use<'s, 'q, 'e, Self, Q, C>;
+    ) -> impl Future<Output = Q::Value> + Send + use<'s, 'q, 'e, Self, Q, C>;
 
     /// Returns the execution style for this query type.
     ///
@@ -391,7 +399,23 @@ fn invoke_executor<
         let result_buffer: &mut MaybeUninit<Result<K::Value, CyclicError>> =
             result.downcast_mut().expect("Result type mismatch");
 
-        result_buffer.write(executor.execute(key, engine).await);
+        let result = AssertUnwindSafe(executor.execute(key, engine))
+            .catch_unwind()
+            .await;
+
+        // must've been `CyclicPanicPayload` if it panicked
+        match result {
+            Ok(val) => {
+                result_buffer.write(Ok(val));
+            }
+            Err(err) => {
+                if err.is::<CyclicPanicPayload>() {
+                    result_buffer.write(Err(CyclicError));
+                } else {
+                    std::panic::resume_unwind(err);
+                }
+            }
+        }
     })
 }
 

@@ -34,7 +34,7 @@ async fn division_input_change() {
             tracked_engine
                 .query(&Division::new(Variable(0), Variable(1)))
                 .await,
-            Ok(10)
+            10
         );
 
         assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -57,7 +57,7 @@ async fn division_input_change() {
             tracked_engine
                 .query(&Division::new(Variable(0), Variable(1)))
                 .await,
-            Ok(20)
+            20
         );
 
         assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 2);
@@ -92,7 +92,7 @@ async fn safe_division_input_changes() {
             tracked_engine
                 .query(&SafeDivision::new(Variable(0), Variable(1)))
                 .await,
-            Ok(Some(21))
+            Some(21)
         );
 
         assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -119,7 +119,7 @@ async fn safe_division_input_changes() {
             tracked_engine
                 .query(&SafeDivision::new(Variable(0), Variable(1)))
                 .await,
-            Ok(None)
+            None
         );
 
         // division executor should not have been called again, but safe
@@ -148,7 +148,7 @@ async fn safe_division_input_changes() {
             tracked_engine
                 .query(&SafeDivision::new(Variable(0), Variable(1)))
                 .await,
-            Ok(Some(21))
+            Some(21)
         );
 
         // this time divisor executor reused the cached value but safe division
@@ -190,7 +190,7 @@ async fn add_two_absolutes_sign_change() {
             tracked_engine
                 .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
                 .await,
-            Ok(350)
+            350
         );
 
         // Both absolute executors should run once, and add_two_absolutes once
@@ -220,7 +220,7 @@ async fn add_two_absolutes_sign_change() {
             tracked_engine
                 .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
                 .await,
-            Ok(350)
+            350
         );
 
         // Only the Absolute query for Variable(0) should re-execute (3 total)
@@ -252,7 +252,7 @@ async fn add_two_absolutes_sign_change() {
             tracked_engine
                 .query(&AddTwoAbsolutes::new(Variable(0), Variable(1)))
                 .await,
-            Ok(350)
+            350
         );
 
         // Only the Absolute query for Variable(1) should re-execute (4 total)

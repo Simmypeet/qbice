@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use qbice::{
     Decode, Encode, Engine, Identifiable, StableHash, TrackedEngine,
     config::Config,
-    executor::{CyclicError, Executor},
+    executor::Executor,
     query::Query,
     serialize::Plugin,
     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
@@ -88,15 +88,15 @@ impl<C: Config> Executor<Division, C> for DivisionExecutor {
         &self,
         query: &Division,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
 
-        let dividend = engine.query(&query.dividend).await?;
-        let divisor = engine.query(&query.divisor).await?;
+        let dividend = engine.query(&query.dividend).await;
+        let divisor = engine.query(&query.divisor).await;
 
         assert!(divisor != 0, "division by zero");
 
-        Ok(dividend / divisor)
+        dividend / divisor
     }
 }
 
@@ -139,19 +139,19 @@ impl<C: Config> Executor<SafeDivision, C> for SafeDivisionExecutor {
         &self,
         query: &SafeDivision,
         engine: &TrackedEngine<C>,
-    ) -> Result<Option<i64>, CyclicError> {
+    ) -> Option<i64> {
         self.0.fetch_add(1, Ordering::Relaxed);
 
-        let divisor = engine.query(&query.divisor).await?;
+        let divisor = engine.query(&query.divisor).await;
 
         if divisor == 0 {
-            Ok(None)
+            None
         } else {
-            Ok(Some(
+            Some(
                 engine
                     .query(&Division::new(query.dividend, query.divisor))
-                    .await?,
-            ))
+                    .await,
+            )
         }
     }
 }
@@ -196,12 +196,12 @@ impl<C: Config> Executor<Absolute, C> for AbsoluteExecutor {
         &self,
         query: &Absolute,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
 
-        let value = engine.query(&query.variable).await?;
+        let value = engine.query(&query.variable).await;
 
-        Ok(value.abs())
+        value.abs()
     }
 }
 
@@ -244,13 +244,13 @@ impl<C: Config> Executor<AddTwoAbsolutes, C> for AddTwoAbsolutesExecutor {
         &self,
         query: &AddTwoAbsolutes,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::Relaxed);
 
-        let abs_a = engine.query(&Absolute::new(query.var_a)).await?;
-        let abs_b = engine.query(&Absolute::new(query.var_b)).await?;
+        let abs_a = engine.query(&Absolute::new(query.var_a)).await;
+        let abs_b = engine.query(&Absolute::new(query.var_b)).await;
 
-        Ok(abs_a + abs_b)
+        abs_a + abs_b
     }
 }
 
@@ -290,7 +290,7 @@ impl<C: Config> Executor<SlowQuery, C> for SlowExecutor {
         &self,
         query: &SlowQuery,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         if self.make_it_stuck.load(Ordering::Relaxed) {
             loop {
                 tokio::task::yield_now().await;

@@ -9,12 +9,8 @@ use std::sync::{
 };
 
 use qbice::{
-    Decode, Encode, TrackedEngine,
-    config::Config,
-    executor::{CyclicError, Executor},
-    query::Query,
-    stable_hash::StableHash,
-    stable_type_id::Identifiable,
+    Decode, Encode, TrackedEngine, config::Config, executor::Executor,
+    query::Query, stable_hash::StableHash, stable_type_id::Identifiable,
 };
 use qbice_integration_test::create_test_engine;
 use tempfile::tempdir;
@@ -99,12 +95,12 @@ impl<C: Config> Executor<CyclicQueryA, C> for CyclicExecutorA {
         &self,
         _key: &CyclicQueryA,
         engine: &TrackedEngine<C>,
-    ) -> Result<i32, CyclicError> {
+    ) -> i32 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         // This creates a cycle: A depends on B, B depends on A
-        let b_value = engine.query(&CyclicQueryB).await?;
+        let b_value = engine.query(&CyclicQueryB).await;
 
-        Ok(b_value + 10)
+        b_value + 10
     }
 
     fn scc_value() -> i32 {
@@ -128,11 +124,11 @@ impl<C: Config> Executor<CyclicQueryB, C> for CyclicExecutorB {
         &self,
         _key: &CyclicQueryB,
         engine: &TrackedEngine<C>,
-    ) -> Result<i32, CyclicError> {
+    ) -> i32 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         // This completes the cycle: B depends on A, A depends on B
-        let a_value = engine.query(&CyclicQueryA).await?;
-        Ok(a_value + 20)
+        let a_value = engine.query(&CyclicQueryA).await;
+        a_value + 20
     }
 
     fn scc_value() -> i32 {
@@ -156,13 +152,13 @@ impl<C: Config> Executor<DependentQuery, C> for DependentExecutor {
         &self,
         _key: &DependentQuery,
         engine: &TrackedEngine<C>,
-    ) -> Result<i32, CyclicError> {
+    ) -> i32 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         // This query depends on the cyclic queries
-        let a_value = engine.query(&CyclicQueryA).await?;
-        let b_value = engine.query(&CyclicQueryB).await?;
+        let a_value = engine.query(&CyclicQueryA).await;
+        let b_value = engine.query(&CyclicQueryB).await;
 
-        Ok(a_value + b_value + 100)
+        a_value + b_value + 100
     }
 }
 
@@ -183,8 +179,8 @@ async fn cyclic_dependency_returns_default_values() {
 
     // When we query CyclicQueryA, it should detect the cycle A -> B -> A
     // and return default values (0 for i32) without calling the executors
-    let result_a = tracked_engine.query(&CyclicQueryA).await.unwrap();
-    let result_b = tracked_engine.query(&CyclicQueryB).await.unwrap();
+    let result_a = tracked_engine.query(&CyclicQueryA).await;
+    let result_b = tracked_engine.query(&CyclicQueryB).await;
 
     // Both should return default values (0 for i32)
     assert_eq!(result_a, 42);
@@ -218,7 +214,7 @@ async fn dependent_query_uses_cyclic_default_values() {
     // Query the dependent query, which depends on the cyclic queries
     let engine = Arc::new(engine).tracked();
 
-    let result = engine.query(&DependentQuery).await.unwrap();
+    let result = engine.query(&DependentQuery).await;
 
     // DependentQuery should execute and use the default values from the cyclic
     // queries Default values: CyclicQueryA = 0, CyclicQueryB = 0
@@ -236,7 +232,7 @@ async fn dependent_query_uses_cyclic_default_values() {
     assert_eq!(executor_dependent.get_call_count(), 1);
 
     // Try calling the dependent query again
-    let result_again = engine.query(&DependentQuery).await.unwrap();
+    let result_again = engine.query(&DependentQuery).await;
 
     // It should return the same result without calling the executors again
     assert_eq!(result_again, 226);
@@ -333,22 +329,22 @@ impl<C: Config> Executor<ConditionalCyclicQueryA, C>
         &self,
         _key: &ConditionalCyclicQueryA,
         engine: &TrackedEngine<C>,
-    ) -> Result<i32, CyclicError> {
+    ) -> i32 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         // Read the control variable to determine whether to create a cycle
-        let control_value = engine.query(&CycleControlVariable).await?;
+        let control_value = engine.query(&CycleControlVariable).await;
 
-        Ok(if control_value == 1 {
+        if control_value == 1 {
             // When control_value is 1, create a cycle by querying B
-            let b_value = engine.query(&ConditionalCyclicQueryB).await?;
+            let b_value = engine.query(&ConditionalCyclicQueryB).await;
 
             b_value + 10
         } else {
             // When control_value is not 1, no cycle - just return a computed
             // value
             control_value * 100
-        })
+        }
     }
 
     fn scc_value() -> i32 { 0 }
@@ -376,22 +372,22 @@ impl<C: Config> Executor<ConditionalCyclicQueryB, C>
         &self,
         _key: &ConditionalCyclicQueryB,
         engine: &TrackedEngine<C>,
-    ) -> Result<i32, CyclicError> {
+    ) -> i32 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         // Read the control variable to determine whether to create a cycle
-        let control_value = engine.query(&CycleControlVariable).await?;
+        let control_value = engine.query(&CycleControlVariable).await;
 
-        Ok(if control_value == 1 {
+        if control_value == 1 {
             // When control_value is 1, complete the cycle by querying A
-            let a_value = engine.query(&ConditionalCyclicQueryA).await?;
+            let a_value = engine.query(&ConditionalCyclicQueryA).await;
 
             a_value + 20
         } else {
             // When control_value is not 1, no cycle - just return a computed
             // value
             control_value * 200
-        })
+        }
     }
 
     fn scc_value() -> i32 { 0 }
@@ -414,13 +410,13 @@ impl<C: Config> Executor<DependentQuery, C> for ConditionalDependentExecutor {
         &self,
         _key: &DependentQuery,
         engine: &TrackedEngine<C>,
-    ) -> Result<i32, CyclicError> {
+    ) -> i32 {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         // This query depends on the conditional cyclic queries
-        let a_value = engine.query(&ConditionalCyclicQueryA).await?;
-        let b_value = engine.query(&ConditionalCyclicQueryB).await?;
+        let a_value = engine.query(&ConditionalCyclicQueryA).await;
+        let b_value = engine.query(&ConditionalCyclicQueryB).await;
 
-        Ok(a_value + b_value + 100)
+        a_value + b_value + 100
     }
 }
 
@@ -447,10 +443,8 @@ async fn conditional_cyclic_dependency() {
     let tracked_engine = engine.clone().tracked();
 
     // Query both A and B - they should compute normal values without cycles
-    let result_a =
-        tracked_engine.query(&ConditionalCyclicQueryA).await.unwrap();
-    let result_b =
-        tracked_engine.query(&ConditionalCyclicQueryB).await.unwrap();
+    let result_a = tracked_engine.query(&ConditionalCyclicQueryA).await;
+    let result_b = tracked_engine.query(&ConditionalCyclicQueryB).await;
 
     // Expected values: A = 5 * 100 = 500, B = 5 * 200 = 1000
     assert_eq!(result_a, 500);
@@ -476,10 +470,8 @@ async fn conditional_cyclic_dependency() {
     let tracked_engine = engine.clone().tracked();
 
     // Query A - this should trigger cycle detection and return default values
-    let result_a_cyclic =
-        tracked_engine.query(&ConditionalCyclicQueryA).await.unwrap();
-    let result_b_cyclic =
-        tracked_engine.query(&ConditionalCyclicQueryB).await.unwrap();
+    let result_a_cyclic = tracked_engine.query(&ConditionalCyclicQueryA).await;
+    let result_b_cyclic = tracked_engine.query(&ConditionalCyclicQueryB).await;
 
     // Both should return default values (0 for i32) due to cycle detection
     assert_eq!(result_a_cyclic, 0);
@@ -505,10 +497,8 @@ async fn conditional_cyclic_dependency() {
     let tracked_engine = engine.clone().tracked();
 
     // Query both A and B - they should recompute and return normal values again
-    let result_a_normal =
-        tracked_engine.query(&ConditionalCyclicQueryA).await.unwrap();
-    let result_b_normal =
-        tracked_engine.query(&ConditionalCyclicQueryB).await.unwrap();
+    let result_a_normal = tracked_engine.query(&ConditionalCyclicQueryA).await;
+    let result_b_normal = tracked_engine.query(&ConditionalCyclicQueryB).await;
 
     // Expected values: A = 3 * 100 = 300, B = 3 * 200 = 600
     assert_eq!(result_a_normal, 300);
@@ -535,10 +525,8 @@ async fn conditional_cyclic_dependency() {
     let tracked_engine = engine.clone().tracked();
 
     // Query A - cycle should be detected again and default values returned
-    let result_a_cyclic2 =
-        tracked_engine.query(&ConditionalCyclicQueryA).await.unwrap();
-    let result_b_cyclic2 =
-        tracked_engine.query(&ConditionalCyclicQueryB).await.unwrap();
+    let result_a_cyclic2 = tracked_engine.query(&ConditionalCyclicQueryA).await;
+    let result_b_cyclic2 = tracked_engine.query(&ConditionalCyclicQueryB).await;
 
     // Both should return default values (0 for i32) due to cycle detection
     assert_eq!(result_a_cyclic2, 0);
@@ -572,7 +560,7 @@ async fn conditional_cyclic_with_dependent_query() {
     let mut engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
-    let result_dependent = tracked_engine.query(&DependentQuery).await.unwrap();
+    let result_dependent = tracked_engine.query(&DependentQuery).await;
 
     // DependentQuery = A + B + 100 = (2*100) + (2*200) + 100 = 200 + 400 + 100
     // = 700
@@ -600,8 +588,7 @@ async fn conditional_cyclic_with_dependent_query() {
     // Reset dependent executor call count to track new computation
     executor_dependent.call_count.store(0, Ordering::SeqCst);
 
-    let result_dependent_cyclic =
-        tracked_engine.query(&DependentQuery).await.unwrap();
+    let result_dependent_cyclic = tracked_engine.query(&DependentQuery).await;
 
     // DependentQuery should use default values: 0 + 0 + 100 = 100
     assert_eq!(result_dependent_cyclic, 100);
@@ -632,7 +619,7 @@ async fn conditional_cyclic_with_dependent_query() {
     let _debug_b = tracked_engine.query(&ConditionalCyclicQueryB).await;
 
     let result_dependent_normal =
-        tracked_engine.query(&DependentQuery).await.unwrap();
+        tracked_engine.query(&DependentQuery).await;
 
     // DependentQuery = A + B + 100 = (4*100) + (4*200) + 100 = 400 + 800 + 100
     // = 1300

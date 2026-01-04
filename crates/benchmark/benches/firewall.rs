@@ -5,7 +5,7 @@ use std::{self, ops::Range, sync::Arc};
 
 use qbice::{
     Decode, Encode, Identifiable, Query, StableHash, TrackedEngine,
-    config::Config, executor::CyclicError,
+    config::Config,
 };
 use qbice_benchmark::create_test_engine;
 
@@ -62,22 +62,19 @@ impl Query for Variable {
 pub struct Mean;
 
 impl Mean {
-    async fn algo<C: Config>(
-        &self,
-        tracked_engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
-        let range = tracked_engine.query(&VariableRange).await?;
+    async fn algo<C: Config>(&self, tracked_engine: &TrackedEngine<C>) -> i64 {
+        let range = tracked_engine.query(&VariableRange).await;
         let var_count = (range.end - range.start) as usize;
 
         let mut sum = 0;
 
         for i in range.clone() {
             let var = Variable(i);
-            let value = tracked_engine.query(&var).await?;
+            let value = tracked_engine.query(&var).await;
             sum += value;
         }
 
-        Ok(sum / (var_count as i64))
+        sum / (var_count as i64)
     }
 }
 
@@ -89,11 +86,7 @@ impl Query for Mean {
 pub struct MeanNormalExecutor;
 
 impl<C: Config> qbice::executor::Executor<Mean, C> for MeanNormalExecutor {
-    async fn execute(
-        &self,
-        query: &Mean,
-        engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    async fn execute(&self, query: &Mean, engine: &TrackedEngine<C>) -> i64 {
         query.algo(engine).await
     }
 
@@ -106,11 +99,7 @@ impl<C: Config> qbice::executor::Executor<Mean, C> for MeanNormalExecutor {
 pub struct MeanFirewallExecutor;
 
 impl<C: Config> qbice::executor::Executor<Mean, C> for MeanFirewallExecutor {
-    async fn execute(
-        &self,
-        query: &Mean,
-        engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    async fn execute(&self, query: &Mean, engine: &TrackedEngine<C>) -> i64 {
         query.algo(engine).await
     }
 
@@ -134,16 +123,11 @@ impl<C: Config> qbice::executor::Executor<Mean, C> for MeanFirewallExecutor {
 pub struct Diff(Variable);
 
 impl Diff {
-    async fn algo<C: Config>(
-        &self,
-        tracked_engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
-        let value = tracked_engine.query(&self.0).await?;
-        let mean = tracked_engine.query(&Mean).await?;
+    async fn algo<C: Config>(&self, tracked_engine: &TrackedEngine<C>) -> i64 {
+        let value = tracked_engine.query(&self.0).await;
+        let mean = tracked_engine.query(&Mean).await;
 
-        let diff = value - mean;
-
-        Ok(diff)
+        value - mean
     }
 }
 
@@ -155,11 +139,7 @@ impl Query for Diff {
 pub struct DiffExecutor;
 
 impl<C: Config> qbice::executor::Executor<Diff, C> for DiffExecutor {
-    async fn execute(
-        &self,
-        query: &Diff,
-        engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    async fn execute(&self, query: &Diff, engine: &TrackedEngine<C>) -> i64 {
         query.algo(engine).await
     }
 }
@@ -183,13 +163,10 @@ impl Query for DiffSquared {
 }
 
 impl DiffSquared {
-    async fn algo<C: Config>(
-        &self,
-        tracked_engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
-        let diff = tracked_engine.query(&Diff(self.0)).await?;
+    async fn algo<C: Config>(&self, tracked_engine: &TrackedEngine<C>) -> i64 {
+        let diff = tracked_engine.query(&Diff(self.0)).await;
 
-        Ok(diff * diff)
+        diff * diff
     }
 }
 
@@ -203,7 +180,7 @@ impl<C: Config> qbice::executor::Executor<DiffSquared, C>
         &self,
         query: &DiffSquared,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         query.algo(engine).await
     }
 }
@@ -227,13 +204,8 @@ impl Query for DiffSquaredChain1 {
 }
 
 impl DiffSquaredChain1 {
-    async fn algo<C: Config>(
-        &self,
-        tracked_engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
-        let diff = tracked_engine.query(&DiffSquared(self.0)).await?;
-
-        Ok(diff)
+    async fn algo<C: Config>(&self, tracked_engine: &TrackedEngine<C>) -> i64 {
+        tracked_engine.query(&DiffSquared(self.0)).await
     }
 }
 
@@ -247,7 +219,7 @@ impl<C: Config> qbice::executor::Executor<DiffSquaredChain1, C>
         &self,
         query: &DiffSquaredChain1,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         query.algo(engine).await
     }
 }
@@ -271,13 +243,8 @@ impl Query for DiffSquaredChain2 {
 }
 
 impl DiffSquaredChain2 {
-    async fn algo<C: Config>(
-        &self,
-        tracked_engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
-        let diff = tracked_engine.query(&DiffSquaredChain1(self.0)).await?;
-
-        Ok(diff)
+    async fn algo<C: Config>(&self, tracked_engine: &TrackedEngine<C>) -> i64 {
+        tracked_engine.query(&DiffSquaredChain1(self.0)).await
     }
 }
 
@@ -291,7 +258,7 @@ impl<C: Config> qbice::executor::Executor<DiffSquaredChain2, C>
         &self,
         query: &DiffSquaredChain2,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         query.algo(engine).await
     }
 }
@@ -315,11 +282,8 @@ impl Query for Variance {
 }
 
 impl Variance {
-    async fn algo<C: Config>(
-        &self,
-        tracked_engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
-        let range = tracked_engine.query(&VariableRange).await?;
+    async fn algo<C: Config>(&self, tracked_engine: &TrackedEngine<C>) -> i64 {
+        let range = tracked_engine.query(&VariableRange).await;
 
         let mut sum_squared_diff = 0i64;
         let mut count = 0i64;
@@ -327,15 +291,13 @@ impl Variance {
         for i in range {
             let var = Variable(i);
             let diff_squared =
-                tracked_engine.query(&DiffSquaredChain2(var)).await?;
+                tracked_engine.query(&DiffSquaredChain2(var)).await;
 
             sum_squared_diff += diff_squared;
             count += 1;
         }
 
-        let variance = sum_squared_diff / count;
-
-        Ok(variance)
+        sum_squared_diff / count
     }
 }
 
@@ -347,7 +309,7 @@ impl<C: Config> qbice::executor::Executor<Variance, C> for VarianceExecutor {
         &self,
         query: &Variance,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, CyclicError> {
+    ) -> i64 {
         query.algo(engine).await
     }
 }
@@ -385,7 +347,7 @@ async fn run(firewall: bool) {
     let mut engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
-    tracked_engine.query(&Variance).await.expect("Variance query failed");
+    tracked_engine.query(&Variance).await;
 
     drop(tracked_engine);
 
@@ -402,7 +364,7 @@ async fn run(firewall: bool) {
 
     let tracked_engine = engine.clone().tracked();
 
-    tracked_engine.query(&Variance).await.expect("Variance query failed");
+    tracked_engine.query(&Variance).await;
 
     drop(tracked_engine);
 
@@ -417,7 +379,7 @@ async fn run(firewall: bool) {
 
     let tracked_engine = engine.clone().tracked();
 
-    tracked_engine.query(&Variance).await.expect("Variance query failed");
+    tracked_engine.query(&Variance).await;
 }
 
 fn run_with_tokio(firewall: bool) {

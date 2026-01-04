@@ -45,16 +45,16 @@ impl<C: Config> Executor<SlowSquare, C> for SlowSquareExecutor {
         &self,
         query: &SlowSquare,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         // increment computation count
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let var_value = engine.query(&query.0).await?;
+        let var_value = engine.query(&query.0).await;
 
         // Introduce an artificial delay to simulate a slow computation.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        Ok(var_value * var_value)
+        var_value * var_value
     }
 }
 
@@ -108,33 +108,33 @@ impl<C: Config> Executor<CollectDoubledSquareVariables, C>
         &self,
         _query: &CollectDoubledSquareVariables,
         engine: &TrackedEngine<C>,
-    ) -> Result<Arc<HashMap<Variable, i64>>, qbice::executor::CyclicError> {
+    ) -> Arc<HashMap<Variable, i64>> {
         // increment computation count
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let target_vars = engine.query(&VariableTarget).await?;
+        let target_vars = engine.query(&VariableTarget).await;
 
         let mut join_handles = Vec::new();
         for var in target_vars.iter().copied() {
             let engine = engine.clone();
 
             join_handles.push(tokio::spawn(async move {
-                let square = engine.query(&SlowSquare(var)).await?;
+                let square = engine.query(&SlowSquare(var)).await;
 
                 // simulating long computation
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-                Ok((var, square * 2))
+                (var, square * 2)
             }));
         }
 
         let mut result = HashMap::new();
         for handle in join_handles {
-            let (var, doubled_square) = handle.await.unwrap()?;
+            let (var, doubled_square) = handle.await.unwrap();
             result.insert(var, doubled_square);
         }
 
-        Ok(Arc::new(result))
+        Arc::new(result)
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -170,13 +170,13 @@ impl<C: Config> Executor<DoubleSquare, C> for DoubleSquareExecutor {
         &self,
         query: &DoubleSquare,
         engine: &TrackedEngine<C>,
-    ) -> Result<Option<i64>, qbice::executor::CyclicError> {
+    ) -> Option<i64> {
         // increment computation count
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let map = engine.query(&CollectDoubledSquareVariables).await?;
+        let map = engine.query(&CollectDoubledSquareVariables).await;
 
-        Ok(map.get(&query.0).copied())
+        map.get(&query.0).copied()
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -214,11 +214,11 @@ impl<C: Config> Executor<SumAllDoubleSquares, C>
         &self,
         _query: &SumAllDoubleSquares,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         // increment computation count
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let target_vars = engine.query(&VariableTarget).await?;
+        let target_vars = engine.query(&VariableTarget).await;
 
         let mut handles = Vec::new();
 
@@ -226,17 +226,17 @@ impl<C: Config> Executor<SumAllDoubleSquares, C>
             let engine = engine.clone();
 
             handles.push(tokio::spawn(async move {
-                let double_square = engine.query(&DoubleSquare(var)).await?;
-                Ok(double_square.unwrap_or(0))
+                let double_square = engine.query(&DoubleSquare(var)).await;
+                double_square.unwrap_or(0)
             }));
         }
 
         let mut sum = 0;
         for handle in handles {
-            sum += handle.await.unwrap()?;
+            sum += handle.await.unwrap();
         }
 
-        Ok(sum)
+        sum
     }
 }
 
@@ -281,10 +281,7 @@ async fn double_square_summing() {
     // 7^2 = 49
     // 8^2 = 64
     // total * 2 = 408
-    let sum_result = tracked_engine
-        .query(&SumAllDoubleSquares)
-        .await
-        .expect("SumAllDoubleSquares query failed");
+    let sum_result = tracked_engine.query(&SumAllDoubleSquares).await;
 
     assert_eq!(sum_result, 408);
 
@@ -320,12 +317,7 @@ async fn double_square_summing() {
     // 7^2 = 49
     // 8^2 = 64
     // total * 2 = 408 - 2 + 200 = 606
-    let sum_result = engine
-        .clone()
-        .tracked()
-        .query(&SumAllDoubleSquares)
-        .await
-        .expect("SumAllDoubleSquares query failed after input change");
+    let sum_result = engine.clone().tracked().query(&SumAllDoubleSquares).await;
 
     assert_eq!(sum_result, 606);
 
@@ -386,9 +378,9 @@ async fn multiple_projections_single_firewall() {
     // Query all three projections
     {
         let tracked = engine.clone().tracked();
-        let v0 = tracked.query(&DoubleSquare(Variable(0))).await.unwrap();
-        let v1 = tracked.query(&DoubleSquare(Variable(1))).await.unwrap();
-        let v2 = tracked.query(&DoubleSquare(Variable(2))).await.unwrap();
+        let v0 = tracked.query(&DoubleSquare(Variable(0))).await;
+        let v1 = tracked.query(&DoubleSquare(Variable(1))).await;
+        let v2 = tracked.query(&DoubleSquare(Variable(2))).await;
 
         // 1^2 * 2 = 2, 2^2 * 2 = 8, 3^2 * 2 = 18
         assert_eq!(v0, Some(2));
@@ -419,7 +411,7 @@ async fn multiple_projections_single_firewall() {
     // dirty)
     {
         let tracked = engine.clone().tracked();
-        let v1 = tracked.query(&DoubleSquare(Variable(1))).await.unwrap();
+        let v1 = tracked.query(&DoubleSquare(Variable(1))).await;
         assert_eq!(v1, Some(8));
     }
 
@@ -442,7 +434,7 @@ async fn multiple_projections_single_firewall() {
     // Query the changed projection
     {
         let tracked = engine.clone().tracked();
-        let v0 = tracked.query(&DoubleSquare(Variable(0))).await.unwrap();
+        let v0 = tracked.query(&DoubleSquare(Variable(0))).await;
         // 10^2 * 2 = 200
         assert_eq!(v0, Some(200));
     }
@@ -500,17 +492,17 @@ impl<C: Config> Executor<SimpleFirewall, C> for SimpleFirewallExecutor {
         &self,
         _query: &SimpleFirewall,
         engine: &TrackedEngine<C>,
-    ) -> Result<Arc<HashMap<u64, i64>>, qbice::executor::CyclicError> {
+    ) -> Arc<HashMap<u64, i64>> {
         self.0.fetch_add(1, Ordering::SeqCst);
 
         let mut map = HashMap::new();
         // Query variables 0-3
         for i in 0..4 {
-            let val = engine.query(&Variable(i)).await?;
+            let val = engine.query(&Variable(i)).await;
             map.insert(i, val);
         }
 
-        Ok(Arc::new(map))
+        Arc::new(map)
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -547,13 +539,13 @@ impl<C: Config> Executor<ProjectionLevel1, C> for ProjectionLevel1Executor {
         &self,
         query: &ProjectionLevel1,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let map = engine.query(&SimpleFirewall).await?;
+        let map = engine.query(&SimpleFirewall).await;
         let val = map.get(&query.0).copied().unwrap_or(0);
 
-        Ok(val * 2)
+        val * 2
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -605,13 +597,13 @@ impl<C: Config> Executor<DiamondCombiner, C> for DiamondCombinerExecutor {
         &self,
         _query: &DiamondCombiner,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let p0 = engine.query(&ProjectionLevel1(0)).await?;
-        let p1 = engine.query(&ProjectionLevel1(1)).await?;
+        let p0 = engine.query(&ProjectionLevel1(0)).await;
+        let p1 = engine.query(&ProjectionLevel1(1)).await;
 
-        Ok(p0 + p1)
+        p0 + p1
     }
 }
 
@@ -642,7 +634,7 @@ async fn diamond_projection_pattern() {
     {
         let tracked = engine.clone().tracked();
         // Variable(0)=1 -> proj1=2, Variable(1)=2 -> proj1=4, combiner=6
-        let result = tracked.query(&DiamondCombiner).await.unwrap();
+        let result = tracked.query(&DiamondCombiner).await;
         assert_eq!(result, 6);
     }
 
@@ -666,7 +658,7 @@ async fn diamond_projection_pattern() {
     // Re-query combiner
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&DiamondCombiner).await.unwrap();
+        let result = tracked.query(&DiamondCombiner).await;
         // Same result since proj1(0) and proj1(1) didn't change
         assert_eq!(result, 6);
     }
@@ -704,7 +696,7 @@ async fn diamond_projection_pattern() {
     {
         let tracked = engine.clone().tracked();
         // Variable(0)=50 -> proj1=100, Variable(1)=2 -> proj1=4, combiner=104
-        let result = tracked.query(&DiamondCombiner).await.unwrap();
+        let result = tracked.query(&DiamondCombiner).await;
         assert_eq!(result, 104);
     }
 
@@ -757,13 +749,13 @@ impl<C: Config> Executor<SumFirewall, C> for SumFirewallExecutor {
         &self,
         _query: &SumFirewall,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let a = engine.query(&Variable(0)).await?;
-        let b = engine.query(&Variable(1)).await?;
+        let a = engine.query(&Variable(0)).await;
+        let b = engine.query(&Variable(1)).await;
 
-        Ok(a + b)
+        a + b
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -799,11 +791,10 @@ impl<C: Config> Executor<SumProjection, C> for SumProjectionExecutor {
         &self,
         _query: &SumProjection,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let sum = engine.query(&SumFirewall).await?;
-        Ok(sum)
+        engine.query(&SumFirewall).await
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -839,11 +830,11 @@ impl<C: Config> Executor<SumConsumer, C> for SumConsumerExecutor {
         &self,
         _query: &SumConsumer,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let proj = engine.query(&SumProjection).await?;
-        Ok(proj * 10)
+        let proj = engine.query(&SumProjection).await;
+        proj * 10
     }
 }
 
@@ -872,7 +863,7 @@ async fn firewall_same_output_no_propagation() {
     // Initial query
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&SumConsumer).await.unwrap();
+        let result = tracked.query(&SumConsumer).await;
         assert_eq!(result, 100); // sum=10, consumer=100
     }
 
@@ -896,7 +887,7 @@ async fn firewall_same_output_no_propagation() {
     // Re-query
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&SumConsumer).await.unwrap();
+        let result = tracked.query(&SumConsumer).await;
         assert_eq!(result, 100); // Still 100
     }
 
@@ -963,7 +954,7 @@ async fn concurrent_projection_access() {
     // Collect results
     let mut results = Vec::new();
     for handle in handles {
-        results.push(handle.await.unwrap().unwrap());
+        results.push(handle.await.unwrap());
     }
 
     // Verify results: (i+1) * 2 for each
@@ -1017,11 +1008,11 @@ impl<C: Config> Executor<OuterFirewall, C> for OuterFirewallExecutor {
         &self,
         _query: &OuterFirewall,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let val = engine.query(&Variable(0)).await?;
-        Ok(val * 2)
+        let val = engine.query(&Variable(0)).await;
+        val * 2
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -1057,11 +1048,12 @@ impl<C: Config> Executor<InnerFirewall, C> for InnerFirewallExecutor {
         &self,
         _query: &InnerFirewall,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let val = engine.query(&OuterFirewall).await?;
-        Ok(val + 10)
+        let val = engine.query(&OuterFirewall).await;
+
+        val + 10
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -1097,11 +1089,11 @@ impl<C: Config> Executor<NestedProjection, C> for NestedProjectionExecutor {
         &self,
         _query: &NestedProjection,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let val = engine.query(&InnerFirewall).await?;
-        Ok(val * 3)
+        let val = engine.query(&InnerFirewall).await;
+        val * 3
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -1137,11 +1129,12 @@ impl<C: Config> Executor<NestedConsumer, C> for NestedConsumerExecutor {
         &self,
         _query: &NestedConsumer,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let val = engine.query(&NestedProjection).await?;
-        Ok(val + 1000)
+        let val = engine.query(&NestedProjection).await;
+
+        val + 1000
     }
 }
 
@@ -1172,7 +1165,7 @@ async fn nested_firewall_with_projection() {
     // Variable(0)=5 -> Outer=10 -> Inner=20 -> Proj=60 -> Consumer=1060
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&NestedConsumer).await.unwrap();
+        let result = tracked.query(&NestedConsumer).await;
         assert_eq!(result, 1060);
     }
 
@@ -1198,7 +1191,7 @@ async fn nested_firewall_with_projection() {
     // Variable(0)=10 -> Outer=20 -> Inner=30 -> Proj=90 -> Consumer=1090
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&NestedConsumer).await.unwrap();
+        let result = tracked.query(&NestedConsumer).await;
         assert_eq!(result, 1090);
     }
 
@@ -1268,11 +1261,12 @@ impl<C: Config> Executor<FirewallA, C> for FirewallAExecutor {
         &self,
         _query: &FirewallA,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let val = engine.query(&Variable(0)).await?;
-        Ok(val * 2) // doubles
+        let val = engine.query(&Variable(0)).await;
+
+        val * 2 // doubles
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -1308,11 +1302,12 @@ impl<C: Config> Executor<FirewallB, C> for FirewallBExecutor {
         &self,
         _query: &FirewallB,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let val = engine.query(&Variable(1)).await?;
-        Ok(val * 3) // triples
+        let val = engine.query(&Variable(1)).await;
+
+        val * 3 // triples
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -1350,13 +1345,13 @@ impl<C: Config> Executor<DualFirewallProjection, C>
         &self,
         _query: &DualFirewallProjection,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let a = engine.query(&FirewallA).await?;
-        let b = engine.query(&FirewallB).await?;
+        let a = engine.query(&FirewallA).await;
+        let b = engine.query(&FirewallB).await;
 
-        Ok(a + b)
+        a + b
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -1394,11 +1389,12 @@ impl<C: Config> Executor<DualFirewallConsumer, C>
         &self,
         _query: &DualFirewallConsumer,
         engine: &TrackedEngine<C>,
-    ) -> Result<i64, qbice::executor::CyclicError> {
+    ) -> i64 {
         self.0.fetch_add(1, Ordering::SeqCst);
 
-        let proj = engine.query(&DualFirewallProjection).await?;
-        Ok(proj * 10)
+        let proj = engine.query(&DualFirewallProjection).await;
+
+        proj * 10
     }
 }
 
@@ -1432,7 +1428,7 @@ async fn projection_with_two_firewalls() {
     // 40*10=400
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 400);
     }
 
@@ -1460,7 +1456,7 @@ async fn projection_with_two_firewalls() {
     // Consumer: 50*10=500
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 500);
     }
 
@@ -1491,7 +1487,7 @@ async fn projection_with_two_firewalls() {
     // Consumer: 80*10=800
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 800);
     }
 
@@ -1524,7 +1520,7 @@ async fn projection_with_two_firewalls() {
     // Consumer: 105*10=1050
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 1050);
     }
 
@@ -1560,7 +1556,7 @@ async fn projection_with_two_firewalls() {
     // Re-query - everything should be cached
     {
         let tracked = engine.clone().tracked();
-        let result = tracked.query(&DualFirewallConsumer).await.unwrap();
+        let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 1050); // Same as before
     }
 

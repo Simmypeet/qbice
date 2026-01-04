@@ -31,6 +31,7 @@ bimap.workspace = true
 crossbeam-utils.workspace = true
 fxhash.workspace = true
 rayon.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

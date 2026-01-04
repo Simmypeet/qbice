@@ -856,6 +856,7 @@ dependencies = [
  "crossbeam-utils",
  "dashmap",
  "enum-as-inner",
+ "futures",
  "fxhash",
  "parking_lot",
  "qbice_serialize",
