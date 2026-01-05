@@ -979,7 +979,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                     KeyOfSetEntry::Partial(partial) => {
                         partial.insert(element.clone(), Operation::Delete);
                     }
-                };
+                }
 
                 if updated {
                     entry
