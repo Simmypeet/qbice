@@ -1,16 +1,18 @@
 use std::collections::VecDeque;
 
 use parking_lot::RwLock;
-use qbice_storage::sieve::WriteBuffer;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-use crate::{Engine, Query, config::Config, query::QueryID};
+use crate::{
+    Engine, Query, config::Config,
+    engine::computation_graph::persist::WriterBufferWithLock, query::QueryID,
+};
 
 pub struct InputSession<'x, C: Config> {
     engine: &'x Engine<C>,
     incremented: bool,
     dirty_batch: VecDeque<QueryID>,
-    transaction: Option<WriteBuffer<C::Database, C::BuildHasher>>,
+    transaction: Option<WriterBufferWithLock<'x, C>>,
 }
 
 impl<C: Config> Drop for InputSession<'_, C> {

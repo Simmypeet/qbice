@@ -1,3 +1,29 @@
+//! A module for persisting the computation graph state.
+//!
+//! # Atomic Units
+//!
+//! All the updates to the computation graph are done in atomic units called
+//! `WriteBuffer`s.
+//!
+//! # Cancellation and Timestamps
+//!
+//! The current policy is that when a new session starts (when updating inputs),
+//! the global timestamp is incremented, the computation graph goes to a new
+//! generation. Any in-progress computations from prior generations are
+//! cancelled.
+//!
+//! We achieve this by associating all running computations with its timestamp.
+//! When that particular computation tries to read-from/write-to the computation
+//! graph, it checks whether its timestamp matches the current timestamp of
+//! the computation graph. If not, it aborts the computation early.
+//!
+//! The abort can happen in two ways:
+//!
+//! - Make the computation stuck in the `Pending` state forever. This requires
+//!   user cooperation to drop the computation eventually.
+//! - Panic the computation. This is a more aggressive approach, but it ensures
+//!   that resources are freed up quickly.
+
 use std::{
     borrow::Borrow, collections::HashMap, hash::Hash, marker::PhantomData,
     sync::Arc,
@@ -18,6 +44,7 @@ use qbice_storage::{
     },
 };
 use rayon::iter::IntoParallelRefIterator;
+pub(in crate::engine::computation_graph) use writer::WriterBufferWithLock;
 
 use crate::{
     Engine, ExecutionStyle, Query,
@@ -29,6 +56,8 @@ use crate::{
     },
     query::QueryID,
 };
+
+mod writer;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
@@ -415,7 +444,7 @@ pub struct Persist<C: Config> {
     timestamp_sieve:
         Arc<WideColumnSieve<TimestampColumn, C::Database, C::BuildHasher>>,
 
-    background_writer: BackgroundWriter<C::Database, C::BuildHasher>,
+    writer_lock: writer::Writer<C>,
 }
 
 impl<C: Config> Persist<C> {
@@ -467,7 +496,7 @@ impl<C: Config> Persist<C> {
                 C::BuildHasher::default(),
             )),
             timestamp_sieve,
-            background_writer,
+            writer_lock: writer::Writer::new(background_writer),
         }
     }
 }
@@ -558,7 +587,7 @@ impl<C: Config> Engine<C> {
         >,
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
         has_pending_backward_projection: bool,
-        continuting_tx: Option<WriteBuffer<C::Database, C::BuildHasher>>,
+        continuting_tx: Option<WriterBufferWithLock<C>>,
     ) {
         let query_value_fingerprint =
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
@@ -581,9 +610,7 @@ impl<C: Config> Engine<C> {
         let query_input = QueryInput::<Q>(query_id.query.clone());
         let query_result = QueryResult::<Q>(query_value);
 
-        let mut tx = continuting_tx.unwrap_or_else(|| {
-            self.computation_graph.persist.background_writer.new_write_buffer()
-        });
+        let mut tx = continuting_tx.unwrap_or_else(|| self.new_write_buffer());
 
         {
             // remove prior backward edges
@@ -592,7 +619,11 @@ impl<C: Config> Engine<C> {
                     self.computation_graph
                         .persist
                         .backward_edges
-                        .remove_set_element(edge, &query_id.id, &mut tx);
+                        .remove_set_element(
+                            edge,
+                            &query_id.id,
+                            tx.writer_buffer(),
+                        );
                 }
             }
 
@@ -601,63 +632,60 @@ impl<C: Config> Engine<C> {
                 self.computation_graph.persist.query_node.put(
                     query_id.id,
                     Some(PendingBackwardProjection(current_timestamp)),
-                    &mut tx,
+                    tx.writer_buffer(),
                 );
             }
 
             self.computation_graph.persist.query_node.put(
                 query_id.id,
                 Some(node_info),
-                &mut tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_node.put(
                 query_id.id,
                 Some(query_kind),
-                &mut tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_node.put(
                 query_id.id,
                 Some(LastVerified(current_timestamp)),
-                &mut tx,
+                tx.writer_buffer(),
             );
 
             for edge in forward_edge_order.0.iter() {
                 self.computation_graph
                     .persist
                     .backward_edges
-                    .insert_set_element(edge, query_id.id, &mut tx);
+                    .insert_set_element(edge, query_id.id, tx.writer_buffer());
             }
 
             self.computation_graph.persist.query_node.put(
                 query_id.id,
                 Some(forward_edge_order),
-                &mut tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_node.put(
                 query_id.id,
                 Some(forward_edge_observations),
-                &mut tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_store.put(
                 query_id.id.compact_hash_128(),
                 Some(query_input),
-                &mut tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_store.put(
                 query_id.id.compact_hash_128(),
                 Some(query_result),
-                &mut tx,
+                tx.writer_buffer(),
             );
 
-            self.computation_graph
-                .persist
-                .background_writer
-                .submit_write_buffer(tx);
+            self.submit_write_buffer(tx);
         }
     }
 
@@ -667,7 +695,7 @@ impl<C: Config> Engine<C> {
         query_hash_128: Compact128,
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
-        tx: &mut WriteBuffer<C::Database, C::BuildHasher>,
+        tx: &mut WriterBufferWithLock<C>,
     ) {
         let query_id = QueryID::new::<Q>(query_hash_128);
 
@@ -701,50 +729,54 @@ impl<C: Config> Engine<C> {
                     self.computation_graph
                         .persist
                         .backward_edges
-                        .remove_set_element(edge, &query_id, tx);
+                        .remove_set_element(
+                            edge,
+                            &query_id,
+                            tx.writer_buffer(),
+                        );
                 }
             }
 
             self.computation_graph.persist.query_node.put(
                 query_id,
                 Some(QueryKind::Input),
-                tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_node.put(
                 query_id,
                 Some(LastVerified(timestamp)),
-                tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_node.put(
                 query_id,
                 Some(empty_forward_edges),
-                tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_node.put(
                 query_id,
                 Some(empty_forward_edge_observations),
-                tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_node.put(
                 query_id,
                 Some(node_info),
-                tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_store.put(
                 query_id.compact_hash_128(),
                 Some(query_input),
-                tx,
+                tx.writer_buffer(),
             );
 
             self.computation_graph.persist.query_store.put(
                 query_id.compact_hash_128(),
                 Some(query_result),
-                tx,
+                tx.writer_buffer(),
             );
         }
     }
@@ -760,12 +792,6 @@ impl<C: Config> Engine<C> {
         self.computation_graph.persist.dirty_edge_set.put(edge, Some(Unit), tx);
 
         self.computation_graph.add_dirtied_edge_count();
-    }
-
-    pub(super) fn new_write_buffer(
-        &self,
-    ) -> WriteBuffer<C::Database, C::BuildHasher> {
-        self.computation_graph.persist.background_writer.new_write_buffer()
     }
 
     #[allow(clippy::option_option)]
@@ -788,37 +814,34 @@ impl<C: Config> Engine<C> {
             current_node_info
         });
 
-        let mut tx =
-            self.computation_graph.persist.background_writer.new_write_buffer();
+        let mut tx = self.new_write_buffer();
 
         {
             for callee in clean_edges.iter().copied() {
                 let edge = Edge { from: query_id, to: callee };
 
-                self.computation_graph
-                    .persist
-                    .dirty_edge_set
-                    .put::<Unit>(edge, None, &mut tx);
+                self.computation_graph.persist.dirty_edge_set.put::<Unit>(
+                    edge,
+                    None,
+                    tx.writer_buffer(),
+                );
             }
 
             if let Some(node_info) = new_node_info {
                 self.computation_graph.persist.query_node.put(
                     query_id,
                     Some(node_info),
-                    &mut tx,
+                    tx.writer_buffer(),
                 );
             }
 
             self.computation_graph.persist.query_node.put(
                 query_id,
                 Some(LastVerified(current_timestamp)),
-                &mut tx,
+                tx.writer_buffer(),
             );
 
-            self.computation_graph
-                .persist
-                .background_writer
-                .submit_write_buffer(tx);
+            self.submit_write_buffer(tx);
         }
     }
 
@@ -846,20 +869,20 @@ impl<C: Config> Engine<C> {
         query_id: &QueryID,
         backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
     ) {
-        let mut tx =
-            self.computation_graph.persist.background_writer.new_write_buffer();
+        let mut tx = self.new_write_buffer();
 
         self.computation_graph
             .persist
             .query_node
-            .put::<PendingBackwardProjection>(*query_id, None, &mut tx);
+            .put::<PendingBackwardProjection>(
+                *query_id,
+                None,
+                tx.writer_buffer(),
+            );
 
         backward_projection_lock_guard.done();
 
-        self.computation_graph
-            .persist
-            .background_writer
-            .submit_write_buffer(tx);
+        self.submit_write_buffer(tx);
     }
 }
 
@@ -903,19 +926,9 @@ impl<C: Config> Engine<C> {
             .expect("Timestamp should always be initialized")
     }
 
-    pub(super) fn submit_write_buffer(
-        &self,
-        tx: WriteBuffer<C::Database, C::BuildHasher>,
-    ) {
-        self.computation_graph
-            .persist
-            .background_writer
-            .submit_write_buffer(tx);
-    }
-
     pub(super) fn increment_timestamp(
         &self,
-        tx: &mut WriteBuffer<C::Database, C::BuildHasher>,
+        tx: &mut WriterBufferWithLock<C>,
     ) -> Timestamp {
         let current = self.get_current_timestamp();
         let new_timestamp = Timestamp(current.0 + 1);
@@ -923,7 +936,7 @@ impl<C: Config> Engine<C> {
         self.computation_graph.persist.timestamp_sieve.put(
             (),
             Some(new_timestamp),
-            tx,
+            tx.writer_buffer(),
         );
 
         new_timestamp

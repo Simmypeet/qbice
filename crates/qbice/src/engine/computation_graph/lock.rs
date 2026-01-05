@@ -9,7 +9,7 @@ use dashmap::{
     mapref::one::{Ref, RefMut},
 };
 use qbice_stable_hash::Compact128;
-use qbice_storage::{intern::Interned, sieve::WriteBuffer};
+use qbice_storage::intern::Interned;
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     config::Config,
     engine::computation_graph::{
         QueryKind, QueryWithID,
-        persist::{NodeInfo, Observation},
+        persist::{NodeInfo, Observation, WriterBufferWithLock},
         slow_path::SlowPath,
         tfc_achetype::TransitiveFirewallCallees,
     },
@@ -416,7 +416,7 @@ impl<C: Config> Engine<C> {
         query_value_fingerprint: Option<Compact128>,
         lock_guard: ComputingLockGuard<'_, C>,
         has_pending_backward_projection: bool,
-        continuing_tx: Option<WriteBuffer<C::Database, C::BuildHasher>>,
+        continuing_tx: Option<WriterBufferWithLock<C>>,
     ) {
         let dashmap::Entry::Occupied(mut entry_lock) =
             self.computation_graph.lock.lock.entry(query_id.id)
