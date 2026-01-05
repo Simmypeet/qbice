@@ -398,10 +398,14 @@ impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
 
         let read = self.shards.read_shard(shard_index);
 
-        if let Retrieve::Hit(node) = read.get(key, false) {
-            node.pending_writes
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
+        let Retrieve::Hit(node) = read.get(key, false) else {
+            panic!(
+                "should have the key in the cache when decrementing pending \
+                 writes"
+            );
+        };
+
+        node.pending_writes.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -854,7 +858,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
 
         let mut write_lock = self.shards.write_shard(shard_index);
 
-        write_buffer.key_of_set_writes.put(
+        let updated = write_buffer.key_of_set_writes.put(
             key.clone(),
             element.clone(),
             Operation::Insert,
@@ -862,14 +866,22 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
         );
 
         match write_lock.get_mut(key, true) {
-            RetrieveMut::Hit(entry) => match &mut entry.value {
-                KeyOfSetEntry::Full(container) => {
-                    container.extend(std::iter::once(element));
+            RetrieveMut::Hit(entry) => {
+                match &mut entry.value {
+                    KeyOfSetEntry::Full(container) => {
+                        container.extend(std::iter::once(element));
+                    }
+                    KeyOfSetEntry::Partial(partial) => {
+                        partial.insert(element, Operation::Insert);
+                    }
                 }
-                KeyOfSetEntry::Partial(partial) => {
-                    partial.insert(element, Operation::Insert);
+
+                if updated {
+                    entry
+                        .pending_writes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-            },
+            }
 
             RetrieveMut::Miss => {
                 let mut partial = HashMap::new();
@@ -878,7 +890,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                 write_lock.insert(
                     key.clone(),
                     KeyOfSetEntry::Partial(partial),
-                    0,
+                    usize::from(updated),
                 );
             }
         }
@@ -951,7 +963,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
 
         let mut write_lock = self.shards.write_shard(shard_index);
 
-        write_buffer.key_of_set_writes.put(
+        let updated = write_buffer.key_of_set_writes.put(
             key.clone(),
             element.clone(),
             Operation::Delete,
@@ -959,14 +971,22 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
         );
 
         match write_lock.get_mut(key, true) {
-            RetrieveMut::Hit(entry) => match &mut entry.value {
-                KeyOfSetEntry::Full(container) => {
-                    container.remove_element(element);
+            RetrieveMut::Hit(entry) => {
+                match &mut entry.value {
+                    KeyOfSetEntry::Full(container) => {
+                        container.remove_element(element);
+                    }
+                    KeyOfSetEntry::Partial(partial) => {
+                        partial.insert(element.clone(), Operation::Delete);
+                    }
+                };
+
+                if updated {
+                    entry
+                        .pending_writes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-                KeyOfSetEntry::Partial(partial) => {
-                    partial.insert(element.clone(), Operation::Delete);
-                }
-            },
+            }
 
             RetrieveMut::Miss => {
                 let mut partial = HashMap::new();
@@ -975,7 +995,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                 write_lock.insert(
                     key.clone(),
                     KeyOfSetEntry::Partial(partial),
-                    0,
+                    usize::from(updated),
                 );
             }
         }
