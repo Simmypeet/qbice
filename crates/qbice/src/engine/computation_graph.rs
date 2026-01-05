@@ -227,10 +227,6 @@ impl<C: Config> TrackedEngine<C> {
     /// Returns [`CyclicError`] if a cyclic dependency is detected (the query
     /// directly or indirectly depends on itself).
     pub async fn query<Q: Query>(&self, query: &Q) -> Q::Value {
-        // YIELD POINT: query function will be called very often, this is a
-        // good point for yielding to allow cancelation.
-        tokio::task::yield_now().await;
-
         let query_with_id = self.engine.new_query_with_id(query);
 
         // check local cache
