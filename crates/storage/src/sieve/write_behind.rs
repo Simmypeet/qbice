@@ -3,7 +3,7 @@ use std::{
     collections::{BinaryHeap, HashMap},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
 };
@@ -526,9 +526,8 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
             stealers,
             jobs_event_counter: AtomicUsize::new(0),
             sleeping_threads: AtomicUsize::new(0),
-            lock: Mutex::new(()),
+            shutdown: Mutex::new(false),
             condvar: Condvar::new(),
-            shutdown: AtomicBool::new(false),
         });
 
         // Spawn Threads
@@ -650,7 +649,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
 impl<Db: KvDatabase, S: BuildHasher> Drop for BackgroundWriter<Db, S> {
     fn drop(&mut self) {
         // Signal shutdown
-        self.registry.shutdown.store(true, Ordering::Relaxed);
+        *self.registry.shutdown.lock() = true;
 
         self.registry.condvar.notify_all();
 
@@ -707,10 +706,8 @@ pub struct Registry<Db: KvDatabase, S: BuildHasher> {
     jobs_event_counter: AtomicUsize,
     sleeping_threads: AtomicUsize,
 
-    lock: Mutex<()>,
+    shutdown: Mutex<bool>,
     condvar: Condvar,
-
-    shutdown: AtomicBool,
 }
 
 struct WorkerThread<Db: KvDatabase, S: BuildHasher> {
@@ -726,7 +723,7 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
 
         loop {
             // A. CHECK SHUTDOWN
-            if self.registry.shutdown.load(Ordering::Relaxed) {
+            if *self.registry.shutdown.lock() {
                 // Drain all queues: local, global, and steal from others
                 while let Some(task) = self.find_work() {
                     self.process_task(task);
@@ -796,10 +793,6 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
 
     // This is the core synchronization logic similar to Rayon
     fn wait_until_work_appears(&self, last_jec: usize) {
-        // 1. Lock the mutex (required for Condvar)
-        let mut guard = self.registry.lock.lock();
-
-        // 2. THE CRITICAL CHECK
         // Check the JEC again *while holding the lock*.
         // If the counter changed between the time we started searching
         // (last_jec) and now, it means work was pushed while we were
@@ -813,14 +806,19 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
         }
 
         // 3. Mark ourselves as sleeping
+        let mut shutdown = self.registry.shutdown.lock();
+
+        if *shutdown {
+            // Shutdown signaled while acquiring lock
+            return;
+        }
+
         self.registry.sleeping_threads.fetch_add(1, Ordering::SeqCst);
 
         // 4. Wait
         // Check shutdown again to avoid hanging forever if shutdown happened
         // during lock
-        if !self.registry.shutdown.load(Ordering::Relaxed) {
-            self.registry.condvar.wait(&mut guard);
-        }
+        self.registry.condvar.wait(&mut shutdown);
 
         // 5. We woke up! Mark ourselves as active.
         self.registry.sleeping_threads.fetch_sub(1, Ordering::SeqCst);
