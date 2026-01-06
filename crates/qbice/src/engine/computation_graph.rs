@@ -345,7 +345,7 @@ impl<C: Config> Engine<C> {
     pub fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
         TrackedEngine {
             caller: CallerInformation::new(CallerKind::User, unsafe {
-                self.get_current_timestamp()
+                self.get_current_timestamp_unchecked()
             }),
             cache: Arc::new(DashMap::new()),
             engine: self,

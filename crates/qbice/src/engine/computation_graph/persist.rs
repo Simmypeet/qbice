@@ -39,8 +39,8 @@ use qbice_storage::{
         DiscriminantEncoding, KeyOfSetColumn, WideColumn, WideColumnValue,
     },
     sieve::{
-        BackgroundWriter, KeyOfSetContainer, KeyOfSetSieve,
-        RemoveElementFromSet, WideColumnSieve, WriteBuffer,
+        KeyOfSetContainer, KeyOfSetSieve, RemoveElementFromSet,
+        WideColumnSieve, WriteBuffer,
     },
 };
 use rayon::iter::IntoParallelRefIterator;
@@ -60,21 +60,6 @@ use crate::{
 mod writer;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
-)]
-pub struct TimestampColumn;
-
-impl WideColumn for TimestampColumn {
-    type Key = ();
-
-    type Discriminant = ();
-
-    fn discriminant_encoding() -> DiscriminantEncoding {
-        DiscriminantEncoding::Prefixed
-    }
-}
-
-#[derive(
     Debug,
     Clone,
     Copy,
@@ -88,10 +73,6 @@ impl WideColumn for TimestampColumn {
     Identifiable,
 )]
 pub struct Timestamp(u64);
-
-impl WideColumnValue<TimestampColumn> for Timestamp {
-    fn discriminant() {}
-}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
@@ -439,37 +420,11 @@ pub struct Persist<C: Config> {
     backward_edges:
         Arc<KeyOfSetSieve<BackwardEdgeColumn<C>, C::Database, C::BuildHasher>>,
 
-    // need to be declared because of the the write buffer interface, we'll
-    // fix this later
-    timestamp_sieve:
-        Arc<WideColumnSieve<TimestampColumn, C::Database, C::BuildHasher>>,
-
     writer_lock: writer::Writer<C>,
 }
 
 impl<C: Config> Persist<C> {
     pub fn new(db: Arc<C::Database>, shard_amount: usize) -> Self {
-        let background_writer =
-            BackgroundWriter::<C::Database, C::BuildHasher>::new(
-                C::background_writer_thread_count(),
-                db.clone(),
-            );
-
-        let timestamp_sieve =
-            Arc::new(WideColumnSieve::<
-                TimestampColumn,
-                C::Database,
-                C::BuildHasher,
-            >::new(
-                1, 1, db.clone(), C::BuildHasher::default()
-            ));
-
-        if timestamp_sieve.get_normal::<Timestamp>(()).is_none() {
-            let mut tx = background_writer.new_write_buffer();
-            timestamp_sieve.put((), Some(Timestamp(0)), &mut tx);
-            background_writer.submit_write_buffer(tx);
-        }
-
         Self {
             query_node: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
@@ -492,11 +447,10 @@ impl<C: Config> Persist<C> {
             backward_edges: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
-                db,
+                db.clone(),
                 C::BuildHasher::default(),
             )),
-            timestamp_sieve,
-            writer_lock: writer::Writer::new(background_writer),
+            writer_lock: writer::Writer::new(db),
         }
     }
 }
@@ -915,30 +869,5 @@ impl<C: Config> Engine<C> {
             input: format!("{query_input:?}"),
             output: format!("{query_value:?}"),
         })
-    }
-
-    pub(super) unsafe fn get_current_timestamp(&self) -> Timestamp {
-        *self
-            .computation_graph
-            .persist
-            .timestamp_sieve
-            .get_normal::<Timestamp>(())
-            .expect("Timestamp should always be initialized")
-    }
-
-    pub(super) fn increment_timestamp(
-        &self,
-        tx: &mut WriterBufferWithLock<C>,
-    ) -> Timestamp {
-        let current = unsafe { self.get_current_timestamp() };
-        let new_timestamp = Timestamp(current.0 + 1);
-
-        self.computation_graph.persist.timestamp_sieve.put(
-            (),
-            Some(new_timestamp),
-            tx.writer_buffer(),
-        );
-
-        new_timestamp
     }
 }

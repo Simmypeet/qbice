@@ -155,8 +155,11 @@ impl<C: Config> InputSession<'_, C> {
                 node_info.value_fingerprint() != query_value_fingerprint;
 
             if fingerprint_diff && !self.incremented {
-                self.engine
-                    .increment_timestamp(self.transaction.as_mut().unwrap());
+                unsafe {
+                    self.engine.increment_timestamp(
+                        self.transaction.as_mut().unwrap(),
+                    );
+                }
 
                 self.incremented = true;
             }
@@ -168,8 +171,11 @@ impl<C: Config> InputSession<'_, C> {
             // if the query does not exist yet, we need to create a new node
             // info
             if !self.incremented {
-                self.engine
-                    .increment_timestamp(self.transaction.as_mut().unwrap());
+                unsafe {
+                    self.engine.increment_timestamp(
+                        self.transaction.as_mut().unwrap(),
+                    );
+                }
 
                 self.incremented = true;
             }
@@ -181,7 +187,7 @@ impl<C: Config> InputSession<'_, C> {
             new_value,
             query_value_fingerprint,
             self.transaction.as_mut().unwrap(),
-            unsafe { self.engine.get_current_timestamp() },
+            unsafe { self.engine.get_current_timestamp_unchecked() },
         );
     }
 }
