@@ -142,6 +142,7 @@ impl<C: Config> Engine<C> {
             query_value_fingerprint,
             lock_guard,
             need_backward_projection_propagation,
+            caller_information,
             continuing_tx,
         );
 

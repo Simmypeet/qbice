@@ -181,6 +181,7 @@ impl<C: Config> InputSession<'_, C> {
             new_value,
             query_value_fingerprint,
             self.transaction.as_mut().unwrap(),
+            unsafe { self.engine.get_current_timestamp() },
         );
     }
 }

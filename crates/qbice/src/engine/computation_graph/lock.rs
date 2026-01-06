@@ -16,7 +16,7 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::Config,
     engine::computation_graph::{
-        QueryKind, QueryWithID,
+        CallerInformation, QueryKind, QueryWithID,
         persist::{NodeInfo, Observation, WriterBufferWithLock},
         slow_path::SlowPath,
         tfc_achetype::TransitiveFirewallCallees,
@@ -390,6 +390,7 @@ impl<C: Config> Engine<C> {
         query_id: QueryID,
         clean_edges: &[QueryID],
         new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
+        caller_information: &CallerInformation,
         lock_guard: ComputingLockGuard<'_, C>,
     ) {
         let dashmap::Entry::Occupied(entry_lock) =
@@ -400,7 +401,7 @@ impl<C: Config> Engine<C> {
 
         let notify = entry_lock.get().notify.clone();
 
-        self.clean_query(query_id, clean_edges, new_tfc);
+        self.clean_query(query_id, clean_edges, new_tfc, caller_information);
 
         lock_guard.defuse();
 
@@ -409,6 +410,7 @@ impl<C: Config> Engine<C> {
         notify.notify_waiters();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn computing_lock_to_computed<Q: Query>(
         &self,
         query_id: &QueryWithID<'_, Q>,
@@ -416,6 +418,7 @@ impl<C: Config> Engine<C> {
         query_value_fingerprint: Option<Compact128>,
         lock_guard: ComputingLockGuard<'_, C>,
         has_pending_backward_projection: bool,
+        caller_information: &CallerInformation,
         continuing_tx: Option<WriterBufferWithLock<C>>,
     ) {
         let dashmap::Entry::Occupied(mut entry_lock) =
@@ -450,6 +453,7 @@ impl<C: Config> Engine<C> {
                 .collect(),
             tfc_archetype,
             has_pending_backward_projection,
+            caller_information,
             continuing_tx,
         );
 

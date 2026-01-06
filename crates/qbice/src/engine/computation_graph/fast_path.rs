@@ -119,8 +119,6 @@ impl<C: Config> Engine<C> {
             Ok(FastPathResult::TryAgain)
         } else {
             // check if we have the existing query info
-            let current_timestamp = self.get_current_timestamp();
-
             let (Some(query_info), Some(last_verified)) = (
                 self.computation_graph.get_node_info(query_id),
                 self.computation_graph.get_last_verified(query_id),
@@ -129,7 +127,7 @@ impl<C: Config> Engine<C> {
             };
 
             // check if the query is up-to-date
-            if last_verified != current_timestamp {
+            if last_verified != caller.timestamp() {
                 return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
             }
 
@@ -152,7 +150,7 @@ impl<C: Config> Engine<C> {
                 } else if self
                     .computation_graph
                     .get_pending_backward_projection(query_id)
-                    .is_some_and(|x| x == current_timestamp)
+                    .is_some_and(|x| x == caller.timestamp())
                 {
                     return Ok(FastPathResult::ToSlowPath(
                         SlowPath::BaackwardProjection,

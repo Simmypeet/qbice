@@ -82,14 +82,12 @@ impl<C: Config> Engine<C> {
         query_id: QueryID,
         caller_information: &CallerInformation,
     ) {
-        let current_timestamp = self.get_current_timestamp();
-
         loop {
             // no more pending backward projection
             if self
                 .computation_graph
                 .get_pending_backward_projection(query_id)
-                .is_none_or(|x| x != current_timestamp)
+                .is_none_or(|x| x != caller_information.timestamp())
             {
                 return;
             }

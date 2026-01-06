@@ -50,7 +50,7 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::Config,
     engine::computation_graph::{
-        ComputationGraph, QueryKind, QueryWithID, Sieve,
+        CallerInformation, ComputationGraph, QueryKind, QueryWithID, Sieve,
         lock::BackwardProjectionLockGuard,
         tfc_achetype::TransitiveFirewallCallees,
     },
@@ -587,6 +587,7 @@ impl<C: Config> Engine<C> {
         >,
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
         has_pending_backward_projection: bool,
+        caller_information: &CallerInformation,
         continuting_tx: Option<WriterBufferWithLock<C>>,
     ) {
         let query_value_fingerprint =
@@ -602,7 +603,6 @@ impl<C: Config> Engine<C> {
             transitive_firewall_callees_fingerprint,
             tfc_achetype,
         );
-        let current_timestamp = self.get_current_timestamp();
 
         let existing_forward_edges =
             self.computation_graph.get_forward_edges_order(query_id.id);
@@ -631,7 +631,9 @@ impl<C: Config> Engine<C> {
             if has_pending_backward_projection {
                 self.computation_graph.persist.query_node.put(
                     query_id.id,
-                    Some(PendingBackwardProjection(current_timestamp)),
+                    Some(PendingBackwardProjection(
+                        caller_information.timestamp(),
+                    )),
                     tx.writer_buffer(),
                 );
             }
@@ -650,7 +652,7 @@ impl<C: Config> Engine<C> {
 
             self.computation_graph.persist.query_node.put(
                 query_id.id,
-                Some(LastVerified(current_timestamp)),
+                Some(LastVerified(caller_information.timestamp())),
                 tx.writer_buffer(),
             );
 
@@ -696,6 +698,7 @@ impl<C: Config> Engine<C> {
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
         tx: &mut WriterBufferWithLock<C>,
+        timestamp: Timestamp,
     ) {
         let query_id = QueryID::new::<Q>(query_hash_128);
 
@@ -717,8 +720,6 @@ impl<C: Config> Engine<C> {
             transitive_firewall_callees_fingerprint,
             transitive_firewall_callees,
         );
-
-        let timestamp = self.get_current_timestamp();
 
         let query_input = QueryInput::<Q>(query);
         let query_result = QueryResult::<Q>(query_value);
@@ -800,9 +801,8 @@ impl<C: Config> Engine<C> {
         query_id: QueryID,
         clean_edges: &[QueryID],
         new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
+        caller_information: &CallerInformation,
     ) {
-        let current_timestamp = self.get_current_timestamp();
-
         let new_node_info = new_tfc.map(|x| {
             let mut current_node_info =
                 self.computation_graph.get_node_info(query_id).unwrap();
@@ -837,7 +837,7 @@ impl<C: Config> Engine<C> {
 
             self.computation_graph.persist.query_node.put(
                 query_id,
-                Some(LastVerified(current_timestamp)),
+                Some(LastVerified(caller_information.timestamp())),
                 tx.writer_buffer(),
             );
 
@@ -917,7 +917,7 @@ impl<C: Config> Engine<C> {
         })
     }
 
-    pub(super) fn get_current_timestamp(&self) -> Timestamp {
+    pub(super) unsafe fn get_current_timestamp(&self) -> Timestamp {
         *self
             .computation_graph
             .persist
@@ -930,7 +930,7 @@ impl<C: Config> Engine<C> {
         &self,
         tx: &mut WriterBufferWithLock<C>,
     ) -> Timestamp {
-        let current = self.get_current_timestamp();
+        let current = unsafe { self.get_current_timestamp() };
         let new_timestamp = Timestamp(current.0 + 1);
 
         self.computation_graph.persist.timestamp_sieve.put(

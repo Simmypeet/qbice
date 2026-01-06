@@ -27,6 +27,7 @@ impl<C: Config> Engine<C> {
     pub(super) async fn recompute_decision_based_on_forward_edges<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
+        caller_information: &CallerInformation,
     ) -> RepairDecision {
         let mut repair_transitive_firewall_callees = false;
         let mut cleaned_edges = Vec::new();
@@ -64,7 +65,7 @@ impl<C: Config> Engine<C> {
                                 query.id,
                                 CallerReason::Repair,
                             )),
-                            self.get_current_timestamp(),
+                            caller_information.timestamp(),
                         ),
                     )
                     .await;
@@ -216,8 +217,12 @@ impl<C: Config> Engine<C> {
                 .await;
         }
 
-        let recompute =
-            self.recompute_decision_based_on_forward_edges(query).await;
+        let recompute = self
+            .recompute_decision_based_on_forward_edges(
+                query,
+                caller_information,
+            )
+            .await;
 
         let (repair_transitive_firewall_callees, cleaned_edges) =
             match recompute {
@@ -233,6 +238,7 @@ impl<C: Config> Engine<C> {
                 query.id,
                 &cleaned_edges,
                 None,
+                caller_information,
                 lock_guard,
             );
         } else {
@@ -282,6 +288,7 @@ impl<C: Config> Engine<C> {
                 query.id,
                 &cleaned_edges,
                 Some(new_tfc),
+                caller_information,
                 lock_guard,
             );
         }
