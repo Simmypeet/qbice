@@ -4,8 +4,11 @@ use crate::{
     Engine, Query,
     config::Config,
     engine::computation_graph::{
-        QueryKind, caller::CallerInformation, lock::Computing,
-        persist::NodeInfo, slow_path::SlowPath,
+        QueryKind,
+        caller::{CallerInformation, CallerKind},
+        lock::Computing,
+        persist::NodeInfo,
+        slow_path::SlowPath,
     },
     executor::CyclicError,
     query::QueryID,
@@ -132,7 +135,7 @@ impl<C: Config> Engine<C> {
 
             // check if the query was called with repairing firewall and
             // has pending backward projection to do
-            if matches!(caller, CallerInformation::RepairFirewall {
+            if matches!(caller.kind(), CallerKind::RepairFirewall {
                 invoke_backward_projection: true
             }) {
                 if let Some(pending_lock) = self

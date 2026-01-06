@@ -20,16 +20,16 @@ impl<C: Config> Drop for InputSession<'_, C> {
         self.engine.computation_graph.reset_statistic();
         self.engine.clear_dirtied_queries();
 
-        let tx = self.transaction.take().unwrap();
-        let tx = RwLock::new(tx);
+        let mut tx = self.transaction.take().unwrap();
+        let tx_rwlock = RwLock::new(tx.writer_buffer());
 
         self.engine.rayon_thread_pool.install(|| {
             self.dirty_batch.par_iter().for_each(|x| {
-                self.engine.dirty_propagate(*x, &tx);
+                self.engine.dirty_propagate(*x, &tx_rwlock);
             });
         });
 
-        self.engine.submit_write_buffer(tx.into_inner());
+        self.engine.submit_write_buffer(tx);
     }
 }
 

@@ -7,7 +7,7 @@ use crate::{
     config::Config,
     engine::computation_graph::{
         QueryWithID,
-        caller::{CallerInformation, CallerReason, QueryCaller},
+        caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
         lock::ComputingLockGuard,
     },
     executor::CyclicError,
@@ -59,10 +59,13 @@ impl<C: Config> Engine<C> {
                     .repair_query_from_query_id(
                         self,
                         callee.compact_hash_128(),
-                        CallerInformation::Query(QueryCaller::new(
-                            query.id,
-                            CallerReason::Repair,
-                        )),
+                        CallerInformation::new(
+                            CallerKind::Query(QueryCaller::new(
+                                query.id,
+                                CallerReason::Repair,
+                            )),
+                            self.get_current_timestamp(),
+                        ),
                     )
                     .await;
             }
@@ -116,6 +119,7 @@ impl<C: Config> Engine<C> {
     pub(super) async fn repair_transitive_firewall_callees<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
+        caller_information: &CallerInformation,
     ) {
         let node_info = self.computation_graph.get_node_info(query.id).unwrap();
 
@@ -144,6 +148,8 @@ impl<C: Config> Engine<C> {
         let mut handles = Vec::new();
 
         // run all repairs in parallel
+        let timestamp = caller_information.timestamp();
+
         for tfc_chunk in tfcs.chunks(chunk_size).map(<[_]>::to_vec) {
             let engine = Arc::clone(self);
 
@@ -157,15 +163,19 @@ impl<C: Config> Engine<C> {
                         .repair_query_from_query_id(
                             &engine,
                             tfc.compact_hash_128(),
-                            CallerInformation::RepairFirewall {
-                                // if current query is projection, then
-                                // repairing the firewalls should not invoke
-                                // backward projection, since it will
-                                // immediately request this query again, causing
-                                // deadlock.
-                                invoke_backward_projection:
-                                    !is_current_query_projection,
-                            },
+                            CallerInformation::new(
+                                CallerKind::RepairFirewall {
+                                    // if current query is projection, then
+                                    // repairing the firewalls should not invoke
+                                    // backward projection, since it will
+                                    // immediately request this query again,
+                                    // causing
+                                    // deadlock.
+                                    invoke_backward_projection:
+                                        !is_current_query_projection,
+                                },
+                                timestamp,
+                            ),
                         )
                         .await;
                 }
@@ -187,8 +197,8 @@ impl<C: Config> Engine<C> {
         // if the caller is backward projection propagation, we always
         // recompute since the projection query have already told us
         // that the value is required to be recomputed.
-        if *caller_information
-            == CallerInformation::BackwardProjectionPropagation
+        if *caller_information.kind()
+            == CallerKind::BackwardProjectionPropagation
         {
             return Some(lock_guard);
         }
@@ -199,10 +209,11 @@ impl<C: Config> Engine<C> {
         // recompute, since the transitive firewall callees might affect the
         // decision by propagating dirtiness.
         if matches!(
-            caller_information,
-            CallerInformation::User | CallerInformation::RepairFirewall { .. }
+            caller_information.kind(),
+            CallerKind::User | CallerKind::RepairFirewall { .. }
         ) {
-            self.repair_transitive_firewall_callees(query).await;
+            self.repair_transitive_firewall_callees(query, caller_information)
+                .await;
         }
 
         let recompute =
@@ -240,10 +251,13 @@ impl<C: Config> Engine<C> {
                     .repair_query_from_query_id(
                         self,
                         callee.compact_hash_128(),
-                        CallerInformation::Query(QueryCaller::new(
-                            query.id,
-                            CallerReason::Repair,
-                        )),
+                        CallerInformation::new(
+                            CallerKind::Query(QueryCaller::new(
+                                query.id,
+                                CallerReason::Repair,
+                            )),
+                            caller_information.timestamp(),
+                        ),
                     )
                     .await;
             }

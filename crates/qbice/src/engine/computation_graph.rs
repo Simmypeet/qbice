@@ -11,8 +11,8 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::{Config, DefaultConfig},
     engine::computation_graph::{
-        fast_path::FastPathResult, lock::Lock, persist::Persist,
-        statistic::Statistic,
+        caller::CallerKind, fast_path::FastPathResult, lock::Lock,
+        persist::Persist, statistic::Statistic,
     },
     executor::{CyclicError, CyclicPanicPayload},
     query::{DynValue, DynValueBox, QueryID},
@@ -344,9 +344,12 @@ impl<C: Config> Engine<C> {
     #[must_use]
     pub fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
         TrackedEngine {
-            engine: self,
+            caller: CallerInformation::new(
+                CallerKind::User,
+                self.get_current_timestamp(),
+            ),
             cache: Arc::new(DashMap::new()),
-            caller: CallerInformation::User,
+            engine: self,
         }
     }
 }

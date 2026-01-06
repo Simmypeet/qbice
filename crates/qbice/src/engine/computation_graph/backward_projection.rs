@@ -4,7 +4,8 @@ use crate::{
     Engine,
     config::Config,
     engine::computation_graph::{
-        CallerInformation, lock::BackwardProjectionLockGuard,
+        CallerInformation, caller::CallerKind,
+        lock::BackwardProjectionLockGuard,
     },
     query::QueryID,
 };
@@ -13,6 +14,7 @@ impl<C: Config> Engine<C> {
     pub(super) async fn invoke_backward_projections(
         self: &Arc<Self>,
         current_query_id: QueryID,
+        caller_information: &CallerInformation,
         backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
     ) {
         let backward_edges =
@@ -40,6 +42,7 @@ impl<C: Config> Engine<C> {
 
         let mut handles = Vec::new();
 
+        let timestamp = caller_information.timestamp();
         for chunk in backward_projections.chunks(chunk_size) {
             let engine = Arc::clone(self);
             let chunk = chunk.to_vec();
@@ -55,7 +58,10 @@ impl<C: Config> Engine<C> {
                         .repair_query_from_query_id(
                             &engine,
                             query_id.compact_hash_128(),
-                            CallerInformation::BackwardProjectionPropagation,
+                            CallerInformation::new(
+                                CallerKind::BackwardProjectionPropagation,
+                                timestamp,
+                            ),
                         )
                         .await;
                 }
@@ -71,10 +77,10 @@ impl<C: Config> Engine<C> {
             backward_projection_lock_guard,
         );
     }
-
     pub(super) async fn try_do_backward_projections(
         self: &Arc<Self>,
         query_id: QueryID,
+        caller_information: &CallerInformation,
     ) {
         let current_timestamp = self.get_current_timestamp();
 
@@ -112,7 +118,12 @@ impl<C: Config> Engine<C> {
             };
 
             // the lock is acquired, do the backward propagations
-            self.invoke_backward_projections(query_id, lock_guard).await;
+            self.invoke_backward_projections(
+                query_id,
+                caller_information,
+                lock_guard,
+            )
+            .await;
         }
     }
 }

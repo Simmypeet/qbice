@@ -8,7 +8,7 @@ use crate::{
     config::Config,
     engine::computation_graph::{
         QueryWithID,
-        caller::{CallerInformation, CallerReason, QueryCaller},
+        caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
         lock::{ComputingLockGuard, ComputingMode, LockGuard},
     },
 };
@@ -39,10 +39,13 @@ impl<C: Config> Engine<C> {
         let mut tracked_engine = TrackedEngine {
             engine: self.clone(),
             cache: cache.clone(),
-            caller: CallerInformation::Query(QueryCaller::new(
-                query.id,
-                CallerReason::RequireValue,
-            )),
+            caller: CallerInformation::new(
+                CallerKind::Query(QueryCaller::new(
+                    query.id,
+                    CallerReason::RequireValue,
+                )),
+                caller_information.timestamp(),
+            ),
         };
 
         let entry = self.executor_registry.get_executor_entry::<Q>();
@@ -111,15 +114,18 @@ impl<C: Config> Engine<C> {
 
             let fingerprint = self.hash(&value);
             let updated = old_node_info.value_fingerprint() != fingerprint;
-            let write_buffer = RwLock::new(self.new_write_buffer());
+            let mut writer_buffer_with_lock = self.new_write_buffer();
+
+            let write_buffer_rwlock =
+                RwLock::new(writer_buffer_with_lock.writer_buffer());
 
             // if fingerprint has changed, we do dirty propagation
             if updated {
-                self.dirty_propagate(query.id, &write_buffer);
+                self.dirty_propagate(query.id, &write_buffer_rwlock);
             }
 
             (
-                Some(write_buffer.into_inner()),
+                Some(writer_buffer_with_lock),
                 Some(fingerprint),
                 // if the query is a firewall and its value has changed, it
                 // needs to invoke projection queries in the backward direction
@@ -141,11 +147,12 @@ impl<C: Config> Engine<C> {
 
         // if the firewall is being repaired, and it has pending backward
         // projections, we need to do backward projections now.
-        if matches!(caller_information, CallerInformation::RepairFirewall {
+        if matches!(caller_information.kind(), CallerKind::RepairFirewall {
             invoke_backward_projection: true
         }) && need_backward_projection_propagation
         {
-            self.try_do_backward_projections(query.id).await;
+            self.try_do_backward_projections(query.id, caller_information)
+                .await;
         }
     }
 
@@ -172,7 +179,12 @@ impl<C: Config> Engine<C> {
             }
 
             LockGuard::BackwardProjectionLockGuard(lock_guard) => {
-                self.invoke_backward_projections(query.id, lock_guard).await;
+                self.invoke_backward_projections(
+                    query.id,
+                    caller_information,
+                    lock_guard,
+                )
+                .await;
             }
         }
     }

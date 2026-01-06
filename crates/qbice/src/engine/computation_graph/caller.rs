@@ -1,4 +1,4 @@
-use crate::query::QueryID;
+use crate::{engine::computation_graph::persist::Timestamp, query::QueryID};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallerReason {
@@ -19,7 +19,59 @@ impl QueryCaller {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallerInformation {
+pub struct CallerInformation {
+    kind: CallerKind,
+    timestamp: Timestamp,
+}
+
+impl CallerInformation {
+    pub const fn new(kind: CallerKind, timestamp: Timestamp) -> Self {
+        Self { kind, timestamp }
+    }
+
+    pub const fn get_caller(&self) -> Option<QueryID> {
+        match &self.kind {
+            CallerKind::RepairFirewall { .. }
+            | CallerKind::BackwardProjectionPropagation
+            | CallerKind::User => None,
+
+            CallerKind::Query(q) => Some(q.query_id),
+        }
+    }
+
+    pub const fn require_value(&self) -> bool {
+        match &self.kind {
+            CallerKind::RepairFirewall { .. }
+            | CallerKind::BackwardProjectionPropagation => false,
+
+            CallerKind::User => true,
+            CallerKind::Query(q) => {
+                matches!(q.reason, CallerReason::RequireValue)
+            }
+        }
+    }
+
+    pub fn has_a_caller_requiring_value(&self) -> Option<&QueryID> {
+        match &self.kind {
+            // it does require value, but the caller is not another query
+            CallerKind::RepairFirewall { .. }
+            | CallerKind::User
+            | CallerKind::BackwardProjectionPropagation => None,
+
+            CallerKind::Query(q) => {
+                matches!(q.reason, CallerReason::RequireValue)
+                    .then_some(&q.query_id)
+            }
+        }
+    }
+
+    pub const fn timestamp(&self) -> Timestamp { self.timestamp }
+
+    pub const fn kind(&self) -> &CallerKind { &self.kind }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerKind {
     User,
     Query(QueryCaller),
 
@@ -40,38 +92,4 @@ pub enum CallerInformation {
     RepairFirewall {
         invoke_backward_projection: bool,
     },
-}
-
-impl CallerInformation {
-    pub const fn get_caller(&self) -> Option<QueryID> {
-        match self {
-            Self::RepairFirewall { .. }
-            | Self::BackwardProjectionPropagation
-            | Self::User => None,
-
-            Self::Query(q) => Some(q.query_id),
-        }
-    }
-
-    pub const fn require_value(&self) -> bool {
-        match self {
-            Self::RepairFirewall { .. }
-            | Self::BackwardProjectionPropagation => false,
-
-            Self::User => true,
-            Self::Query(q) => matches!(q.reason, CallerReason::RequireValue),
-        }
-    }
-
-    pub fn has_a_caller_requiring_value(&self) -> Option<&QueryID> {
-        match self {
-            // it does require value, but the caller is not another query
-            Self::RepairFirewall { .. }
-            | Self::User
-            | Self::BackwardProjectionPropagation => None,
-
-            Self::Query(q) => matches!(q.reason, CallerReason::RequireValue)
-                .then_some(&q.query_id),
-        }
-    }
 }

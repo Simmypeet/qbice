@@ -1,18 +1,17 @@
 use parking_lot::RwLock;
+use qbice_storage::sieve::WriteBuffer;
 use rayon::prelude::ParallelIterator;
 
 use crate::{
-    Engine, ExecutionStyle,
-    config::Config,
-    engine::computation_graph::{QueryKind, persist::WriterBufferWithLock},
-    query::QueryID,
+    Engine, ExecutionStyle, config::Config,
+    engine::computation_graph::QueryKind, query::QueryID,
 };
 
 impl<C: Config> Engine<C> {
     pub(super) fn dirty_propagate(
         &self,
         query_id: QueryID,
-        tx: &RwLock<WriterBufferWithLock<C>>,
+        tx: &RwLock<&mut WriteBuffer<C::Database, C::BuildHasher>>,
     ) {
         // has already been marked dirty
         if !self.insert_dirty_query(query_id) {
@@ -29,7 +28,7 @@ impl<C: Config> Engine<C> {
                 self.mark_dirty_forward_edge(
                     caller_query_id,
                     query_id,
-                    tx.write().writer_buffer(),
+                    *tx.write(),
                 );
 
                 let query_kind = self
