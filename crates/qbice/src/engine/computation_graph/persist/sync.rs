@@ -28,7 +28,7 @@ impl WideColumnValue<TimestampColumn> for Timestamp {
     fn discriminant() {}
 }
 
-pub struct Writer<C: Config> {
+pub struct Sync<C: Config> {
     timestamp_lock: RwLock<()>,
 
     // need to be declared because of the the write buffer interface, we'll
@@ -54,7 +54,7 @@ impl<C: Config> WriterBufferWithLock<'_, C> {
     }
 }
 
-impl<C: Config> Writer<C> {
+impl<C: Config> Sync<C> {
     pub fn new(db: Arc<C::Database>) -> Self {
         let background_writer =
             BackgroundWriter::<C::Database, C::BuildHasher>::new(
@@ -93,15 +93,10 @@ impl<C: Config> Engine<C> {
     pub(in crate::engine::computation_graph) fn new_write_buffer(
         &'_ self,
     ) -> WriterBufferWithLock<'_, C> {
-        let writer_buffer = self
-            .computation_graph
-            .persist
-            .writer_lock
-            .background
-            .new_write_buffer();
+        let writer_buffer =
+            self.computation_graph.persist.sync.background.new_write_buffer();
 
-        let guard =
-            self.computation_graph.persist.writer_lock.timestamp_lock.read();
+        let guard = self.computation_graph.persist.sync.timestamp_lock.read();
 
         WriterBufferWithLock { _guard: guard, writer_buffer }
     }
@@ -112,7 +107,7 @@ impl<C: Config> Engine<C> {
     ) {
         self.computation_graph
             .persist
-            .writer_lock
+            .sync
             .background
             .submit_write_buffer(write_buffer.writer_buffer);
     }
@@ -120,13 +115,12 @@ impl<C: Config> Engine<C> {
     pub(in crate::engine::computation_graph) unsafe fn get_current_timestamp_unchecked(
         &self,
     ) -> Timestamp {
-        let lock =
-            self.computation_graph.persist.writer_lock.timestamp_lock.read();
+        let lock = self.computation_graph.persist.sync.timestamp_lock.read();
 
         let result = Timestamp(
             self.computation_graph
                 .persist
-                .writer_lock
+                .sync
                 .current_timestamp
                 .load(std::sync::atomic::Ordering::SeqCst),
         );
@@ -143,20 +137,20 @@ impl<C: Config> Engine<C> {
         let current = self
             .computation_graph
             .persist
-            .writer_lock
+            .sync
             .current_timestamp
             .load(std::sync::atomic::Ordering::SeqCst);
 
         let new_timestamp = Timestamp(current + 1);
 
-        self.computation_graph.persist.writer_lock.timestamp_sieve.put(
+        self.computation_graph.persist.sync.timestamp_sieve.put(
             (),
             Some(new_timestamp),
             tx.writer_buffer(),
         );
         self.computation_graph
             .persist
-            .writer_lock
+            .sync
             .current_timestamp
             .store(new_timestamp.0, std::sync::atomic::Ordering::SeqCst);
 

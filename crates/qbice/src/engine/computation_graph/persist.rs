@@ -44,7 +44,7 @@ use qbice_storage::{
     },
 };
 use rayon::iter::IntoParallelRefIterator;
-pub(in crate::engine::computation_graph) use writer::WriterBufferWithLock;
+pub(in crate::engine::computation_graph) use sync::WriterBufferWithLock;
 
 use crate::{
     Engine, ExecutionStyle, Query,
@@ -57,7 +57,7 @@ use crate::{
     query::QueryID,
 };
 
-mod writer;
+mod sync;
 
 #[derive(
     Debug,
@@ -420,7 +420,7 @@ pub struct Persist<C: Config> {
     backward_edges:
         Arc<KeyOfSetSieve<BackwardEdgeColumn<C>, C::Database, C::BuildHasher>>,
 
-    writer_lock: writer::Writer<C>,
+    sync: sync::Sync<C>,
 }
 
 impl<C: Config> Persist<C> {
@@ -450,7 +450,7 @@ impl<C: Config> Persist<C> {
                 db.clone(),
                 C::BuildHasher::default(),
             )),
-            writer_lock: writer::Writer::new(db),
+            sync: sync::Sync::new(db),
         }
     }
 }
