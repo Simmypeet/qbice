@@ -385,7 +385,7 @@ impl<C: Config> Engine<C> {
     }
 
     #[allow(clippy::option_option)]
-    pub(super) fn computing_lock_to_clean_query(
+    pub(super) async fn computing_lock_to_clean_query(
         &self,
         query_id: QueryID,
         clean_edges: &[QueryID],
@@ -401,7 +401,8 @@ impl<C: Config> Engine<C> {
 
         let notify = entry_lock.get().notify.clone();
 
-        self.clean_query(query_id, clean_edges, new_tfc, caller_information);
+        self.clean_query(query_id, clean_edges, new_tfc, caller_information)
+            .await;
 
         lock_guard.defuse();
 
@@ -419,7 +420,7 @@ impl<C: Config> Engine<C> {
         lock_guard: ComputingLockGuard<'_, C>,
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
-        continuing_tx: Option<WriterBufferWithLock<C>>,
+        continuing_tx: WriterBufferWithLock<C>,
     ) {
         let dashmap::Entry::Occupied(mut entry_lock) =
             self.computation_graph.lock.lock.entry(query_id.id)

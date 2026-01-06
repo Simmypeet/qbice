@@ -114,7 +114,8 @@ impl<C: Config> Engine<C> {
 
             let fingerprint = self.hash(&value);
             let updated = old_node_info.value_fingerprint() != fingerprint;
-            let mut writer_buffer_with_lock = self.new_write_buffer();
+            let mut writer_buffer_with_lock =
+                self.new_write_buffer(caller_information).await;
 
             let write_buffer_rwlock =
                 RwLock::new(writer_buffer_with_lock.writer_buffer());
@@ -125,7 +126,7 @@ impl<C: Config> Engine<C> {
             }
 
             (
-                Some(writer_buffer_with_lock),
+                writer_buffer_with_lock,
                 Some(fingerprint),
                 // if the query is a firewall and its value has changed, it
                 // needs to invoke projection queries in the backward direction
@@ -133,7 +134,7 @@ impl<C: Config> Engine<C> {
                 old_kind.is_firewall() && updated,
             )
         } else {
-            (None, None, false)
+            (self.new_write_buffer(caller_information).await, None, false)
         };
 
         self.computing_lock_to_computed(

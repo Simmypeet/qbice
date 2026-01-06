@@ -106,7 +106,7 @@ impl<C: Config> Engine<C> {
         InputSession {
             incremented: false,
             dirty_batch: VecDeque::new(),
-            transaction: Some(self.new_write_buffer()),
+            transaction: Some(self.new_write_buffer_with_write_lock()),
             engine: self,
         }
     }
@@ -181,13 +181,15 @@ impl<C: Config> InputSession<'_, C> {
             }
         }
 
+        let ts = self.transaction.as_ref().unwrap().timestamp();
+
         self.engine.set_computed_input(
             query,
             query_hash,
             new_value,
             query_value_fingerprint,
             self.transaction.as_mut().unwrap(),
-            unsafe { self.engine.get_current_timestamp_unchecked() },
+            ts,
         );
     }
 }

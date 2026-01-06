@@ -240,7 +240,8 @@ impl<C: Config> Engine<C> {
                 None,
                 caller_information,
                 lock_guard,
-            );
+            )
+            .await;
         } else {
             let forward_edges = self
                 .computation_graph
@@ -290,7 +291,8 @@ impl<C: Config> Engine<C> {
                 Some(new_tfc),
                 caller_information,
                 lock_guard,
-            );
+            )
+            .await;
         }
 
         None

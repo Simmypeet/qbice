@@ -50,7 +50,7 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::Config,
     engine::computation_graph::{
-        CallerInformation, ComputationGraph, QueryKind, QueryWithID, Sieve,
+        CallerInformation, QueryKind, QueryWithID, Sieve,
         lock::BackwardProjectionLockGuard,
         tfc_achetype::TransitiveFirewallCallees,
     },
@@ -461,70 +461,6 @@ pub struct Observation {
     pub seen_transitive_firewall_callees_fingerprint: Compact128,
 }
 
-impl<C: Config> ComputationGraph<C> {
-    pub fn get_forward_edges_order(
-        &self,
-        query_id: QueryID,
-    ) -> Option<Arc<[QueryID]>> {
-        self.persist
-            .query_node
-            .get_normal::<ForwardEdgeOrder>(query_id)
-            .map(|x| x.0.clone())
-    }
-
-    pub fn get_forward_edge_observations(
-        &self,
-        query_id: QueryID,
-    ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
-        self.persist
-            .query_node
-            .get_normal::<ForwardEdgeObservation<C>>(query_id)
-            .map(|x| x.0.clone())
-    }
-
-    pub fn get_node_info(&self, query_id: QueryID) -> Option<NodeInfo> {
-        self.persist
-            .query_node
-            .get_normal::<NodeInfo>(query_id)
-            .map(|x| x.clone())
-    }
-
-    pub fn get_query_kind(&self, query_id: QueryID) -> Option<QueryKind> {
-        self.persist.query_node.get_normal::<QueryKind>(query_id).map(|x| *x)
-    }
-
-    pub fn get_last_verified(&self, query_id: QueryID) -> Option<Timestamp> {
-        self.persist
-            .query_node
-            .get_normal::<LastVerified>(query_id)
-            .map(|x| x.0)
-    }
-
-    pub fn get_backward_edges(&self, query_id: QueryID) -> BackwardEdge<C> {
-        self.persist.backward_edges.get_set(&query_id).clone()
-    }
-
-    pub fn get_query_result<Q: Query>(
-        &self,
-        query_input_hash_128: Compact128,
-    ) -> Option<Q::Value> {
-        self.persist
-            .query_store
-            .get_normal::<QueryResult<Q>>(query_input_hash_128)
-            .map(|x| x.0.clone())
-    }
-
-    pub fn get_pending_backward_projection(
-        &self,
-        query_id: QueryID,
-    ) -> Option<Timestamp> {
-        self.persist
-            .query_node
-            .get_normal::<PendingBackwardProjection>(query_id)
-            .map(|x| x.0)
-    }
-}
-
 impl<C: Config> Engine<C> {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn set_computed<Q: Query>(
@@ -542,7 +478,7 @@ impl<C: Config> Engine<C> {
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
-        continuting_tx: Option<WriterBufferWithLock<C>>,
+        mut tx: WriterBufferWithLock<C>,
     ) {
         let query_value_fingerprint =
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
@@ -563,8 +499,6 @@ impl<C: Config> Engine<C> {
 
         let query_input = QueryInput::<Q>(query_id.query.clone());
         let query_result = QueryResult::<Q>(query_value);
-
-        let mut tx = continuting_tx.unwrap_or_else(|| self.new_write_buffer());
 
         {
             // remove prior backward edges
@@ -750,7 +684,7 @@ impl<C: Config> Engine<C> {
     }
 
     #[allow(clippy::option_option)]
-    pub(super) fn clean_query(
+    pub(super) async fn clean_query(
         &self,
         query_id: QueryID,
         clean_edges: &[QueryID],
@@ -768,7 +702,7 @@ impl<C: Config> Engine<C> {
             current_node_info
         });
 
-        let mut tx = self.new_write_buffer();
+        let mut tx = self.new_write_buffer(caller_information).await;
 
         {
             for callee in clean_edges.iter().copied() {
@@ -818,12 +752,13 @@ impl<C: Config> Engine<C> {
             .map(|x| x.0.clone())
     }
 
-    pub(super) fn done_backward_projection(
+    pub(super) async fn done_backward_projection(
         &self,
         query_id: &QueryID,
+        caller_information: &CallerInformation,
         backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
     ) {
-        let mut tx = self.new_write_buffer();
+        let mut tx = self.new_write_buffer(caller_information).await;
 
         self.computation_graph
             .persist

@@ -74,8 +74,10 @@ impl<C: Config> Engine<C> {
 
         self.done_backward_projection(
             &current_query_id,
+            caller_information,
             backward_projection_lock_guard,
-        );
+        )
+        .await;
     }
     pub(super) async fn try_do_backward_projections(
         self: &Arc<Self>,

@@ -1,13 +1,25 @@
-use std::sync::{Arc, atomic::AtomicU64};
+use std::{collections::HashMap, sync::Arc};
 
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::Identifiable;
 use qbice_storage::{
     kv_database::{DiscriminantEncoding, WideColumn, WideColumnValue},
     sieve::{BackgroundWriter, WideColumnSieve, WriteBuffer},
 };
 
-use crate::{Config, Engine, engine::computation_graph::persist::Timestamp};
+use crate::{
+    Config, Engine, Query,
+    engine::computation_graph::{
+        CallerInformation, ComputationGraph, QueryKind,
+        persist::{
+            BackwardEdge, ForwardEdgeObservation, ForwardEdgeOrder,
+            LastVerified, NodeInfo, Observation, PendingBackwardProjection,
+            QueryResult, Timestamp,
+        },
+    },
+    query::QueryID,
+};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
@@ -29,20 +41,23 @@ impl WideColumnValue<TimestampColumn> for Timestamp {
 }
 
 pub struct Sync<C: Config> {
-    timestamp_lock: RwLock<()>,
+    timestamp_lock: RwLock<Timestamp>,
 
     // need to be declared because of the the write buffer interface, we'll
     // fix this later
     timestamp_sieve:
         Arc<WideColumnSieve<TimestampColumn, C::Database, C::BuildHasher>>,
 
-    current_timestamp: AtomicU64,
-
     background: BackgroundWriter<C::Database, C::BuildHasher>,
 }
 
+pub enum Guard<'x> {
+    Read(RwLockReadGuard<'x, Timestamp>),
+    Write(RwLockWriteGuard<'x, Timestamp>),
+}
+
 pub struct WriterBufferWithLock<'x, C: Config> {
-    _guard: RwLockReadGuard<'x, ()>,
+    guard: Guard<'x>,
     writer_buffer: WriteBuffer<C::Database, C::BuildHasher>,
 }
 
@@ -51,6 +66,13 @@ impl<C: Config> WriterBufferWithLock<'_, C> {
         &mut self,
     ) -> &mut WriteBuffer<C::Database, C::BuildHasher> {
         &mut self.writer_buffer
+    }
+
+    pub fn timestamp(&self) -> Timestamp {
+        match &self.guard {
+            Guard::Read(guard) => **guard,
+            Guard::Write(guard) => **guard,
+        }
     }
 }
 
@@ -69,36 +91,63 @@ impl<C: Config> Sync<C> {
                 C::BuildHasher,
             >::new(1, 1, db, C::BuildHasher::default()));
 
-        let timstamp = timestamp_sieve.get_normal::<Timestamp>(()).map_or_else(
-            || {
-                let mut tx = background_writer.new_write_buffer();
-                timestamp_sieve.put((), Some(Timestamp(0)), &mut tx);
-                background_writer.submit_write_buffer(tx);
+        let timestamp =
+            timestamp_sieve.get_normal::<Timestamp>(()).map_or_else(
+                || {
+                    let mut tx = background_writer.new_write_buffer();
+                    timestamp_sieve.put((), Some(Timestamp(0)), &mut tx);
+                    background_writer.submit_write_buffer(tx);
 
-                AtomicU64::new(0)
-            },
-            |timestamp| AtomicU64::new(timestamp.0),
-        );
+                    Timestamp(0)
+                },
+                |timestamp| *timestamp,
+            );
 
         Self {
-            timestamp_lock: RwLock::new(()),
+            timestamp_lock: RwLock::new(timestamp),
             timestamp_sieve,
-            current_timestamp: timstamp,
             background: background_writer,
         }
     }
 }
 
 impl<C: Config> Engine<C> {
-    pub(in crate::engine::computation_graph) fn new_write_buffer(
+    pub(in crate::engine::computation_graph) async fn new_write_buffer(
+        &'_ self,
+        caller_information: &CallerInformation,
+    ) -> WriterBufferWithLock<'_, C> {
+        // the guard must be dropped here to make the future Send
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return WriterBufferWithLock {
+                    guard: Guard::Read(guard),
+                    writer_buffer: self
+                        .computation_graph
+                        .persist
+                        .sync
+                        .background
+                        .new_write_buffer(),
+                };
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) fn new_write_buffer_with_write_lock(
         &'_ self,
     ) -> WriterBufferWithLock<'_, C> {
         let writer_buffer =
             self.computation_graph.persist.sync.background.new_write_buffer();
 
-        let guard = self.computation_graph.persist.sync.timestamp_lock.read();
+        let guard = Guard::Write(
+            self.computation_graph.persist.sync.timestamp_lock.write(),
+        );
 
-        WriterBufferWithLock { _guard: guard, writer_buffer }
+        WriterBufferWithLock { guard, writer_buffer }
     }
 
     pub(in crate::engine::computation_graph) fn submit_write_buffer(
@@ -115,45 +164,93 @@ impl<C: Config> Engine<C> {
     pub(in crate::engine::computation_graph) unsafe fn get_current_timestamp_unchecked(
         &self,
     ) -> Timestamp {
-        let lock = self.computation_graph.persist.sync.timestamp_lock.read();
-
-        let result = Timestamp(
-            self.computation_graph
-                .persist
-                .sync
-                .current_timestamp
-                .load(std::sync::atomic::Ordering::SeqCst),
-        );
-
-        drop(lock);
-
-        result
+        *self.computation_graph.persist.sync.timestamp_lock.read()
     }
 
     pub(in crate::engine::computation_graph) unsafe fn increment_timestamp(
         &self,
         tx: &mut WriterBufferWithLock<C>,
     ) -> Timestamp {
-        let current = self
-            .computation_graph
-            .persist
-            .sync
-            .current_timestamp
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let guard = match &mut tx.guard {
+            Guard::Read(_) => {
+                panic!("Cannot increment timestamp with a read guard");
+            }
+            Guard::Write(guard) => guard,
+        };
 
-        let new_timestamp = Timestamp(current + 1);
+        let current_timestamp = Timestamp(guard.0 + 1);
+        **guard = current_timestamp;
 
         self.computation_graph.persist.sync.timestamp_sieve.put(
             (),
-            Some(new_timestamp),
+            Some(current_timestamp),
             tx.writer_buffer(),
         );
-        self.computation_graph
-            .persist
-            .sync
-            .current_timestamp
-            .store(new_timestamp.0, std::sync::atomic::Ordering::SeqCst);
 
-        new_timestamp
+        current_timestamp
+    }
+}
+
+impl<C: Config> ComputationGraph<C> {
+    pub fn get_forward_edges_order(
+        &self,
+        query_id: QueryID,
+    ) -> Option<Arc<[QueryID]>> {
+        self.persist
+            .query_node
+            .get_normal::<ForwardEdgeOrder>(query_id)
+            .map(|x| x.0.clone())
+    }
+
+    pub fn get_forward_edge_observations(
+        &self,
+        query_id: QueryID,
+    ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
+        self.persist
+            .query_node
+            .get_normal::<ForwardEdgeObservation<C>>(query_id)
+            .map(|x| x.0.clone())
+    }
+
+    pub fn get_node_info(&self, query_id: QueryID) -> Option<NodeInfo> {
+        self.persist
+            .query_node
+            .get_normal::<NodeInfo>(query_id)
+            .map(|x| x.clone())
+    }
+
+    pub fn get_query_kind(&self, query_id: QueryID) -> Option<QueryKind> {
+        self.persist.query_node.get_normal::<QueryKind>(query_id).map(|x| *x)
+    }
+
+    pub fn get_last_verified(&self, query_id: QueryID) -> Option<Timestamp> {
+        self.persist
+            .query_node
+            .get_normal::<LastVerified>(query_id)
+            .map(|x| x.0)
+    }
+
+    pub fn get_backward_edges(&self, query_id: QueryID) -> BackwardEdge<C> {
+        self.persist.backward_edges.get_set(&query_id).clone()
+    }
+
+    pub fn get_query_result<Q: Query>(
+        &self,
+        query_input_hash_128: Compact128,
+    ) -> Option<Q::Value> {
+        self.persist
+            .query_store
+            .get_normal::<QueryResult<Q>>(query_input_hash_128)
+            .map(|x| x.0.clone())
+    }
+
+    pub fn get_pending_backward_projection(
+        &self,
+        query_id: QueryID,
+    ) -> Option<Timestamp> {
+        self.persist
+            .query_node
+            .get_normal::<PendingBackwardProjection>(query_id)
+            .map(|x| x.0)
     }
 }
