@@ -33,6 +33,7 @@ impl CallerInformation {
         match &self.kind {
             CallerKind::RepairFirewall { .. }
             | CallerKind::BackwardProjectionPropagation
+            | CallerKind::Tracing
             | CallerKind::User => None,
 
             CallerKind::Query(q) => Some(q.query_id),
@@ -42,7 +43,8 @@ impl CallerInformation {
     pub const fn require_value(&self) -> bool {
         match &self.kind {
             CallerKind::RepairFirewall { .. }
-            | CallerKind::BackwardProjectionPropagation => false,
+            | CallerKind::BackwardProjectionPropagation
+            | CallerKind::Tracing => false,
 
             CallerKind::User => true,
             CallerKind::Query(q) => {
@@ -56,6 +58,7 @@ impl CallerInformation {
             // it does require value, but the caller is not another query
             CallerKind::RepairFirewall { .. }
             | CallerKind::User
+            | CallerKind::Tracing
             | CallerKind::BackwardProjectionPropagation => None,
 
             CallerKind::Query(q) => {
@@ -74,6 +77,7 @@ impl CallerInformation {
 pub enum CallerKind {
     User,
     Query(QueryCaller),
+    Tracing,
 
     /// The caller is either a firewall or projection query. The caller calls
     /// the query when the caller itself has changed its value and has to

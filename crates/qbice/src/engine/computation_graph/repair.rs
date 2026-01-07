@@ -32,11 +32,13 @@ impl<C: Config> Engine<C> {
         let mut repair_transitive_firewall_callees = false;
         let mut cleaned_edges = Vec::new();
 
-        let forward_edges =
-            self.computation_graph.get_forward_edges_order(query.id).unwrap();
+        let forward_edges = self
+            .get_forward_edges_order(query.id, caller_information)
+            .await
+            .unwrap();
         let forward_edge_observations = self
-            .computation_graph
-            .get_forward_edge_observations(query.id)
+            .get_forward_edge_observations(query.id, caller_information)
+            .await
             .unwrap();
 
         for callee in forward_edges.iter() {
@@ -45,7 +47,8 @@ impl<C: Config> Engine<C> {
                 continue;
             }
 
-            let kind = self.computation_graph.get_query_kind(*callee).unwrap();
+            let kind =
+                self.get_query_kind(*callee, caller_information).await.unwrap();
 
             // NOTE: if the callee is an input (explicitly set), it's impossible
             // to try to repair it, so we'll skip repairing and directly
@@ -74,8 +77,10 @@ impl<C: Config> Engine<C> {
             // after repairing, compare the fingerprints to see if we need to
             // recompute
             {
-                let callee_node_info =
-                    self.computation_graph.get_node_info(*callee).expect(
+                let callee_node_info = self
+                    .get_node_info(*callee, caller_information)
+                    .await
+                    .expect(
                         "callee node info should exist when forward edge \
                          exists",
                     );
@@ -122,11 +127,12 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
     ) {
-        let node_info = self.computation_graph.get_node_info(query.id).unwrap();
+        let node_info =
+            self.get_node_info(query.id, caller_information).await.unwrap();
 
         let is_current_query_projection = self
-            .computation_graph
-            .get_query_kind(query.id)
+            .get_query_kind(query.id, caller_information)
+            .await
             .unwrap()
             .is_projection();
 
@@ -244,8 +250,8 @@ impl<C: Config> Engine<C> {
             .await;
         } else {
             let forward_edges = self
-                .computation_graph
-                .get_forward_edges_order(query.id)
+                .get_forward_edges_order(query.id, caller_information)
+                .await
                 .unwrap();
 
             // repair all callees
@@ -269,21 +275,27 @@ impl<C: Config> Engine<C> {
                     .await;
             }
 
-            let new_tfc =
-                self.union_tfcs(forward_edges.iter().filter_map(|x| {
-                    let kind =
-                        self.computation_graph.get_query_kind(*x).unwrap();
+            let mut unioning_tfcs = Vec::new();
 
-                    if kind.is_firewall() {
-                        Some(Cow::Owned(self.new_singleton_tfc(*x)))
-                    } else {
-                        let callee_info =
-                            self.computation_graph.get_node_info(*x).unwrap();
-                        callee_info
-                            .transitive_firewall_callees()
-                            .map(|x| Cow::Owned(x.clone()))
+            for x in forward_edges.iter() {
+                let kind =
+                    self.get_query_kind(*x, caller_information).await.unwrap();
+
+                if kind.is_firewall() {
+                    unioning_tfcs.push(Cow::Owned(self.new_singleton_tfc(*x)));
+                } else {
+                    let callee_info = self
+                        .get_node_info(*x, caller_information)
+                        .await
+                        .unwrap();
+                    if let Some(tfc) = callee_info.transitive_firewall_callees()
+                    {
+                        unioning_tfcs.push(Cow::Owned(tfc.clone()));
                     }
-                }));
+                }
+            }
+
+            let new_tfc = self.union_tfcs(unioning_tfcs);
 
             self.computing_lock_to_clean_query(
                 query.id,

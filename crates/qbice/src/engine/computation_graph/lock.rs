@@ -284,9 +284,10 @@ pub enum LockGuard<'x, C: Config> {
 }
 
 impl<C: Config> Engine<C> {
-    fn computing_lock_guard(
+    async fn computing_lock_guard(
         &self,
         query_id: QueryID,
+        caller_information: &CallerInformation,
     ) -> Option<ComputingLockGuard<'_, C>> {
         match self.computation_graph.lock.lock.entry(query_id) {
             dashmap::Entry::Occupied(_) => {
@@ -297,12 +298,12 @@ impl<C: Config> Engine<C> {
             dashmap::Entry::Vacant(vacant_entry) => {
                 // second check, if the value has already been up-to-date
                 let last_verified =
-                    self.computation_graph.get_last_verified(query_id);
+                    self.get_last_verified(query_id, caller_information).await;
 
                 let (mode, query_kind) = if last_verified.is_some() {
                     let kind = self
-                        .computation_graph
-                        .get_query_kind(query_id)
+                        .get_query_kind(query_id, caller_information)
+                        .await
                         .unwrap();
 
                     (ComputingMode::Repair, kind)
@@ -368,14 +369,16 @@ impl<C: Config> Engine<C> {
         }
     }
 
-    pub(super) fn get_lock_guard(
+    pub(super) async fn get_lock_guard(
         &self,
         query_id: QueryID,
         slow_path: SlowPath,
+        caller_information: &CallerInformation,
     ) -> Option<LockGuard<'_, C>> {
         match slow_path {
             SlowPath::Computing => self
-                .computing_lock_guard(query_id)
+                .computing_lock_guard(query_id, caller_information)
+                .await
                 .map(LockGuard::ComputingLockGuard),
 
             SlowPath::BaackwardProjection => self

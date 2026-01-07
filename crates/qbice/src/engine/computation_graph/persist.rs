@@ -495,7 +495,7 @@ impl<C: Config> Engine<C> {
         );
 
         let existing_forward_edges =
-            self.computation_graph.get_forward_edges_order(query_id.id);
+            unsafe { self.get_forward_edges_order_unchecked(query_id.id) };
 
         let query_input = QueryInput::<Q>(query_id.query.clone());
         let query_result = QueryResult::<Q>(query_value);
@@ -592,7 +592,7 @@ impl<C: Config> Engine<C> {
 
         // if have an existing forward edges, unwire the backward edges
         let existing_forward_edges =
-            self.computation_graph.get_forward_edges_order(query_id);
+            unsafe { self.get_forward_edges_order_unchecked(query_id) };
 
         let empty_forward_edges = ForwardEdgeOrder(Arc::from([]));
         let empty_forward_edge_observations = ForwardEdgeObservation::<C>(
@@ -691,16 +691,18 @@ impl<C: Config> Engine<C> {
         new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
         caller_information: &CallerInformation,
     ) {
-        let new_node_info = new_tfc.map(|x| {
+        let new_node_info = if let Some(x) = new_tfc {
             let mut current_node_info =
-                self.computation_graph.get_node_info(query_id).unwrap();
+                self.get_node_info(query_id, caller_information).await.unwrap();
 
             current_node_info.transitive_firewall_callees = x;
             current_node_info.transitive_firewall_callees_fingerprint =
                 self.hash(&current_node_info.transitive_firewall_callees);
 
-            current_node_info
-        });
+            Some(current_node_info)
+        } else {
+            None
+        };
 
         let mut tx = self.new_write_buffer(caller_information).await;
 

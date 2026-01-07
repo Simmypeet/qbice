@@ -93,7 +93,7 @@ impl<C: Config> Engine<C> {
             }
         };
 
-        let old_kind = self.computation_graph.get_query_kind(query.id);
+        let old_kind = self.get_query_kind(query.id, caller_information).await;
 
         // if the old node info is a firewall or projection node, we compare
         // the old and new value fingerprints to determine if we need to
@@ -107,7 +107,7 @@ impl<C: Config> Engine<C> {
             && execute_query_for == ExecuteQueryFor::RecomputeQuery
         {
             let old_node_info =
-                self.computation_graph.get_node_info(query.id).expect(
+                self.get_node_info(query.id, caller_information).await.expect(
                     "old node info should exist for recomputed firewall or \
                      projection",
                 );

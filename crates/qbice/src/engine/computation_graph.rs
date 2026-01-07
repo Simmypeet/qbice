@@ -439,7 +439,9 @@ impl<C: Config> Engine<C> {
             // now the `query` state is held in computing state.
             // if `lock_computing` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
-            let Some(guard) = self.get_lock_guard(query.id, slow_path) else {
+            let Some(guard) =
+                self.get_lock_guard(query.id, slow_path, caller).await
+            else {
                 // try the fast path again
                 continue;
             };

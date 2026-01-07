@@ -18,18 +18,19 @@ impl<C: Config> Engine<C> {
         backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
     ) {
         let backward_edges =
-            self.computation_graph.get_backward_edges(current_query_id);
+            self.get_backward_edges(current_query_id, caller_information).await;
 
-        let backward_projections = backward_edges
-            .iter()
-            .map(|x| *x)
-            .filter(|x| {
-                let query_kind =
-                    self.computation_graph.get_query_kind(*x).unwrap();
+        let mut backward_projections = Vec::new();
+        for query_id in &backward_edges {
+            let query_kind = self
+                .get_query_kind(*query_id, caller_information)
+                .await
+                .unwrap();
 
-                query_kind.is_projection()
-            })
-            .collect::<Vec<_>>();
+            if query_kind.is_projection() {
+                backward_projections.push(*query_id);
+            }
+        }
 
         let expected_parallelism = available_parallelism()
             .map_or_else(|_| 1, std::num::NonZero::get)
@@ -87,8 +88,8 @@ impl<C: Config> Engine<C> {
         loop {
             // no more pending backward projection
             if self
-                .computation_graph
-                .get_pending_backward_projection(query_id)
+                .get_pending_backward_projection(query_id, caller_information)
+                .await
                 .is_none_or(|x| x != caller_information.timestamp())
             {
                 return;

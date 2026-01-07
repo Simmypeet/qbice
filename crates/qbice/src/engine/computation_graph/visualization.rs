@@ -101,7 +101,10 @@ use std::{
 
 use crate::{
     config::Config,
-    engine::Engine,
+    engine::{
+        Engine,
+        computation_graph::{CallerInformation, caller::CallerKind},
+    },
     query::{Query, QueryID},
 };
 
@@ -196,7 +199,14 @@ impl<C: Config> Engine<C> {
     /// # }
     /// ```
     #[must_use]
-    fn snapshot_graph_from<Q: Query>(&mut self, query: &Q) -> GraphSnapshot {
+    async fn snapshot_graph_from<Q: Query>(
+        &mut self,
+        query: &Q,
+    ) -> GraphSnapshot {
+        let caller = CallerInformation::new(CallerKind::Tracing, unsafe {
+            self.get_current_timestamp_unchecked()
+        });
+
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         let mut visited: HashSet<QueryID> = HashSet::new();
@@ -215,8 +225,8 @@ impl<C: Config> Engine<C> {
 
             // Get the query meta
             let (Some(kind), Some(forward_edge)) = (
-                self.computation_graph.get_query_kind(current_id),
-                self.computation_graph.get_forward_edges_order(current_id),
+                self.get_query_kind(current_id, &caller).await,
+                self.get_forward_edges_order(current_id, &caller).await,
             ) else {
                 continue;
             };
@@ -324,12 +334,12 @@ impl<C: Config> Engine<C> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn visualize_html<Q: Query>(
+    pub async fn visualize_html<Q: Query>(
         &mut self,
         query: &Q,
         output_path: impl AsRef<Path>,
     ) -> std::io::Result<()> {
-        let snapshot = self.snapshot_graph_from(query);
+        let snapshot = self.snapshot_graph_from(query).await;
         write_html_visualization(&snapshot, output_path)
     }
 }

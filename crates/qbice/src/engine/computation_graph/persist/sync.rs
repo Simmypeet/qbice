@@ -11,7 +11,7 @@ use qbice_storage::{
 use crate::{
     Config, Engine, Query,
     engine::computation_graph::{
-        CallerInformation, ComputationGraph, QueryKind,
+        CallerInformation, QueryKind,
         persist::{
             BackwardEdge, ForwardEdgeObservation, ForwardEdgeOrder,
             LastVerified, NodeInfo, Observation, PendingBackwardProjection,
@@ -191,66 +191,222 @@ impl<C: Config> Engine<C> {
     }
 }
 
-impl<C: Config> ComputationGraph<C> {
-    pub fn get_forward_edges_order(
+impl<C: Config> Engine<C> {
+    pub(in crate::engine::computation_graph) async fn get_forward_edges_order(
+        &self,
+        query_id: QueryID,
+        caller_information: &CallerInformation,
+    ) -> Option<Arc<[QueryID]>> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .query_node
+                    .get_normal::<ForwardEdgeOrder>(query_id)
+                    .map(|x| x.0.clone());
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_forward_edge_observations(
+        &self,
+        query_id: QueryID,
+        caller_information: &CallerInformation,
+    ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .query_node
+                    .get_normal::<ForwardEdgeObservation<C>>(query_id)
+                    .map(|x| x.0.clone());
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_node_info(
+        &self,
+        query_id: QueryID,
+        caller_information: &CallerInformation,
+    ) -> Option<NodeInfo> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .query_node
+                    .get_normal::<NodeInfo>(query_id)
+                    .map(|x| x.clone());
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_query_kind(
+        &self,
+        query_id: QueryID,
+        caller_information: &CallerInformation,
+    ) -> Option<QueryKind> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .query_node
+                    .get_normal::<QueryKind>(query_id)
+                    .map(|x| *x);
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_last_verified(
+        &self,
+        query_id: QueryID,
+        caller_information: &CallerInformation,
+    ) -> Option<Timestamp> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .query_node
+                    .get_normal::<LastVerified>(query_id)
+                    .map(|x| x.0);
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_backward_edges(
+        &self,
+        query_id: QueryID,
+        caller_information: &CallerInformation,
+    ) -> BackwardEdge<C> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .backward_edges
+                    .get_set(&query_id)
+                    .clone();
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_query_result<
+        Q: Query,
+    >(
+        &self,
+        query_input_hash_128: Compact128,
+        caller_information: &CallerInformation,
+    ) -> Option<Q::Value> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .query_store
+                    .get_normal::<QueryResult<Q>>(query_input_hash_128)
+                    .map(|x| x.0.clone());
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_pending_backward_projection(
+        &self,
+        query_id: QueryID,
+        caller_information: &CallerInformation,
+    ) -> Option<Timestamp> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .query_node
+                    .get_normal::<PendingBackwardProjection>(query_id)
+                    .map(|x| x.0);
+            }
+        }
+
+        self.cancel().await
+    }
+
+    pub(in crate::engine::computation_graph) unsafe fn get_forward_edges_order_unchecked(
         &self,
         query_id: QueryID,
     ) -> Option<Arc<[QueryID]>> {
-        self.persist
+        self.computation_graph
+            .persist
             .query_node
             .get_normal::<ForwardEdgeOrder>(query_id)
             .map(|x| x.0.clone())
     }
 
-    pub fn get_forward_edge_observations(
+    pub(in crate::engine::computation_graph) unsafe fn get_backward_edges_unchecked(
         &self,
         query_id: QueryID,
-    ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
-        self.persist
-            .query_node
-            .get_normal::<ForwardEdgeObservation<C>>(query_id)
-            .map(|x| x.0.clone())
+    ) -> BackwardEdge<C> {
+        self.computation_graph.persist.backward_edges.get_set(&query_id).clone()
     }
 
-    pub fn get_node_info(&self, query_id: QueryID) -> Option<NodeInfo> {
-        self.persist
+    pub(in crate::engine::computation_graph) unsafe fn get_query_kind_unchecked(
+        &self,
+        query_id: QueryID,
+    ) -> Option<QueryKind> {
+        self.computation_graph
+            .persist
+            .query_node
+            .get_normal::<QueryKind>(query_id)
+            .map(|x| *x)
+    }
+
+    pub(in crate::engine::computation_graph) unsafe fn get_node_info_unchecked(
+        &self,
+        query_id: QueryID,
+    ) -> Option<NodeInfo> {
+        self.computation_graph
+            .persist
             .query_node
             .get_normal::<NodeInfo>(query_id)
             .map(|x| x.clone())
-    }
-
-    pub fn get_query_kind(&self, query_id: QueryID) -> Option<QueryKind> {
-        self.persist.query_node.get_normal::<QueryKind>(query_id).map(|x| *x)
-    }
-
-    pub fn get_last_verified(&self, query_id: QueryID) -> Option<Timestamp> {
-        self.persist
-            .query_node
-            .get_normal::<LastVerified>(query_id)
-            .map(|x| x.0)
-    }
-
-    pub fn get_backward_edges(&self, query_id: QueryID) -> BackwardEdge<C> {
-        self.persist.backward_edges.get_set(&query_id).clone()
-    }
-
-    pub fn get_query_result<Q: Query>(
-        &self,
-        query_input_hash_128: Compact128,
-    ) -> Option<Q::Value> {
-        self.persist
-            .query_store
-            .get_normal::<QueryResult<Q>>(query_input_hash_128)
-            .map(|x| x.0.clone())
-    }
-
-    pub fn get_pending_backward_projection(
-        &self,
-        query_id: QueryID,
-    ) -> Option<Timestamp> {
-        self.persist
-            .query_node
-            .get_normal::<PendingBackwardProjection>(query_id)
-            .map(|x| x.0)
     }
 }

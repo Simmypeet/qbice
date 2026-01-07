@@ -19,7 +19,7 @@ impl<C: Config> Engine<C> {
         }
 
         let backward_edges =
-            self.computation_graph.get_backward_edges(query_id);
+            unsafe { self.get_backward_edges_unchecked(query_id) };
 
         self.rayon_thread_pool.install(|| {
             backward_edges.par_iter().for_each(|id| {
@@ -31,10 +31,9 @@ impl<C: Config> Engine<C> {
                     *tx.write(),
                 );
 
-                let query_kind = self
-                    .computation_graph
-                    .get_query_kind(caller_query_id)
-                    .unwrap();
+                let query_kind = unsafe {
+                    self.get_query_kind_unchecked(caller_query_id).unwrap()
+                };
 
                 // if this is a firewall node or projection node, then we stop
                 // propagation here.

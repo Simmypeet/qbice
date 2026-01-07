@@ -120,8 +120,8 @@ impl<C: Config> Engine<C> {
         } else {
             // check if we have the existing query info
             let (Some(query_info), Some(last_verified)) = (
-                self.computation_graph.get_node_info(query_id),
-                self.computation_graph.get_last_verified(query_id),
+                self.get_node_info(query_id, caller).await,
+                self.get_last_verified(query_id, caller).await,
             ) else {
                 return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
             };
@@ -148,8 +148,8 @@ impl<C: Config> Engine<C> {
 
                     return Ok(FastPathResult::TryAgain);
                 } else if self
-                    .computation_graph
-                    .get_pending_backward_projection(query_id)
+                    .get_pending_backward_projection(query_id, caller)
+                    .await
                     .is_some_and(|x| x == caller.timestamp())
                 {
                     return Ok(FastPathResult::ToSlowPath(
@@ -161,8 +161,8 @@ impl<C: Config> Engine<C> {
             // gets the result
             let query_result = if caller.require_value() {
                 let Some(query_result) = self
-                    .computation_graph
-                    .get_query_result::<Q>(query_id.hash_128().into())
+                    .get_query_result::<Q>(query_id.hash_128().into(), caller)
+                    .await
                 else {
                     return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
                 };
@@ -172,15 +172,16 @@ impl<C: Config> Engine<C> {
                 None
             };
 
-            if let Some(caller) = caller.has_a_caller_requiring_value() {
-                let kind =
-                    self.computation_graph.get_query_kind(query_id).unwrap();
+            if let Some(caller_requiring_value) =
+                caller.has_a_caller_requiring_value()
+            {
+                let kind = self.get_query_kind(query_id, caller).await.unwrap();
 
                 self.observe_callee_fingerprint(
                     &query_info,
                     query_id,
                     kind,
-                    *caller,
+                    *caller_requiring_value,
                 );
             }
 

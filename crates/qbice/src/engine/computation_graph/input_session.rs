@@ -149,7 +149,7 @@ impl<C: Config> InputSession<'_, C> {
         // has prior node infos, check for fingerprint diff
         // also, unwire the backward edges (if any)
         if let Some(node_info) =
-            self.engine.computation_graph.get_node_info(query_id)
+            unsafe { self.engine.get_node_info_unchecked(query_id) }
         {
             let fingerprint_diff =
                 node_info.value_fingerprint() != query_value_fingerprint;
