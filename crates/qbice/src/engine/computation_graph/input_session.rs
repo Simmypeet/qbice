@@ -10,7 +10,6 @@ use crate::{
 
 pub struct InputSession<'x, C: Config> {
     engine: &'x Engine<C>,
-    incremented: bool,
     dirty_batch: VecDeque<QueryID>,
     transaction: Option<WriterBufferWithLock<'x, C>>,
 }
@@ -37,7 +36,6 @@ impl<C: Config> std::fmt::Debug for InputSession<'_, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InputSession")
             .field("engine", self.engine)
-            .field("incremented", &self.incremented)
             .field("dirty_batch", &self.dirty_batch)
             .finish_non_exhaustive()
     }
@@ -83,30 +81,30 @@ impl<C: Config> Engine<C> {
     /// }
     /// ```
     ///
-    /// # Performance Considerations
+    /// # Cancellation and Timestamp Management
     ///
-    /// - **Batching**: All changes in a single session share one timestamp
-    ///   increment
-    /// - **Unchanged values**: If a value's fingerprint matches the existing
-    ///   one, no dirty propagation occurs
-    /// - **Parallel propagation**: Dirty propagation uses the Rayon thread pool
-    ///   for parallelism
+    /// The input session increments the global timestamp when it's created. If
+    /// there're any other running queries, they will **stuck** in the pending
+    /// loop forever. This signifies that the old running queries are no longer
+    /// valid and must be dropped.
     ///
-    /// # Mutable Access Requirement
+    /// # Deadlocks
     ///
-    /// This method requires `&mut self` to ensure exclusive access during
-    /// input modification. You cannot create an input session while:
-    /// - A `TrackedEngine` exists (holds `Arc` reference)
-    /// - Another input session is active
-    ///
-    /// Use `Arc::get_mut` if you need to modify inputs while keeping the
-    /// engine in an `Arc`.
+    /// There can only be one active input session at a time. Attempting to
+    /// create a new session while another is active will result in a
+    /// deadlock.
     #[must_use]
-    pub fn input_session(&mut self) -> InputSession<'_, C> {
+    pub fn input_session(&self) -> InputSession<'_, C> {
+        // acquire a write lock on the write buffer and increment timestamp
+        let mut write_buffer_with_lock =
+            self.new_write_buffer_with_write_lock();
+        unsafe {
+            self.increment_timestamp(&mut write_buffer_with_lock);
+        }
+
         InputSession {
-            incremented: false,
             dirty_batch: VecDeque::new(),
-            transaction: Some(self.new_write_buffer_with_write_lock()),
+            transaction: Some(write_buffer_with_lock),
             engine: self,
         }
     }
@@ -154,30 +152,9 @@ impl<C: Config> InputSession<'_, C> {
             let fingerprint_diff =
                 node_info.value_fingerprint() != query_value_fingerprint;
 
-            if fingerprint_diff && !self.incremented {
-                unsafe {
-                    self.engine.increment_timestamp(
-                        self.transaction.as_mut().unwrap(),
-                    );
-                }
-
-                self.incremented = true;
-            }
-
+            // only dirty propagate if the fingerprint differs
             if fingerprint_diff {
                 self.dirty_batch.push_back(query_id);
-            }
-        } else {
-            // if the query does not exist yet, we need to create a new node
-            // info
-            if !self.incremented {
-                unsafe {
-                    self.engine.increment_timestamp(
-                        self.transaction.as_mut().unwrap(),
-                    );
-                }
-
-                self.incremented = true;
             }
         }
 
