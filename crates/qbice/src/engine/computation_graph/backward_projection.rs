@@ -1,5 +1,7 @@
 use std::{sync::Arc, thread::available_parallelism};
 
+use tokio::task::JoinSet;
+
 use crate::{
     Engine,
     config::Config,
@@ -41,14 +43,14 @@ impl<C: Config> Engine<C> {
             1,
         );
 
-        let mut handles = Vec::new();
+        let mut join_set = JoinSet::new();
 
         let timestamp = caller_information.timestamp();
         for chunk in backward_projections.chunks(chunk_size) {
             let engine = Arc::clone(self);
             let chunk = chunk.to_vec();
 
-            handles.push(tokio::spawn(async move {
+            join_set.spawn(async move {
                 for query_id in chunk {
                     let entry =
                         engine.executor_registry.get_executor_entry_by_type_id(
@@ -66,11 +68,25 @@ impl<C: Config> Engine<C> {
                         )
                         .await;
                 }
-            }));
+            });
         }
 
-        for handle in handles {
-            let _ = handle.await;
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok(()) => {}
+
+                Err(er) => match er.try_into_panic() {
+                    Ok(panic_reason) => {
+                        std::panic::resume_unwind(panic_reason);
+                    }
+                    Err(er) => {
+                        panic!(
+                            "Backward projection task failed without \
+                             panicking: {er}"
+                        );
+                    }
+                },
+            }
         }
 
         self.done_backward_projection(
