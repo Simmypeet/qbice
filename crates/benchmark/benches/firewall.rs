@@ -344,7 +344,7 @@ async fn run(firewall: bool) {
     }
     drop(input_session);
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     tracked_engine.query(&Variance).await;
@@ -354,8 +354,7 @@ async fn run(firewall: bool) {
     // second session: switch 2 variables value (mean should remain the same)
     // avoid dirtying the `Diff` and `DiffSquared` nodes
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
 
         input_session.set_input(Variable(0), var_count as i64);
         input_session.set_input(Variable(var_count - 1), 1);
@@ -370,8 +369,7 @@ async fn run(firewall: bool) {
 
     // final session: change one variable to dirty the mean
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
 
         input_session.set_input(Variable(var_count / 2), 1);
         drop(input_session);

@@ -439,7 +439,7 @@ async fn conditional_cyclic_dependency() {
         input_session.set_input(CycleControlVariable, 5);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     // Query both A and B - they should compute normal values without cycles
@@ -458,8 +458,7 @@ async fn conditional_cyclic_dependency() {
 
     // Phase 2: Change control value to CREATE a cycle (control_value == 1)
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
 
         input_session.set_input(CycleControlVariable, 1);
     }
@@ -486,8 +485,7 @@ async fn conditional_cyclic_dependency() {
     // Phase 3: Change control value back to break the cycle (control_value !=
     // 1)
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(CycleControlVariable, 3);
     }
 
@@ -514,8 +512,7 @@ async fn conditional_cyclic_dependency() {
     // (control_value == 1)
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(CycleControlVariable, 1);
     }
 
@@ -557,7 +554,7 @@ async fn conditional_cyclic_with_dependent_query() {
         input_session.set_input(CycleControlVariable, 2);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     let result_dependent = tracked_engine.query(&DependentQuery).await;
@@ -575,8 +572,7 @@ async fn conditional_cyclic_with_dependent_query() {
 
     // Phase 2: Create cycle - dependent query should use default values
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(CycleControlVariable, 1);
     }
 
@@ -603,8 +599,7 @@ async fn conditional_cyclic_with_dependent_query() {
 
     // Phase 3: Break cycle again - dependent query should use computed values
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(CycleControlVariable, 4);
     }
 
@@ -618,8 +613,7 @@ async fn conditional_cyclic_with_dependent_query() {
     let _debug_a = tracked_engine.query(&ConditionalCyclicQueryA).await;
     let _debug_b = tracked_engine.query(&ConditionalCyclicQueryB).await;
 
-    let result_dependent_normal =
-        tracked_engine.query(&DependentQuery).await;
+    let result_dependent_normal = tracked_engine.query(&DependentQuery).await;
 
     // DependentQuery = A + B + 100 = (4*100) + (4*200) + 100 = 400 + 800 + 100
     // = 1300

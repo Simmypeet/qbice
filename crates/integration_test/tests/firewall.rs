@@ -149,7 +149,7 @@ async fn firewall() {
         input_session.set_input(Variable(0), 3);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -166,8 +166,7 @@ async fn firewall() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
 
         input_session.set_input(Variable(0), -3);
     }
@@ -194,8 +193,7 @@ async fn firewall() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
 
         input_session.set_input(Variable(0), 4);
     }
@@ -366,7 +364,7 @@ async fn chained_firewalls() {
         input_session.set_input(Variable(0), 50);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -382,8 +380,7 @@ async fn chained_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), -50);
     }
 
@@ -410,8 +407,7 @@ async fn chained_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 80);
     }
 
@@ -440,8 +436,7 @@ async fn chained_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 150);
     }
 
@@ -467,8 +462,7 @@ async fn chained_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 200);
     }
 
@@ -566,7 +560,7 @@ async fn diamond_dependency_with_firewalls() {
         input_session.set_input(Variable(1), 4);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -583,8 +577,7 @@ async fn diamond_dependency_with_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), -3);
     }
 
@@ -605,8 +598,7 @@ async fn diamond_dependency_with_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(1), -4);
     }
 
@@ -627,8 +619,7 @@ async fn diamond_dependency_with_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 5);
     }
 
@@ -755,7 +746,7 @@ async fn firewall_multiple_callers() {
         input_session.set_input(Variable(0), 3);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     // Query both consumers
@@ -776,8 +767,7 @@ async fn firewall_multiple_callers() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), -3);
     }
 
@@ -796,8 +786,7 @@ async fn firewall_multiple_callers() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 5);
     }
 
@@ -890,7 +879,7 @@ async fn firewall_conditional_dependency() {
         input_session.set_input(Variable(1), 3); // value
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -910,8 +899,7 @@ async fn firewall_conditional_dependency() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(1), -3);
     }
 
@@ -935,8 +923,7 @@ async fn firewall_conditional_dependency() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 0);
         input_session.set_input(Variable(1), 4);
     }
@@ -969,8 +956,7 @@ async fn firewall_conditional_dependency() {
     drop(tracked_engine);
 
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(1), 100);
     }
 
@@ -1019,7 +1005,7 @@ async fn firewall_dirty_propagation_on_change() {
         input_session.set_input(Variable(0), 2);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -1037,8 +1023,7 @@ async fn firewall_dirty_propagation_on_change() {
 
     // Change to 3 - firewall output changes
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 3);
     }
 
@@ -1062,8 +1047,7 @@ async fn firewall_dirty_propagation_on_change() {
 
     // Change to -3 - firewall output unchanged
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), -3);
     }
 

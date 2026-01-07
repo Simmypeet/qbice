@@ -269,7 +269,7 @@ async fn double_square_summing() {
         input_session.set_input(VariableTarget, Arc::from(target_vars));
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     // 1^2 = 1
@@ -295,8 +295,7 @@ async fn double_square_summing() {
 
     // Change the `Variable(0)` to 10
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 10);
     }
 
@@ -373,7 +372,7 @@ async fn multiple_projections_single_firewall() {
         input_session.set_input(VariableTarget, Arc::from(target_vars));
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
 
     // Query all three projections
     {
@@ -395,8 +394,7 @@ async fn multiple_projections_single_firewall() {
 
     // Change Variable(0) only
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 10);
     }
 
@@ -628,7 +626,7 @@ async fn diamond_projection_pattern() {
         }
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
 
     // Query the combiner
     {
@@ -645,8 +643,7 @@ async fn diamond_projection_pattern() {
     // Change Variable(2) - neither projection depends on this directly
     // but firewall does
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(2), 100);
     }
 
@@ -682,8 +679,7 @@ async fn diamond_projection_pattern() {
 
     // Now change Variable(0) which DOES affect proj1(0)
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 50);
     }
 
@@ -858,7 +854,7 @@ async fn firewall_same_output_no_propagation() {
         input_session.set_input(Variable(1), 5_i64);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
 
     // Initial query
     {
@@ -873,8 +869,7 @@ async fn firewall_same_output_no_propagation() {
 
     // Change Variable(0)=3, Variable(1)=7 - sum still equals 10!
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 3_i64);
         input_session.set_input(Variable(1), 7_i64);
     }
@@ -1159,7 +1154,7 @@ async fn nested_firewall_with_projection() {
         input_session.set_input(Variable(0), 5_i64);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
 
     // Initial query
     // Variable(0)=5 -> Outer=10 -> Inner=20 -> Proj=60 -> Consumer=1060
@@ -1176,8 +1171,7 @@ async fn nested_firewall_with_projection() {
 
     // Change input
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 10_i64);
     }
 
@@ -1421,7 +1415,7 @@ async fn projection_with_two_firewalls() {
         input_session.set_input(Variable(1), 10_i64);
     }
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
 
     // Initial query
     // FirewallA: 5*2=10, FirewallB: 10*3=30, Proj: 10+30=40, Consumer:
@@ -1441,8 +1435,7 @@ async fn projection_with_two_firewalls() {
     // Test Case 1: Change only Variable(0) - only FirewallA should recompute
     // =========================================================================
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 10_i64);
     }
 
@@ -1472,8 +1465,7 @@ async fn projection_with_two_firewalls() {
     // Test Case 2: Change only Variable(1) - only FirewallB should recompute
     // =========================================================================
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(1), 20_i64);
     }
 
@@ -1504,8 +1496,7 @@ async fn projection_with_two_firewalls() {
     // Test Case 3: Change BOTH Variable(0) and Variable(1)
     // =========================================================================
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 15_i64);
         input_session.set_input(Variable(1), 25_i64);
     }
@@ -1542,8 +1533,7 @@ async fn projection_with_two_firewalls() {
     // recomputation
     // =========================================================================
     {
-        let input_session =
-            &mut Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         // Set to same value - should not trigger any recomputation
         input_session.set_input(Variable(0), 15_i64);
     }

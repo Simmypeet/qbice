@@ -405,7 +405,7 @@ async fn cancellation_with_partial_dependencies() {
     input_session.set_input(Variable(2), 30);
     drop(input_session);
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     // Cancel after querying 2 dependencies
@@ -428,8 +428,7 @@ async fn cancellation_with_partial_dependencies() {
 
     // change the Variable(0) which should have been queried
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 15);
     }
 
@@ -510,7 +509,7 @@ async fn cancellation_during_repair() {
     input_session.set_input(Variable(0), 100);
     drop(input_session);
 
-    let mut engine = Arc::new(engine);
+    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     // First, compute the query successfully
@@ -524,8 +523,7 @@ async fn cancellation_during_repair() {
 
     // Change the input to trigger repair
     {
-        let mut input_session =
-            Arc::get_mut(&mut engine).unwrap().input_session();
+        let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 200);
     }
 
