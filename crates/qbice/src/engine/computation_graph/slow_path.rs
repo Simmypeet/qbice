@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
 use parking_lot::RwLock;
 
@@ -25,6 +26,24 @@ pub enum ExecuteQueryFor {
     RecomputeQuery,
 }
 
+pub struct GuardedTrackedEngine<C: Config> {
+    tracked_engine: TrackedEngine<C>,
+}
+
+impl<C: Config> GuardedTrackedEngine<C> {
+    pub const fn tracked_engine(&self) -> &TrackedEngine<C> {
+        &self.tracked_engine
+    }
+}
+
+impl<C: Config> Drop for GuardedTrackedEngine<C> {
+    fn drop(&mut self) {
+        if let Some(wait_group) = self.tracked_engine.caller.get_wait_group() {
+            wait_group.wait();
+        }
+    }
+}
+
 impl<C: Config> Engine<C> {
     pub(super) async fn execute_query<Q: Query>(
         self: &Arc<Self>,
@@ -36,44 +55,32 @@ impl<C: Config> Engine<C> {
         // create a new tracked engine
         let cache = Arc::new(DashSet::default());
 
-        let mut tracked_engine = TrackedEngine {
+        let wait_group = WaitGroup::new();
+
+        let tracked_engine = TrackedEngine {
             engine: self.clone(),
             cache: cache.clone(),
             caller: CallerInformation::new(
                 CallerKind::Query(QueryCaller::new(
                     query.id,
-                    CallerReason::RequireValue,
+                    CallerReason::RequireValue(Some(wait_group)),
                 )),
                 caller_information.timestamp(),
             ),
         };
+        let guarded_tracked_engine = GuardedTrackedEngine { tracked_engine };
 
         let entry = self.executor_registry.get_executor_entry::<Q>();
 
-        let result =
-            entry.invoke_executor::<Q>(query.query, &mut tracked_engine).await;
+        let result = entry
+            .invoke_executor::<Q>(query.query, &guarded_tracked_engine)
+            .await;
 
-        // use the `cache`'s strong count to determine if the tracked
-        // engine is still held elsewhere other than the
-        // current call stack.
-        //
-        // if there're still references to the `TrackedEngine`, it means
-        // that there's some dangling references to the
-        // `TrackedEngine` on some other threads that
-        // the implementation of the query is not aware of.
-        //
-        // in this case, we'll panic to avoid silent bugs in the query
-        // implementation.
-        assert!(
-            // 2 one for aliving tracked engine, and one for cache
-            Arc::strong_count(&tracked_engine.cache) == 2,
-            "`TrackedEngine` is still held elsewhere, this is a bug in the \
-             query implementation which violates the query system's contract. \
-             It's possible that the `TrackedEngine` is being sent to a \
-             different thread and the query implementation hasn't properly \
-             joined the thread before returning the value. Key: `{}`",
-            std::any::type_name::<Q>()
-        );
+        // WAIT POINT: We must wait all the potentially spawned threads that
+        // might hold references to the tracked engine to finish before
+        // proceeding, to ensure that there are no more references that can
+        // modify the query's state.
+        drop(guarded_tracked_engine);
 
         let is_in_scc =
             self.computation_graph.lock.get_lock(query.id).is_in_scc();

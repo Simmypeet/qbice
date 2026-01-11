@@ -6,6 +6,7 @@ use dashmap::DashSet;
 pub(crate) use persist::QueryDebug;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHasher};
+pub(crate) use slow_path::GuardedTrackedEngine;
 
 use crate::{
     Engine, ExecutionStyle, Query,
@@ -265,7 +266,7 @@ impl<C: Config> Clone for TrackedEngine<C> {
         Self {
             engine: Arc::clone(&self.engine),
             cache: Arc::clone(&self.cache),
-            caller: self.caller,
+            caller: self.caller.clone(),
         }
     }
 }

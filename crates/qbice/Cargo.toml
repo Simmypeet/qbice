@@ -39,6 +39,7 @@ crossbeam-utils.workspace = true
 fxhash.workspace = true
 rayon.workspace = true
 futures.workspace = true
+crossbeam.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

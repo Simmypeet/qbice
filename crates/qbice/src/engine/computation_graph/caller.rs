@@ -1,12 +1,14 @@
+use crossbeam::sync::WaitGroup;
+
 use crate::{engine::computation_graph::persist::Timestamp, query::QueryID};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum CallerReason {
-    RequireValue,
+    RequireValue(Option<WaitGroup>),
     Repair,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct QueryCaller {
     query_id: QueryID,
     reason: CallerReason,
@@ -18,7 +20,7 @@ impl QueryCaller {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CallerInformation {
     kind: CallerKind,
     timestamp: Timestamp,
@@ -27,6 +29,20 @@ pub struct CallerInformation {
 impl CallerInformation {
     pub const fn new(kind: CallerKind, timestamp: Timestamp) -> Self {
         Self { kind, timestamp }
+    }
+
+    pub const fn get_wait_group(&mut self) -> Option<WaitGroup> {
+        match &mut self.kind {
+            CallerKind::RepairFirewall { .. }
+            | CallerKind::BackwardProjectionPropagation
+            | CallerKind::Tracing
+            | CallerKind::User => None,
+
+            CallerKind::Query(q) => match &mut q.reason {
+                CallerReason::RequireValue(wait_group) => wait_group.take(),
+                CallerReason::Repair => None,
+            },
+        }
     }
 
     pub const fn get_caller(&self) -> Option<QueryID> {
@@ -48,7 +64,7 @@ impl CallerInformation {
 
             CallerKind::User => true,
             CallerKind::Query(q) => {
-                matches!(q.reason, CallerReason::RequireValue)
+                matches!(q.reason, CallerReason::RequireValue { .. })
             }
         }
     }
@@ -62,7 +78,7 @@ impl CallerInformation {
             | CallerKind::BackwardProjectionPropagation => None,
 
             CallerKind::Query(q) => {
-                matches!(q.reason, CallerReason::RequireValue)
+                matches!(q.reason, CallerReason::RequireValue { .. })
                     .then_some(&q.query_id)
             }
         }
@@ -73,7 +89,7 @@ impl CallerInformation {
     pub const fn kind(&self) -> &CallerKind { &self.kind }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum CallerKind {
     User,
     Query(QueryCaller),

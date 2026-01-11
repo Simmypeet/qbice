@@ -50,6 +50,7 @@ crossbeam-deque = "0.8.4"
 fjall = "3.0.1"
 criterion = { version = "0.8.0", features = ["async_tokio"] }
 tokio-util = "0.7.18"
+crossbeam = "0.8.4"
 
 [workspace.lints.rust]
 missing_docs = "deny"

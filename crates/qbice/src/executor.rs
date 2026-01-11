@@ -22,7 +22,9 @@ use qbice_stable_type_id::StableTypeID;
 use crate::{
     Engine, TrackedEngine,
     config::Config,
-    engine::computation_graph::{CallerInformation, QueryDebug},
+    engine::computation_graph::{
+        CallerInformation, GuardedTrackedEngine, QueryDebug,
+    },
     query::{ExecutionStyle, Query},
 };
 
@@ -396,7 +398,7 @@ fn invoke_executor<
 >(
     key: &'a dyn Any,
     executor: &'a dyn Any,
-    engine: &'a mut TrackedEngine<C>,
+    engine: &'a GuardedTrackedEngine<C>,
     result: &'a mut (dyn Any + Send),
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     let key = key.downcast_ref::<K>().expect("Key type mismatch");
@@ -407,10 +409,11 @@ fn invoke_executor<
         let result_buffer: &mut MaybeUninit<Result<K::Value, Panicked>> =
             result.downcast_mut().expect("Result type mismatch");
 
-        let result = AssertUnwindSafe(executor.execute(key, engine))
-            .catch_unwind()
-            .await
-            .map_err(Panicked);
+        let result =
+            AssertUnwindSafe(executor.execute(key, engine.tracked_engine()))
+                .catch_unwind()
+                .await
+                .map_err(Panicked);
 
         // SAFETY: we're initializing the buffer here
         result_buffer.write(result);
@@ -421,7 +424,7 @@ type InvokeExecutorFn<C> =
     for<'a> fn(
         key: &'a dyn Any,
         executor: &'a dyn Any,
-        engine: &'a mut TrackedEngine<C>,
+        engine: &'a GuardedTrackedEngine<C>,
         result: &'a mut (dyn Any + Send),
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
@@ -492,7 +495,7 @@ impl<C: Config> Entry<C> {
     pub async fn invoke_executor<Q: Query>(
         &self,
         query_key: &Q,
-        engine: &mut TrackedEngine<C>,
+        engine: &GuardedTrackedEngine<C>,
     ) -> Result<Q::Value, Panicked> {
         let mut result_buffer =
             MaybeUninit::<Result<Q::Value, Panicked>>::uninit();

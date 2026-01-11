@@ -204,9 +204,10 @@ impl<C: Config> Engine<C> {
         // if the caller is backward projection propagation, we always
         // recompute since the projection query have already told us
         // that the value is required to be recomputed.
-        if *caller_information.kind()
-            == CallerKind::BackwardProjectionPropagation
-        {
+        if matches!(
+            caller_information.kind(),
+            CallerKind::BackwardProjectionPropagation
+        ) {
             return Some(lock_guard);
         }
 
