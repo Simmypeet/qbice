@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-21264dc2.js";
+            window.path_to_searchindex_js = "../searchindex-e0492d05.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-40332333.js"></script>
@@ -338,37 +338,25 @@ impl&lt;C: Config&gt; Executor&lt;GetFunctionType, C&gt; for GetFunctionTypeExec
 </ol>
 <p>This ensures correctness while limiting dirty propagation.</p>
 <h2 id="when-to-use-firewalls"><a class="header" href="#when-to-use-firewalls">When to Use Firewalls</a></h2>
-<p>Use firewalls when a query is:</p>
-<ol>
-<li><strong>Expensive to compute</strong> - So recomputation should be avoided</li>
-<li><strong>Has many dependents</strong> - Creates a chokepoint</li>
-<li><strong>Changes infrequently</strong> - Most input changes don’t affect the result</li>
-<li><strong>Produces large results</strong> - But downstream queries read small parts</li>
-</ol>
+<p>Firewall is best when there are many dependents on the firewall query, making
+dirty propagation traversing large portions of the graph costly.</p>
 <h2 id="when-not-to-use-firewalls"><a class="header" href="#when-not-to-use-firewalls">When NOT to Use Firewalls</a></h2>
 <p>Avoid firewalls when:</p>
 <ol>
-<li><strong>Query is cheap</strong> - Overhead of firewall logic isn’t worth it</li>
+<li><strong>Too much firewalls</strong> - Extra memory overhead for maintaining firewall edges</li>
 <li><strong>Few dependents</strong> - No chokepoint exists</li>
-<li><strong>Frequently changes</strong> - Firewall won’t prevent much dirty propagation</li>
-<li><strong>Small result</strong> - Downstream queries read everything anyway</li>
 </ol>
 <h2 id="trade-offs"><a class="header" href="#trade-offs">Trade-offs</a></h2>
 <h3 id="benefits"><a class="header" href="#benefits">Benefits</a></h3>
 <ul>
 <li><strong>Reduced dirty propagation</strong> - Potentially thousands of queries stay clean</li>
 <li><strong>Fewer verifications</strong> - Less work during repairation</li>
-<li><strong>Selective invalidation</strong> - Only truly affected queries recompute</li>
 </ul>
 <h3 id="costs"><a class="header" href="#costs">Costs</a></h3>
 <ul>
-<li><strong>Extra recomputation</strong> - Firewall recomputed even if result doesn’t change</li>
 <li><strong>Increased complexity</strong> - More complex dependency tracking</li>
 <li><strong>Memory overhead</strong> - Transitive firewall edges stored</li>
 </ul>
-<p>The trade-off is worth it when:</p>
-<pre><code>Cost of extra firewall recomputation &lt; Cost of verifying many downstream queries
-</code></pre>
 <h1 id="projection-queries"><a class="header" href="#projection-queries">Projection Queries</a></h1>
 <p><strong>Projection queries</strong> work together with firewall queries to provide fine-grained change detection. They solve the over-invalidation problem by reading specific slices of large firewall results.</p>
 <h2 id="the-problem-over-invalidation"><a class="header" href="#the-problem-over-invalidation">The Problem: Over-Invalidation</a></h2>
