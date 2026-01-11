@@ -181,10 +181,8 @@ impl<C: Config> ComputationGraph<C> {
 /// // 2. Drop to release Arc reference
 /// drop(tracked);
 ///
-/// // 3. Get mutable access to update inputs
-/// let engine = Arc::get_mut(&mut engine_arc)
-///     .expect("no other references exist");
-/// let mut session = engine.input_session();
+/// // 3. Modify inputs
+/// let mut session = engine_arc.input_session();
 /// session.set_input(input_query, new_value);
 /// drop(session);
 ///
@@ -338,10 +336,10 @@ impl<C: Config> Engine<C> {
     /// // 3. Drop TrackedEngine to release Arc reference
     /// drop(tracked);
     ///
-    /// // 4. Modify inputs (requires exclusive access)
-    /// let engine_mut = Arc::try_unwrap(engine)
-    ///     .unwrap_or_else(|arc| panic!("other references exist"));
-    /// // or use Arc::get_mut if keeping the Arc
+    /// // 4. Modify inputs
+    /// let mut session = engine.input_session();
+    /// session.set_input(input_query, new_value);
+    /// drop(session);
     /// ```
     #[must_use]
     pub fn tracked(self: Arc<Self>) -> TrackedEngine<C> {

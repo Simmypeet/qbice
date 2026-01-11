@@ -77,8 +77,7 @@
 //!     drop(tracked);
 //!
 //!     // Generate visualization
-//!     let engine_mut = Arc::get_mut(&mut engine).unwrap();
-//!     engine_mut.visualize_html(&query, "dependency_graph.html")?;
+//!     engine.visualize_html(&query, "dependency_graph.html")?;
 //!
 //!     Ok(())
 //! }
@@ -199,10 +198,7 @@ impl<C: Config> Engine<C> {
     /// # }
     /// ```
     #[must_use]
-    async fn snapshot_graph_from<Q: Query>(
-        &mut self,
-        query: &Q,
-    ) -> GraphSnapshot {
+    async fn snapshot_graph_from<Q: Query>(&self, query: &Q) -> GraphSnapshot {
         let caller = CallerInformation::new(CallerKind::Tracing, unsafe {
             self.get_current_timestamp_unchecked()
         });
@@ -335,7 +331,7 @@ impl<C: Config> Engine<C> {
     /// # }
     /// ```
     pub async fn visualize_html<Q: Query>(
-        &mut self,
+        &self,
         query: &Q,
         output_path: impl AsRef<Path>,
     ) -> std::io::Result<()> {

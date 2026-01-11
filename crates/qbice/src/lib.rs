@@ -148,16 +148,16 @@
 //!         &self,
 //!         query: &Divide,
 //!         engine: &TrackedEngine<C>,
-//!     ) -> Result<i32, CyclicError> {
+//!     ) -> i32 {
 //!         // increment the call count
 //!         self.0.fetch_add(1, Ordering::SeqCst);
 //!
-//!         let num = engine.query(&query.numerator).await?;
-//!         let denom = engine.query(&query.denominator).await?;
+//!         let num = engine.query(&query.numerator).await;
+//!         let denom = engine.query(&query.denominator).await;
 //!
 //!         assert!(denom != 0, "denominator should not be zero");
 //!
-//!         Ok(num / denom)
+//!         num / denom
 //!     }
 //! }
 //!
@@ -168,23 +168,23 @@
 //!         &self,
 //!         query: &SafeDivide,
 //!         engine: &TrackedEngine<C>,
-//!     ) -> Result<Option<i32>, CyclicError> {
+//!     ) -> Option<i32> {
 //!         // increment the call count
 //!         self.0.fetch_add(1, Ordering::SeqCst);
 //!
-//!         let denom = engine.query(&query.denominator).await?;
+//!         let denom = engine.query(&query.denominator).await;
 //!         if denom == 0 {
-//!             return Ok(None);
+//!             return None;
 //!         }
 //!
-//!         Ok(Some(
+//!         Some(
 //!             engine
 //!                 .query(&Divide {
 //!                     numerator: query.numerator,
 //!                     denominator: query.denominator,
 //!                 })
-//!                 .await?,
-//!         ))
+//!                 .await,
+//!         )
 //!     }
 //! }
 //!
@@ -226,7 +226,7 @@
 //!                 numerator: Variable::A,
 //!                 denominator: Variable::B,
 //!             })
-//!             .await?;
+//!             .await;
 //!
 //!         assert_eq!(result, Some(21));
 //!
@@ -262,7 +262,7 @@
 //!                 numerator: Variable::A,
 //!                 denominator: Variable::B,
 //!             })
-//!             .await?;
+//!             .await;
 //!
 //!         assert_eq!(result, Some(21));
 //!
@@ -275,9 +275,7 @@
 //!
 //!         // let's test division by zero
 //!         {
-//!             let mut input_session = Arc::get_mut(&mut engine)
-//!                 .expect("no other Arc references exist")
-//!                 .input_session();
+//!             let mut input_session = engine.input_session();
 //!
 //!             input_session.set_input(Variable::B, 0);
 //!         } // once the input session is dropped, the value is set
@@ -290,7 +288,7 @@
 //!                 numerator: Variable::A,
 //!                 denominator: Variable::B,
 //!             })
-//!             .await?;
+//!             .await;
 //!
 //!         assert_eq!(result, None);
 //!
@@ -327,7 +325,7 @@
 //!                 numerator: Variable::A,
 //!                 denominator: Variable::B,
 //!             })
-//!             .await?;
+//!             .await;
 //!
 //!         assert_eq!(result, Some(21));
 //!

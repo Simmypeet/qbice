@@ -43,7 +43,6 @@
 //!
 //! impl Config for MyConfig {
 //!     // Use larger inline storage for bigger query keys
-//!     type Storage = [u8; 64];
 //!     type Database = RocksDB;
 //!     type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
 //!     type BuildHasher = FxBuildHasher;
@@ -234,7 +233,6 @@ pub trait Config:
     /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, qbice::Identifiable)]
     /// # struct MyConfig;
     /// # impl Config for MyConfig {
-    /// #     type Storage = [u8; 16];
     /// #     type Database = qbice::storage::kv_database::rocksdb::RocksDB;
     /// #     type BuildStableHasher = qbice::stable_hash::SeededStableHasherBuilder<qbice::stable_hash::Sip128Hasher>;
     /// #     type BuildHasher = fxhash::FxBuildHasher;
@@ -252,7 +250,6 @@ pub trait Config:
     /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, qbice::Identifiable)]
     /// # struct MyConfig;
     /// # impl Config for MyConfig {
-    /// #     type Storage = [u8; 16];
     /// #     type Database = qbice::storage::kv_database::rocksdb::RocksDB;
     /// #     type BuildStableHasher = qbice::stable_hash::SeededStableHasherBuilder<qbice::stable_hash::Sip128Hasher>;
     /// #     type BuildHasher = fxhash::FxBuildHasher;
