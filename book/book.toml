@@ -1,0 +1,20 @@
+[book]
+title = "QBICE - Query-Based Incremental Computation Engine"
+authors = ["Simmypeet"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/Simmypeet/qbice"
+edit-url-template = "https://github.com/Simmypeet/qbice/edit/master/book/{path}"
+
+[output.html.fold]
+enable = true
+level = 0
+
+[output.html.playground]
+editable = true
+copyable = true
+line-numbers = true
