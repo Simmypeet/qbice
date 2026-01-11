@@ -178,21 +178,15 @@ This ensures correctness while limiting dirty propagation.
 
 ## When to Use Firewalls
 
-Use firewalls when a query is:
-
-1. **Expensive to compute** - So recomputation should be avoided
-2. **Has many dependents** - Creates a chokepoint
-3. **Changes infrequently** - Most input changes don't affect the result
-4. **Produces large results** - But downstream queries read small parts
+Firewall is best when there are many dependents on the firewall query, making
+dirty propagation traversing large portions of the graph costly.
 
 ## When NOT to Use Firewalls
 
 Avoid firewalls when:
 
-1. **Query is cheap** - Overhead of firewall logic isn't worth it
+1. **Too much firewalls** - Extra memory overhead for maintaining firewall edges
 2. **Few dependents** - No chokepoint exists
-3. **Frequently changes** - Firewall won't prevent much dirty propagation
-4. **Small result** - Downstream queries read everything anyway
 
 ## Trade-offs
 
@@ -200,19 +194,11 @@ Avoid firewalls when:
 
 - **Reduced dirty propagation** - Potentially thousands of queries stay clean
 - **Fewer verifications** - Less work during repairation
-- **Selective invalidation** - Only truly affected queries recompute
 
 ### Costs
 
-- **Extra recomputation** - Firewall recomputed even if result doesn't change
 - **Increased complexity** - More complex dependency tracking
 - **Memory overhead** - Transitive firewall edges stored
-
-The trade-off is worth it when:
-
-```
-Cost of extra firewall recomputation < Cost of verifying many downstream queries
-```
 
 # Projection Queries
 
