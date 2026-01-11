@@ -197,7 +197,7 @@ QBICE uses a monotonic timestamp system to ensure each query is verified at most
 │                        Engine<C>                                │
 │  ┌─────────────────────┐    ┌─────────────────────────────┐     │
 │  │   Query Database    │    │    Executor Registry        │     │
-│  │  - Cached values    │    │  - Query type → Executor   │     │
+│  │  - Cached values    │    │  - Query type → Executor    │     │
 │  │  - Dependencies     │    └─────────────────────────────┘     │
 │  │  - Dirty flags      │                                        │
 │  │  - Fingerprints     │                                        │
@@ -253,6 +253,7 @@ For detailed documentation, examples, and API reference:
 - **[docs.rs/qbice](https://docs.rs/qbice)** — Full API documentation with examples
 - **[GitHub Repository](https://github.com/Simmypeet/qbice)** — Source code and issues
 - **[Crates.io](https://crates.io/crates/qbice)** — Package information
+- **[Tutorials and Guides](https://simmypeet.github.io/qbice/)** — Step-by-step tutorials and advanced topics
 
 ## Requirements
 
