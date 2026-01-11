@@ -8,6 +8,14 @@
 
 QBICE is an asynchronous incremental computation framework for Rust. Define your computation as a graph of queries, and QBICE automatically determines what needs to be recomputed when inputs change—minimizing redundant work through intelligent caching and dependency tracking.
 
+## Documentation
+
+For detailed documentation, examples, and API reference, please visit:
+
+- **[docs.rs/qbice](https://docs.rs/qbice)** — Full API documentation with examples
+- **[crates.io/crates/qbice](https://crates.io/crates/qbice)** — Package information
+- **[Tutorials and Guides](https://simmypeet.github.io/qbice/)** — Step-by-step tutorials and advanced topics
+
 ## Features
 
 - **Incremental Computation** — Only recomputes what's necessary when inputs change
@@ -26,13 +34,6 @@ Add QBICE to your `Cargo.toml`:
 qbice = "0.1.0"
 tokio = { version = "1", features = ["full"] }
 ```
-
-## Documentation
-
-For detailed documentation, examples, and API reference, please visit:
-
-- **[docs.rs/qbice](https://docs.rs/qbice)** — Full API documentation with examples
-- **[crates.io/crates/qbice](https://crates.io/crates/qbice)** — Package information
 
 ## Requirements
 
