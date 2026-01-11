@@ -39,12 +39,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "bimap"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "230c5f1ca6a325a32553f8640d31ac9b49f2411e901e427570154868b46da4f7"
-
-[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -872,13 +866,10 @@ dependencies = [
 
 [[package]]
 name = "qbice"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
- "bimap",
  "crossbeam",
- "crossbeam-utils",
  "dashmap",
- "enum-as-inner",
  "futures",
  "fxhash",
  "parking_lot",
@@ -887,15 +878,10 @@ dependencies = [
  "qbice_stable_type_id",
  "qbice_storage",
  "rayon",
- "smallbox",
  "static_assertions",
- "take_mut",
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-util",
- "tracing",
- "tracing-test",
 ]
 
 [[package]]
@@ -903,7 +889,6 @@ name = "qbice_benchmark"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "dashmap",
  "qbice",
  "tempfile",
  "tokio",
@@ -930,14 +915,11 @@ dependencies = [
 name = "qbice_integration_test"
 version = "0.1.0"
 dependencies = [
- "flexstr",
- "futures",
  "qbice",
  "rayon",
  "tempfile",
  "tokio",
  "tokio-util",
- "tracing",
  "tracing-test",
 ]
 
@@ -990,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_storage"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-deque",
@@ -998,17 +980,14 @@ dependencies = [
  "dashmap",
  "enum-as-inner",
  "fjall",
- "futures",
  "fxhash",
  "parking_lot",
  "qbice_serialize",
  "qbice_stable_hash",
  "qbice_stable_type_id",
- "rayon",
  "rust-rocksdb",
  "siphasher",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -1238,10 +1217,11 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "signal-hook-registry"
-version = "1.4.7"
+version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7664a098b8e616bdfcc2dc0e9ac44eb231eedf41db4e9fe95d8d32ec728dedad"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
+ "errno",
  "libc",
 ]
 
@@ -1256,12 +1236,6 @@ name = "slab"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2ae44ef20feb57a68b23d846850f861394c2e02dc425a50098ae8c90267589"
-
-[[package]]
-name = "smallbox"
-version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aca054fd9f8c2ebe8557a2433f307e038c0716124efd045daa0388afa5172189"
 
 [[package]]
 name = "smallvec"
@@ -1304,12 +1278,6 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
-
-[[package]]
-name = "take_mut"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 
 [[package]]
 name = "tempfile"
@@ -1411,19 +1379,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d15d90a0b5c19378952d479dc858407149d7bb45a14de0142f6c534b16fc647"
 dependencies = [
  "pin-project-lite",
- "tracing-attributes",
  "tracing-core",
-]
-
-[[package]]
-name = "tracing-attributes"
-version = "0.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]

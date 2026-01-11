@@ -11,11 +11,8 @@ publish = false
 [dependencies]
 qbice = { path = "../qbice" }
 tempfile.workspace = true
-tokio.workspace = true
-flexstr.workspace = true
+tokio = { version = "1", features = ["full"] }
 tracing-test.workspace = true
-tracing.workspace = true
-futures.workspace = true
 rayon.workspace = true
 tokio-util.workspace = true
 

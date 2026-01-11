@@ -13,7 +13,6 @@ use qbice::{
 };
 use qbice_integration_test::{Variable, create_test_engine};
 use tempfile::tempdir;
-use tracing_test::traced_test;
 
 #[derive(
     Debug,
@@ -129,7 +128,6 @@ impl<C: Config> Executor<NegativeSquareToString, C>
 }
 
 #[tokio::test]
-#[traced_test]
 async fn firewall() {
     let tempdir = tempdir().unwrap();
     let mut engine = create_test_engine(&tempdir);
@@ -345,7 +343,6 @@ impl<C: Config> Executor<DoubleClampedValue, C> for DoubleClampedValueExecutor {
 /// This tests the transitive firewall callees (TFC) mechanism where the final
 /// query needs to repair transitive firewall dependencies.
 #[tokio::test]
-#[traced_test]
 async fn chained_firewalls() {
     let tempdir = tempdir().unwrap();
     let mut engine = create_test_engine(&tempdir);
@@ -542,7 +539,6 @@ impl<C: Config> Executor<SumOfSquares, C> for SumOfSquaresExecutor {
 ///      SumOfSquares
 /// ```
 #[tokio::test]
-#[traced_test]
 async fn diamond_dependency_with_firewalls() {
     let tempdir = tempdir().unwrap();
     let mut engine = create_test_engine(&tempdir);
@@ -727,7 +723,6 @@ impl<C: Config> Executor<SquarePlusOne, C> for SquarePlusOneExecutor {
 /// SquareTimesTwo  SquarePlusOne
 /// ```
 #[tokio::test]
-#[traced_test]
 async fn firewall_multiple_callers() {
     let tempdir = tempdir().unwrap();
     let mut engine = create_test_engine(&tempdir);
@@ -861,7 +856,6 @@ impl<C: Config> Executor<ConditionalSquare, C> for ConditionalSquareExecutor {
 ///
 /// When condition changes behavior, dependencies change.
 #[tokio::test]
-#[traced_test]
 async fn firewall_conditional_dependency() {
     let tempdir = tempdir().unwrap();
     let mut engine = create_test_engine(&tempdir);
@@ -988,7 +982,6 @@ async fn firewall_conditional_dependency() {
 
 /// Tests that dirty propagation happens correctly when firewall value changes
 #[tokio::test]
-#[traced_test]
 async fn firewall_dirty_propagation_on_change() {
     let tempdir = tempdir().unwrap();
     let mut engine = create_test_engine(&tempdir);
