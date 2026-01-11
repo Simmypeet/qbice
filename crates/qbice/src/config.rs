@@ -329,8 +329,10 @@ pub trait Config:
     Default,
     Identifiable,
 )]
+#[cfg(feature = "default_config")]
 pub struct DefaultConfig;
 
+#[cfg(feature = "default_config")]
 impl Config for DefaultConfig {
     type Database = RocksDB;
 

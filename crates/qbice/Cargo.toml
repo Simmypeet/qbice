@@ -12,6 +12,12 @@ repository = "https://github.com/Simmypeet/qbice"
 keywords = ["incremental", "computation", "query", "cache", "async"]
 categories = ["caching", "concurrency", "asynchronous"]
 
+[features]
+default = ["default_config"]
+default_config = ["rocksdb"]
+rocksdb = ["qbice_storage/rocksdb"]
+fjall = ["qbice_storage/fjall"]
+
 [dependencies]
 qbice_stable_hash = { version = "0.1.2", path = "../stable_hash" }
 qbice_stable_type_id = { version = "0.1.2", path = "../stable_type_id" }

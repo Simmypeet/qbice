@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+fjall = ["dep:fjall"]
+rocksdb = ["dep:rust-rocksdb"]
+
 [dependencies]
 qbice_serialize = { version = "0.1.0", path = "../serialize" }
 qbice_stable_type_id = { version = "0.1.2", path = "../stable_type_id" }
@@ -15,14 +19,14 @@ tokio.workspace = true
 parking_lot.workspace = true
 fxhash.workspace = true
 futures.workspace = true
-rust-rocksdb.workspace = true
 dashmap.workspace = true
 crossbeam-utils.workspace = true
 crossbeam-channel.workspace = true
 crossbeam-deque.workspace = true
 rayon.workspace = true
 enum-as-inner.workspace = true
-fjall.workspace = true
+fjall = { workspace = true, optional = true }
+rust-rocksdb = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
