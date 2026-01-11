@@ -44,7 +44,7 @@ QBICE builds on decades of research and practical work in incremental computatio
 
 ### Adapton
 
-[Adapton](http://adapton.org/) is a pioneering research that introduced many core concepts used in QBICE:
+[Adapton](https://github.com/adapton) is a pioneering research that introduced many core concepts used in QBICE:
 
 - **Demanded Computation Graphs (DCG)** - The idea that computations form a graph where dependencies are tracked automatically
 - **Dirty Propagation** - Marking dependency edges as dirty when inputs change
