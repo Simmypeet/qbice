@@ -168,35 +168,6 @@ pub trait Config:
     + Sync
     + 'static
 {
-    /// The size of static storage allocated for query keys and values.
-    ///
-    /// This determines how much data can be stored inline (on the stack)
-    /// before falling back to heap allocation. The engine uses this for
-    /// type-erased query storage via `smallbox`.
-    ///
-    /// # Choosing a Size
-    ///
-    /// Consider the typical size of your query keys and values:
-    ///
-    /// - **Small (16 bytes)**: Good for simple types like `u64`, small enums,
-    ///   or references. Minimizes memory overhead.
-    /// - **Medium (32 bytes)**: Balanced choice for structs with a few fields.
-    ///   This is the default.
-    /// - **Large (64+ bytes)**: For complex query keys with many fields or
-    ///   nested structures.
-    ///
-    /// # Trade-offs
-    ///
-    /// - **Smaller storage**: Lower memory usage per query, but more heap
-    ///   allocations
-    /// - **Larger storage**: Fewer allocations, but higher memory overhead
-    ///
-    /// # Performance Impact
-    ///
-    /// The engine frequently clones queries and values. Keeping them within
-    /// the inline storage size avoids allocation overhead on these operations.
-    type Storage: Send + Sync + 'static;
-
     /// The key-value database backend used by the engine.
     type Database: KvDatabase;
 
@@ -361,8 +332,6 @@ pub trait Config:
 pub struct DefaultConfig;
 
 impl Config for DefaultConfig {
-    type Storage = [u8; 16];
-
     type Database = RocksDB;
 
     type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock;
 
 use crate::{
@@ -34,7 +34,7 @@ impl<C: Config> Engine<C> {
         lock_guard: ComputingLockGuard<'_, C>,
     ) {
         // create a new tracked engine
-        let cache = Arc::new(DashMap::default());
+        let cache = Arc::new(DashSet::default());
 
         let mut tracked_engine = TrackedEngine {
             engine: self.clone(),

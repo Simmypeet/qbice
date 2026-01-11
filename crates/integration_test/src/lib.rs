@@ -316,8 +316,6 @@ impl<C: Config> Executor<SlowQuery, C> for SlowExecutor {
 pub struct TestingConfig;
 
 impl Config for TestingConfig {
-    type Storage = [u8; 16];
-
     type Database = RocksDB;
 
     type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;

@@ -39,7 +39,7 @@
 use std::{any::Any, fmt::Debug, hash::Hash};
 
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::{Compact128, Sip128Hasher, StableHash, StableHasher};
+use qbice_stable_hash::{Compact128, StableHash, StableHasher};
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 
 use crate::{config::Config, engine::InitialSeed};
@@ -315,9 +315,6 @@ pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
     /// Hashes this query into the given hasher.
     fn hash_dyn(&self, state: &mut dyn std::hash::Hasher);
 
-    /// Clones this query into a type-erased box.
-    fn dyn_clone(&self) -> DynQueryBox<C>;
-
     /// Formats this query for debugging.
     fn dbg_dyn(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
 }
@@ -344,11 +341,6 @@ impl<Q: Query, C: Config> DynQuery<C> for Q {
 
     fn hash_dyn(&self, mut state: &mut dyn std::hash::Hasher) {
         std::hash::Hash::hash(self, &mut state);
-    }
-
-    fn dyn_clone(&self) -> DynQueryBox<C> {
-        let boxed: DynQueryBox<C> = smallbox::smallbox!(self.clone());
-        boxed
     }
 
     fn dbg_dyn(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -454,77 +446,4 @@ impl QueryID {
     /// Returns the compact representation of the 128-bit content hash.
     #[must_use]
     pub const fn compact_hash_128(&self) -> Compact128 { self.hash_128 }
-}
-
-/// Type-erased boxed query value.
-///
-/// This is an internal type used for storing query results with inline
-/// optimization. The storage size is determined by [`Config::Storage`].
-///
-/// [`Config::Storage`]: crate::config::Config::Storage
-pub type DynValueBox<C> =
-    smallbox::SmallBox<dyn DynValue<C>, <C as Config>::Storage>;
-
-/// Type-erased boxed query key.
-///
-/// This is an internal type used for storing query keys with inline
-/// optimization. The storage size is determined by [`Config::Storage`].
-///
-/// [`Config::Storage`]: crate::config::Config::Storage
-pub type DynQueryBox<C> =
-    smallbox::SmallBox<dyn DynQuery<C>, <C as Config>::Storage>;
-
-/// Type-erased interface for query values.
-///
-/// This trait enables storing and manipulating query values without knowing
-/// their concrete types at compile time. It's used internally by the engine
-/// for the value cache.
-///
-/// You typically don't need to implement or use this trait directly.
-pub trait DynValue<C: Config>: 'static + Send + Sync + Any {
-    /// Clones the value into a type-erased box.
-    fn dyn_clone(&self) -> DynValueBox<C>;
-
-    /// Formats the value for debugging.
-    fn dyn_dbg(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
-
-    /// Computes a 128-bit hash of the value for fingerprinting.
-    fn hash_128_value(&self, initial_seed: InitialSeed) -> u128;
-}
-
-impl<T: 'static + Send + Sync + Clone + Debug + StableHash, C: Config>
-    DynValue<C> for T
-{
-    fn dyn_clone(&self) -> DynValueBox<C> { smallbox::smallbox!(self.clone()) }
-
-    fn dyn_dbg(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(self, f)
-    }
-
-    fn hash_128_value(&self, initial_seed: InitialSeed) -> u128 {
-        let mut hasher = Sip128Hasher::new();
-        initial_seed.stable_hash(&mut hasher);
-        self.stable_hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
-impl<C: Config> dyn DynValue<C> {
-    /// Attempt to downcast the value to a specific type.
-    pub fn downcast_value<T: 'static + Send + Sync>(&self) -> Option<&T> {
-        let as_any = self as &dyn Any;
-        as_any.downcast_ref::<T>()
-    }
-}
-
-impl<C: Config> Debug for dyn DynValue<C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.dyn_dbg(f)
-    }
-}
-
-impl<C: Config> Debug for dyn DynQuery<C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.dbg_dyn(f)
-    }
 }

@@ -15,7 +15,7 @@ use crate::{
         persist::Persist, statistic::Statistic,
     },
     executor::{CyclicError, CyclicPanicPayload},
-    query::{DynValue, DynValueBox, QueryID},
+    query::QueryID,
 };
 
 mod backward_projection;
@@ -201,7 +201,7 @@ impl<C: Config> ComputationGraph<C> {
 /// - Clear separation between querying and modification phases
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
-    cache: Arc<DashMap<QueryID, DynValueBox<C>>>,
+    cache: Arc<DashSet<QueryID>>,
     caller: CallerInformation,
 }
 
@@ -231,14 +231,16 @@ impl<C: Config> TrackedEngine<C> {
         let query_with_id = self.engine.new_query_with_id(query);
 
         // check local cache
-        if let Some(value) = self.cache.get(&query_with_id.id) {
-            // cache hit! don't have to go through central database
-            let value: &dyn DynValue<C> = &**value;
-
-            return value
-                .downcast_value::<Q::Value>()
-                .expect("should've been a correct type")
-                .clone();
+        if self.cache.contains(&query_with_id.id) {
+            // directly access repository to avoid double wrapping
+            return self
+                .engine
+                .get_query_result::<Q>(
+                    query_with_id.id.compact_hash_128(),
+                    &self.caller,
+                )
+                .await
+                .expect("should've existed since the cache said it's done");
         }
 
         // run the main process
@@ -249,10 +251,8 @@ impl<C: Config> TrackedEngine<C> {
             .map(QueryResult::unwrap_return);
 
         // cache the result locally
-        if let Ok(ref value) = result {
-            let dyn_value: DynValueBox<C> = smallbox::smallbox!(value.clone());
-
-            self.cache.insert(query_with_id.id, dyn_value);
+        if result.is_ok() {
+            self.cache.insert(query_with_id.id);
         }
 
         // panic! with CyclicPanicPayload if cyclic error detected
@@ -348,7 +348,7 @@ impl<C: Config> Engine<C> {
             caller: CallerInformation::new(CallerKind::User, unsafe {
                 self.get_current_timestamp_unchecked()
             }),
-            cache: Arc::new(DashMap::new()),
+            cache: Arc::new(DashSet::new()),
             engine: self,
         }
     }
