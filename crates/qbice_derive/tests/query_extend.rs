@@ -3,7 +3,6 @@
 use qbice::{Config, TrackedEngine};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::StableHash;
-use qbice_stable_type_id::Identifiable;
 
 /// Query with extension trait by reference.
 #[derive(
@@ -14,7 +13,6 @@ use qbice_stable_type_id::Identifiable;
     Eq,
     Hash,
     StableHash,
-    Identifiable,
     Encode,
     Decode,
     qbice::Query,
@@ -37,7 +35,6 @@ pub struct SumQuery {
     Eq,
     Hash,
     StableHash,
-    Identifiable,
     Encode,
     Decode,
     qbice::Query,

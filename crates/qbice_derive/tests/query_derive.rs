@@ -3,20 +3,10 @@
 use qbice::Query;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::StableHash;
-use qbice_stable_type_id::Identifiable;
 
 /// A test query with multiple fields.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    StableHash,
-    Identifiable,
-    Encode,
-    Decode,
-    qbice::Query,
+    Debug, Clone, PartialEq, Eq, Hash, StableHash, Encode, Decode, qbice::Query,
 )]
 #[value(String)]
 pub struct TestQuery {
@@ -49,7 +39,6 @@ fn test_query_derive_compiles() {
     Eq,
     Hash,
     StableHash,
-    Identifiable,
     Encode,
     Decode,
     qbice::Query,

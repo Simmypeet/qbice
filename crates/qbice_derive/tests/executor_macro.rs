@@ -3,21 +3,10 @@
 use qbice::{Config, Executor, Query, TrackedEngine, executor};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::StableHash;
-use qbice_stable_type_id::Identifiable;
 
 /// A simple test query.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    StableHash,
-    Identifiable,
-    Encode,
-    Decode,
-    Query,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, StableHash, Encode, Decode, Query,
 )]
 #[value(u64)]
 pub struct AddQuery {
@@ -29,16 +18,7 @@ pub struct AddQuery {
 
 /// Another test query.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    StableHash,
-    Identifiable,
-    Encode,
-    Decode,
-    Query,
+    Debug, Clone, PartialEq, Eq, Hash, StableHash, Encode, Decode, Query,
 )]
 #[value(String)]
 pub struct GreetQuery {
@@ -67,17 +47,7 @@ async fn greet_executor<C: Config>(
 
 /// Query for testing explicit config type.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    StableHash,
-    Identifiable,
-    Encode,
-    Decode,
-    Query,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, StableHash, Encode, Decode, Query,
 )]
 #[value(u64)]
 pub struct MultiplyQuery {

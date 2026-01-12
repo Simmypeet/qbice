@@ -2,6 +2,8 @@
 //!
 //! This crate provides:
 //! - `#[derive(Query)]`: Automatically implements the `Query` trait
+//! - `#[derive_for_query_id]`: Convenience macro that adds all essential
+//!   derives
 //! - `#[executor]`: Generates an executor implementation from an async function
 //!
 //! # Query Derive
@@ -26,6 +28,21 @@
 //! - `Eq`, `Hash`, `Clone`, `Debug`
 //! - `Encode`, `Decode`
 //! - `Send`, `Sync`
+//!
+//! # Query ID Derive Helper
+//!
+//! For convenience, use `#[derive_for_query_id]` to automatically add all
+//! essential trait derives:
+//!
+//! ```ignore
+//! use qbice_derive::derive_for_query_id;
+//!
+//! #[derive_for_query_id]
+//! #[value(Vec<String>)]
+//! struct MyQuery {
+//!     id: u64,
+//! }
+//! ```
 //!
 //! # Executor Attribute
 //!
@@ -55,6 +72,9 @@ use syn::{
 ///
 /// This macro implements the `Query` trait for a type, using the
 /// `#[value(...)]` attribute to specify the associated `Value` type.
+///
+/// **Note:** This macro automatically implements the `Identifiable` trait for
+/// the type, so you don't need to derive it separately.
 ///
 /// # Required Attribute
 ///
@@ -119,6 +139,7 @@ pub fn derive_query(input: TokenStream) -> TokenStream {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn derive_query_impl(input: &DeriveInput) -> Result<TokenStream, Error> {
     let name = &input.ident;
     let generics = &input.generics;
@@ -231,9 +252,24 @@ fn derive_query_impl(input: &DeriveInput) -> Result<TokenStream, Error> {
         quote! {}
     };
 
+    // Automatically generate Identifiable implementation
+    let identifiable_path: syn::Path =
+        syn::parse_quote!(::qbice::stable_type_id::Identifiable);
+    let stable_type_id_path: syn::Path =
+        syn::parse_quote!(::qbice::stable_type_id::StableTypeID);
+
+    let identifiable_impl =
+        qbice_identifiable_derive_lib::implements_identifiable(
+            name,
+            generics.clone(),
+            Some(&identifiable_path),
+            Some(&stable_type_id_path),
+        );
+
     let expanded = quote! {
         #query_impl
         #extension_trait
+        #identifiable_impl
     };
 
     Ok(expanded.into())
@@ -268,6 +304,121 @@ fn parse_extend_attribute(
     })?;
 
     Ok((name, by_val))
+}
+
+/// Attribute macro that automatically adds all essential derive macros for a
+/// Query type.
+///
+/// This is a convenience macro that expands a struct to include all the
+/// necessary trait derives for use as a Query type in the qbice engine.
+///
+/// By default, `Copy` is included in the derives. Use
+/// `#[derive_for_query_id(no_copy)]` to exclude it for types that contain
+/// non-Copy fields.
+///
+/// # Example
+///
+/// ```ignore
+/// use qbice_derive::derive_for_query_id;
+///
+/// #[derive_for_query_id]
+/// #[value(String)]
+/// pub struct MyQuery {
+///     id: u64,
+/// }
+/// ```
+///
+/// Expands to:
+///
+/// ```ignore
+/// #[derive(
+///     Debug,
+///     Clone,
+///     Copy,
+///     PartialEq,
+///     Eq,
+///     Hash,
+///     StableHash,
+///     Identifiable,
+///     Encode,
+///     Decode,
+///     Query,
+/// )]
+/// #[value(String)]
+/// pub struct MyQuery {
+///     id: u64,
+/// }
+/// ```
+///
+/// For types with non-Copy fields:
+///
+/// ```ignore
+/// #[derive_for_query_id(no_copy)]
+/// #[value(Vec<String>)]
+/// pub struct MyQuery {
+///     data: String,
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn derive_for_query_id(
+    attr: TokenStream,
+    item: TokenStream,
+) -> TokenStream {
+    let mut input = parse_macro_input!(item as DeriveInput);
+
+    // Parse the attribute to check for no_copy
+    let no_copy = if attr.is_empty() {
+        false
+    } else {
+        let attr_input = parse_macro_input!(attr as Ident);
+        attr_input == "no_copy"
+    };
+
+    // Add the derive attribute with all necessary traits using fully qualified
+    // paths
+    let derive_attr: syn::Attribute = if no_copy {
+        syn::parse_quote! {
+            #[derive(
+                Debug,
+                Clone,
+                PartialEq,
+                Eq,
+                PartialOrd,
+                Ord,
+                Hash,
+                ::qbice::stable_hash::StableHash,
+                ::qbice_serialize::Encode,
+                ::qbice_serialize::Decode,
+                ::qbice::Query,
+            )]
+        }
+    } else {
+        syn::parse_quote! {
+            #[derive(
+                Debug,
+                Clone,
+                Copy,
+                PartialEq,
+                Eq,
+                PartialOrd,
+                Ord,
+                Hash,
+                ::qbice::stable_hash::StableHash,
+                ::qbice_serialize::Encode,
+                ::qbice_serialize::Decode,
+                ::qbice::Query,
+            )]
+        }
+    };
+
+    // Insert the derive attribute at the beginning
+    input.attrs.insert(0, derive_attr);
+
+    // Return the modified struct
+    quote! {
+        #input
+    }
+    .into()
 }
 
 /// Attribute macro for generating an executor implementation from an async
