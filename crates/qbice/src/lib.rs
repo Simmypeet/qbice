@@ -349,6 +349,7 @@ pub use config::{Config, DefaultConfig};
 pub use engine::{Engine, computation_graph::TrackedEngine};
 pub use executor::{CyclicError, Executor};
 // re-export companion crates
+pub use qbice_derive::{Query, derive_for_query_id, executor};
 pub use qbice_serialize as serialize;
 pub use qbice_serialize::{Decode, Encode};
 pub use qbice_stable_hash as stable_hash;

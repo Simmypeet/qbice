@@ -23,6 +23,7 @@ qbice_stable_hash = { version = "0.1.2", path = "../stable_hash" }
 qbice_stable_type_id = { version = "0.1.2", path = "../stable_type_id" }
 qbice_serialize = { version = "0.1.0", path = "../serialize" }
 qbice_storage = { version = "0.3.0", path = "../storage" }
+qbice_derive = { version = "0.1.0", path = "../qbice_derive" }
 tokio.workspace = true
 dashmap.workspace = true
 static_assertions.workspace = true
