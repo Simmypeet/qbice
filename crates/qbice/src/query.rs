@@ -39,10 +39,8 @@
 use std::{any::Any, fmt::Debug, hash::Hash};
 
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::{Compact128, StableHash, StableHasher};
+use qbice_stable_hash::{Compact128, StableHash};
 use qbice_stable_type_id::{Identifiable, StableTypeID};
-
-use crate::{config::Config, engine::InitialSeed};
 
 /// The query interface of the QBICE engine.
 ///
@@ -292,80 +290,6 @@ pub enum ExecutionStyle {
     /// re-executed and possibly dirtying dependent queries if their values
     /// change.
     ExternalInput,
-}
-
-/// Type-erased interface for queries.
-///
-/// This trait enables storing and manipulating query keys without knowing
-/// their concrete types at compile time. It's used internally by the engine
-/// for dynamic dispatch and dependency tracking.
-///
-/// You typically don't need to implement or use this trait directly - it's
-/// automatically implemented for all types that implement [`Query`].
-pub trait DynQuery<C: Config>: 'static + Send + Sync + Any {
-    /// Returns the stable type ID of the query.
-    fn stable_type_id(&self) -> StableTypeID;
-
-    /// Computes a 128-bit hash of the query, seeded with the given seed.
-    fn hash_128(&self, initial_seed: InitialSeed) -> u128;
-
-    /// Compares this query with another type-erased query for equality.
-    fn eq_dyn(&self, other: &dyn DynQuery<C>) -> bool;
-
-    /// Hashes this query into the given hasher.
-    fn hash_dyn(&self, state: &mut dyn std::hash::Hasher);
-
-    /// Formats this query for debugging.
-    fn dbg_dyn(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
-}
-
-impl<Q: Query, C: Config> DynQuery<C> for Q {
-    fn stable_type_id(&self) -> StableTypeID { Q::STABLE_TYPE_ID }
-
-    fn hash_128(&self, initial_seed: InitialSeed) -> u128 {
-        let mut hasher = qbice_stable_hash::Sip128Hasher::new();
-
-        initial_seed.stable_hash(&mut hasher);
-        self.stable_hash(&mut hasher);
-
-        hasher.finish()
-    }
-
-    fn eq_dyn(&self, other: &dyn DynQuery<C>) -> bool {
-        let Some(other_q) = other.downcast_query::<Q>() else {
-            return false;
-        };
-
-        self == other_q
-    }
-
-    fn hash_dyn(&self, mut state: &mut dyn std::hash::Hasher) {
-        std::hash::Hash::hash(self, &mut state);
-    }
-
-    fn dbg_dyn(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(self, f)
-    }
-}
-
-impl<C: Config> dyn DynQuery<C> + '_ {
-    /// Attempt to downcast the query to a specific query type.
-    pub fn downcast_query<Q: Query>(&self) -> Option<&Q> {
-        let as_any = self as &dyn Any;
-        as_any.downcast_ref::<Q>()
-    }
-}
-
-impl<C: Config> PartialEq for dyn DynQuery<C> + '_ {
-    fn eq(&self, other: &Self) -> bool { self.eq_dyn(other) }
-}
-
-impl<C: Config> Eq for dyn DynQuery<C> + '_ {}
-
-impl<C: Config> Hash for dyn DynQuery<C> + '_ {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.hash_dyn(state);
-    }
 }
 
 /// A unique identifier for a query instance.
