@@ -1,6 +1,6 @@
 //! Test for the Query derive macro.
 
-use qbice::{DeriveQuery, Query};
+use qbice::Query;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
@@ -16,7 +16,7 @@ use qbice_stable_type_id::Identifiable;
     Identifiable,
     Encode,
     Decode,
-    DeriveQuery,
+    qbice::Query,
 )]
 #[value(String)]
 pub struct TestQuery {
@@ -28,17 +28,15 @@ pub struct TestQuery {
 
 #[test]
 fn test_query_derive_compiles() {
+    fn requires_query<Q: Query>(_q: &Q) {}
+
     // This test just verifies that the derive macro works
-    let query = TestQuery {
-        id: 1,
-        name: "test".to_string(),
-    };
+    let query = TestQuery { id: 1, name: "test".to_string() };
 
     // Ensure we can clone it
     let _cloned = query.clone();
 
     // Ensure the Query trait is implemented
-    fn requires_query<Q: Query>(_q: &Q) {}
     requires_query(&query);
 }
 
@@ -54,16 +52,16 @@ fn test_query_derive_compiles() {
     Identifiable,
     Encode,
     Decode,
-    DeriveQuery,
+    qbice::Query,
 )]
 #[value(Vec<u8>)]
 pub struct SimpleQuery(pub u64);
 
 #[test]
 fn test_tuple_struct_query() {
-    let query = SimpleQuery(42);
-    let _cloned = query;
-
     fn requires_query<Q: Query>(_q: &Q) {}
+
+    let query = SimpleQuery(42);
+
     requires_query(&query);
 }

@@ -47,7 +47,7 @@
 use proc_macro::TokenStream;
 use quote::{ToTokens, format_ident, quote};
 use syn::{
-    DeriveInput, Error, FnArg, GenericParam, ItemFn, Meta, Pat, PatType,
+    DeriveInput, Error, FnArg, GenericParam, Ident, ItemFn, Meta, Pat, PatType,
     ReturnType, Type, parse_macro_input,
 };
 
@@ -59,6 +59,13 @@ use syn::{
 /// # Required Attribute
 ///
 /// - `#[value(Type)]`: Specifies the associated `Value` type for the query
+///
+/// # Optional Attribute
+///
+/// - `#[extend(name = trait_name)]`: Generates an extension trait that provides
+///   a convenience method for querying
+/// - `#[extend(name = trait_name, by_val)]`: Same as above, but takes the query
+///   by value instead of by reference
 ///
 /// # Example
 ///
@@ -77,7 +84,32 @@ use syn::{
 ///     type Value = String;
 /// }
 /// ```
-#[proc_macro_derive(Query, attributes(value))]
+///
+/// # Extension Trait Example
+///
+/// ```ignore
+/// #[derive(Query)]
+/// #[value(String)]
+/// #[extend(name = get_name)]
+/// struct NameQuery {
+///     id: u64,
+/// }
+/// ```
+///
+/// This will generate the Query impl plus:
+///
+/// ```ignore
+/// trait get_name {
+///     async fn get_name<C: Config>(&self, q: &NameQuery) -> String;
+/// }
+///
+/// impl<C: Config> get_name for TrackedEngine<C> {
+///     async fn get_name(&self, q: &NameQuery) -> String {
+///         self.query(q).await
+///     }
+/// }
+/// ```
+#[proc_macro_derive(Query, attributes(value, extend))]
 pub fn derive_query(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -126,13 +158,116 @@ fn derive_query_impl(input: &DeriveInput) -> Result<TokenStream, Error> {
             )
         })?;
 
-    let expanded = quote! {
+    // Find the optional #[extend(...)] attribute
+    let extend_trait = input
+        .attrs
+        .iter()
+        .find_map(|attr| {
+            if !attr.path().is_ident("extend") {
+                return None;
+            }
+
+            match &attr.meta {
+                Meta::List(meta_list) => {
+                    Some(parse_extend_attribute(&meta_list.tokens))
+                }
+                _ => Some(Err(Error::new_spanned(
+                    attr,
+                    "expected #[extend(name = ...)] format",
+                ))),
+            }
+        })
+        .transpose()?;
+
+    let query_impl = quote! {
         impl #impl_generics ::qbice::Query for #name #ty_generics #where_clause {
             type Value = #value_type;
         }
     };
 
+    let extension_trait = if let Some((trait_name, by_val)) = extend_trait {
+        let param = if by_val {
+            quote! { q: #name #ty_generics }
+        } else {
+            quote! { q: &#name #ty_generics }
+        };
+
+        let query_call = if by_val {
+            quote! { self.query(&q).await }
+        } else {
+            quote! { self.query(q).await }
+        };
+
+        let vis = &input.vis;
+
+        // Copy doc comments from the struct to the trait and method
+        let doc_attrs: Vec<_> = input
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("doc"))
+            .collect();
+
+        quote! {
+            #(#doc_attrs)*
+            #[allow(non_camel_case_types)]
+            #vis trait #trait_name {
+                #(#doc_attrs)*
+                async fn #trait_name(
+                    &self,
+                    #param,
+                ) -> <#name #ty_generics as ::qbice::Query>::Value;
+            }
+
+            impl<C: ::qbice::Config> #trait_name for ::qbice::TrackedEngine<C> {
+                async fn #trait_name(
+                    &self,
+                    #param,
+                ) -> <#name #ty_generics as ::qbice::Query>::Value {
+                    #query_call
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let expanded = quote! {
+        #query_impl
+        #extension_trait
+    };
+
     Ok(expanded.into())
+}
+
+/// Parse the #[extend(...)] attribute
+fn parse_extend_attribute(
+    tokens: &proc_macro2::TokenStream,
+) -> Result<(Ident, bool), Error> {
+    let mut name: Option<Ident> = None;
+    let mut by_val = false;
+
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("name") {
+            name = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("by_val") {
+            by_val = true;
+            Ok(())
+        } else {
+            Err(meta.error("expected `name` or `by_val`"))
+        }
+    });
+
+    syn::parse::Parser::parse2(parser, tokens.clone())?;
+
+    let name = name.ok_or_else(|| {
+        Error::new_spanned(
+            tokens,
+            "missing `name` argument in extend attribute",
+        )
+    })?;
+
+    Ok((name, by_val))
 }
 
 /// Attribute macro for generating an executor implementation from an async
@@ -273,15 +408,7 @@ fn executor_impl(
 
                 // Check if it has Config bound
                 let has_config_bound = type_param.bounds.iter().any(|bound| {
-                    if let syn::TypeParamBound::Trait(trait_bound) = bound {
-                        trait_bound
-                            .path
-                            .segments
-                            .last()
-                            .is_some_and(|seg| seg.ident == "Config")
-                    } else {
-                        false
-                    }
+                    matches!(bound, syn::TypeParamBound::Trait(..))
                 });
 
                 if !has_config_bound {
@@ -392,9 +519,6 @@ fn executor_impl(
             "could not extract parameter names",
         ));
     }
-
-    let query_param = param_names[0];
-    let engine_param = param_names[1];
 
     // Get visibility
     let vis = &input.vis;
