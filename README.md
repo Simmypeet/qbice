@@ -25,21 +25,6 @@ For detailed documentation, examples, and API reference, please visit:
 - **Thread-Safe** — Safely share the engine across multiple threads
 - **Visualization** — Generate interactive HTML dependency graphs
 
-## Installation
-
-Add QBICE to your `Cargo.toml`:
-
-```toml
-[dependencies]
-qbice = "0.1.0"
-tokio = { version = "1", features = ["full"] }
-```
-
-## Requirements
-
-- Rust 1.88.0 or later (Edition 2024)
-- Tokio runtime for async execution
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

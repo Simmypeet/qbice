@@ -16,16 +16,6 @@ QBICE is a high-performance, asynchronous incremental computation framework for 
 - **Persistent Storage** — Pluggable key-value database backends (RocksDB, fjall) for caching query results
 - **Visualization** — Generate interactive HTML dependency graphs to analyze computation structure
 
-## Installation
-
-Add QBICE to your `Cargo.toml`:
-
-```toml
-[dependencies]
-qbice = "0.2.0"
-tokio = { version = "1", features = ["full"] }
-```
-
 ### Feature Flags
 
 - `default` - Includes RocksDB backend
@@ -254,11 +244,6 @@ For detailed documentation, examples, and API reference:
 - **[GitHub Repository](https://github.com/Simmypeet/qbice)** — Source code and issues
 - **[Crates.io](https://crates.io/crates/qbice)** — Package information
 - **[Tutorials and Guides](https://simmypeet.github.io/qbice/)** — Step-by-step tutorials and advanced topics
-
-## Requirements
-
-- Rust 1.88.0 or later (Edition 2024)
-- Tokio runtime for async execution
 
 ## Performance Considerations
 
