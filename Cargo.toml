@@ -11,6 +11,7 @@ members = [
     "crates/serialize_derive",
     "crates/storage",
     "crates/benchmark",
+    "crates/qbice_derive",
 ]
 resolver = "2"
 

@@ -84,8 +84,9 @@ use syn::{
 ///
 /// - `#[extend(name = trait_name)]`: Generates an extension trait that provides
 ///   a convenience method for querying
-/// - `#[extend(name = trait_name, by_val)]`: Same as above, but takes the query
-///   by value instead of by reference
+/// - `#[extend(name = trait_name, by_val)]`: Generates an extension trait where
+///   each field becomes a function parameter (only works with named fields or
+///   unit structs)
 ///
 /// # Example
 ///
@@ -105,7 +106,9 @@ use syn::{
 /// }
 /// ```
 ///
-/// # Extension Trait Example
+/// # Extension Trait Examples
+///
+/// ## By reference (default):
 ///
 /// ```ignore
 /// #[derive(Query)]
@@ -126,6 +129,33 @@ use syn::{
 /// impl<C: Config> get_name for TrackedEngine<C> {
 ///     async fn get_name(&self, q: &NameQuery) -> String {
 ///         self.query(q).await
+///     }
+/// }
+/// ```
+///
+/// ## By value (with field parameters):
+///
+/// ```ignore
+/// #[derive(Query)]
+/// #[value(String)]
+/// #[extend(name = get_name, by_val)]
+/// struct NameQuery {
+///     id: u64,
+///     extra: String,
+/// }
+/// ```
+///
+/// This will generate:
+///
+/// ```ignore
+/// trait get_name {
+///     async fn get_name<C: Config>(&self, id: u64, extra: String) -> String;
+/// }
+///
+/// impl<C: Config> get_name for TrackedEngine<C> {
+///     async fn get_name(&self, id: u64, extra: String) -> String {
+///         let q = NameQuery { id, extra };
+///         self.query(&q).await
 ///     }
 /// }
 /// ```
@@ -207,18 +237,6 @@ fn derive_query_impl(input: &DeriveInput) -> Result<TokenStream, Error> {
     };
 
     let extension_trait = if let Some((trait_name, by_val)) = extend_trait {
-        let param = if by_val {
-            quote! { q: #name #ty_generics }
-        } else {
-            quote! { q: &#name #ty_generics }
-        };
-
-        let query_call = if by_val {
-            quote! { self.query(&q).await }
-        } else {
-            quote! { self.query(q).await }
-        };
-
         let vis = &input.vis;
 
         // Copy doc comments from the struct to the trait and method
@@ -228,23 +246,90 @@ fn derive_query_impl(input: &DeriveInput) -> Result<TokenStream, Error> {
             .filter(|attr| attr.path().is_ident("doc"))
             .collect();
 
-        quote! {
-            #(#doc_attrs)*
-            #[allow(non_camel_case_types)]
-            #vis trait #trait_name {
-                #(#doc_attrs)*
-                async fn #trait_name(
-                    &self,
-                    #param,
-                ) -> <#name #ty_generics as ::qbice::Query>::Value;
-            }
+        if by_val {
+            // Extract fields for by_val mode
+            let fields = match &input.data {
+                syn::Data::Struct(data) => match &data.fields {
+                    syn::Fields::Named(fields) => &fields.named,
+                    syn::Fields::Unit => {
+                        // Unit structs are allowed (no parameters)
+                        &syn::punctuated::Punctuated::new()
+                    }
+                    syn::Fields::Unnamed(_) => {
+                        return Err(Error::new_spanned(
+                            input,
+                            "by_val extension only works with named fields or \
+                             unit structs",
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(Error::new_spanned(
+                        input,
+                        "extend attribute can only be used on structs",
+                    ));
+                }
+            };
 
-            impl<C: ::qbice::Config> #trait_name for ::qbice::TrackedEngine<C> {
-                async fn #trait_name(
-                    &self,
-                    #param,
-                ) -> <#name #ty_generics as ::qbice::Query>::Value {
-                    #query_call
+            // Generate function parameters from struct fields
+            let params: Vec<_> = fields
+                .iter()
+                .map(|f| {
+                    let name = &f.ident;
+                    let ty = &f.ty;
+                    quote! { #name: #ty }
+                })
+                .collect();
+
+            // Generate struct construction from parameters
+            let field_names: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+            let struct_construction = quote! {
+                let q = #name #ty_generics { #(#field_names),* };
+            };
+
+            quote! {
+                #(#doc_attrs)*
+                #[allow(non_camel_case_types)]
+                #vis trait #trait_name {
+                    #(#doc_attrs)*
+                    async fn #trait_name(
+                        &self,
+                        #(#params),*
+                    ) -> <#name #ty_generics as ::qbice::Query>::Value;
+                }
+
+                impl<C: ::qbice::Config> #trait_name for ::qbice::TrackedEngine<C> {
+                    async fn #trait_name(
+                        &self,
+                        #(#params),*
+                    ) -> <#name #ty_generics as ::qbice::Query>::Value {
+                        #struct_construction
+                        self.query(&q).await
+                    }
+                }
+            }
+        } else {
+            // by_ref mode (default)
+            let param = quote! { q: &#name #ty_generics };
+
+            quote! {
+                #(#doc_attrs)*
+                #[allow(non_camel_case_types)]
+                #vis trait #trait_name {
+                    #(#doc_attrs)*
+                    async fn #trait_name(
+                        &self,
+                        #param,
+                    ) -> <#name #ty_generics as ::qbice::Query>::Value;
+                }
+
+                impl<C: ::qbice::Config> #trait_name for ::qbice::TrackedEngine<C> {
+                    async fn #trait_name(
+                        &self,
+                        #param,
+                    ) -> <#name #ty_generics as ::qbice::Query>::Value {
+                        self.query(q).await
+                    }
                 }
             }
         }

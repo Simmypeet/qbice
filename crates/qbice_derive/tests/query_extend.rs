@@ -26,7 +26,7 @@ pub struct SumQuery {
     pub b: u32,
 }
 
-/// Query with extension trait by value.
+/// Query with extension trait by value with field parameters.
 #[derive(
     Debug,
     Clone,
@@ -44,6 +44,8 @@ pub struct SumQuery {
 pub struct FormatQuery {
     /// The number to format.
     pub num: u32,
+    /// Optional prefix.
+    pub prefix: u32,
 }
 
 #[test]
@@ -70,7 +72,7 @@ fn test_extend_trait_by_val_generated() {
     // Create a mock engine type that implements the trait
     struct MockEngine;
     impl format_number for MockEngine {
-        async fn format_number(&self, _q: FormatQuery) -> String {
+        async fn format_number(&self, _num: u32, _prefix: u32) -> String {
             String::from("42")
         }
     }

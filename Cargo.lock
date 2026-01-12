@@ -873,6 +873,7 @@ dependencies = [
  "futures",
  "fxhash",
  "parking_lot",
+ "qbice_derive",
  "qbice_serialize",
  "qbice_stable_hash",
  "qbice_stable_type_id",
@@ -892,6 +893,24 @@ dependencies = [
  "qbice",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "qbice_derive"
+version = "0.1.0"
+dependencies = [
+ "flexstr",
+ "proc-macro2",
+ "qbice",
+ "qbice_identifiable_derive",
+ "qbice_identifiable_derive_lib",
+ "qbice_serialize",
+ "qbice_serialize_derive",
+ "qbice_stable_hash",
+ "qbice_stable_hash_derive",
+ "qbice_stable_type_id",
+ "quote",
+ "syn",
 ]
 
 [[package]]
