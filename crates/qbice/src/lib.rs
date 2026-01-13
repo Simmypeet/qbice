@@ -343,6 +343,7 @@ extern crate self as qbice;
 pub mod config;
 pub mod engine;
 pub mod executor;
+pub mod program;
 pub mod query;
 
 pub use config::{Config, DefaultConfig};
