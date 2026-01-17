@@ -1060,3 +1060,180 @@ fn shared_interner_clone_shares_unsized_values() {
     // Should share the same interned value
     assert!(Arc::ptr_eq(&a.0, &b.0));
 }
+
+// =============================================================================
+// Vacuum Tests
+// =============================================================================
+
+/// Creates an interner with a vacuum thread for testing.
+fn test_interner_with_vacuum() -> Interner {
+    Interner::new_with_vacuum(
+        4,
+        TestHasherBuilder::default(),
+        std::time::Duration::from_secs(60), // Long interval, we'll trigger manually
+    )
+}
+
+#[test]
+fn vacuum_removes_dead_weak_references() {
+    let interner = test_interner();
+
+    // Intern a value and get its hash
+    let value = interner.intern(TestString::new("vacuum test"));
+    let hash = interner.hash_128(&*value);
+
+    // Value should be retrievable
+    assert!(interner.get_from_hash::<TestString>(hash).is_some());
+
+    // Drop the interned value
+    drop(value);
+
+    // Value should now be gone (weak reference dead)
+    assert!(interner.get_from_hash::<TestString>(hash).is_none());
+
+    // Vacuum should clean up the dead weak reference without panicking
+    interner.vacuum();
+}
+
+#[test]
+fn vacuum_preserves_live_references() {
+    let interner = test_interner();
+
+    let value1 = interner.intern(TestString::new("live 1"));
+    let value2 = interner.intern(TestString::new("live 2"));
+    let _value3 = interner.intern(TestString::new("will be dropped"));
+
+    let hash1 = interner.hash_128(&*value1);
+    let hash2 = interner.hash_128(&*value2);
+
+    // Run vacuum
+    interner.vacuum();
+
+    // Live values should still be retrievable
+    assert!(interner.get_from_hash::<TestString>(hash1).is_some());
+    assert!(interner.get_from_hash::<TestString>(hash2).is_some());
+
+    // And should still be the same allocation
+    let retrieved1 = interner.get_from_hash::<TestString>(hash1).unwrap();
+    assert!(Arc::ptr_eq(&value1.0, &retrieved1.0));
+}
+
+#[test]
+fn vacuum_cleans_up_after_mass_drop() {
+    let interner = test_interner();
+
+    // Intern many values
+    let mut hashes = Vec::new();
+    for i in 0..100 {
+        let value = interner.intern(TestString::new(format!("temp_{i}")));
+        hashes.push(interner.hash_128(&*value));
+        // Values are immediately dropped after this iteration
+    }
+
+    // All weak references should be dead now
+    for hash in &hashes {
+        assert!(interner.get_from_hash::<TestString>(*hash).is_none());
+    }
+
+    // Vacuum should clean up without panicking
+    interner.vacuum();
+}
+
+#[test]
+fn interner_with_vacuum_works_like_regular_interner() {
+    let interner = test_interner_with_vacuum();
+
+    let a = interner.intern(TestString::new("vacuum interner test"));
+    let b = interner.intern(TestString::new("vacuum interner test"));
+
+    // Should share the same allocation
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+}
+
+#[test]
+fn interner_with_vacuum_manual_vacuum_works() {
+    let interner = test_interner_with_vacuum();
+
+    let value = interner.intern(TestString::new("manual vacuum test"));
+    let hash = interner.hash_128(&*value);
+    drop(value);
+
+    // Manual vacuum should work
+    interner.vacuum();
+
+    // Value should be gone
+    assert!(interner.get_from_hash::<TestString>(hash).is_none());
+}
+
+#[test]
+fn interner_with_vacuum_request_vacuum_does_not_block() {
+    let interner = test_interner_with_vacuum();
+
+    // This should return immediately without blocking
+    interner.request_vacuum();
+
+    // Can still use the interner
+    let value = interner.intern(TestString::new("after request"));
+    assert_eq!(value.as_str(), "after request");
+}
+
+#[test]
+fn interner_without_vacuum_request_vacuum_is_noop() {
+    let interner = test_interner();
+
+    // This should be a no-op and not panic
+    interner.request_vacuum();
+
+    // Interner should still work normally
+    let value = interner.intern(TestString::new("no vacuum thread"));
+    assert_eq!(value.as_str(), "no vacuum thread");
+}
+
+#[test]
+fn vacuum_thread_stops_when_interner_dropped() {
+    use std::time::Duration;
+
+    // Create an interner with a very short vacuum interval
+    let interner = Interner::new_with_vacuum(
+        4,
+        TestHasherBuilder::default(),
+        Duration::from_millis(10),
+    );
+
+    // Use the interner
+    let _value = interner.intern(TestString::new("test"));
+
+    // Drop the interner - this should stop the vacuum thread
+    drop(interner);
+
+    // Give the thread time to stop (shouldn't hang)
+    std::thread::sleep(Duration::from_millis(100));
+
+    // If we get here, the thread stopped successfully
+}
+
+#[test]
+fn vacuum_with_multiple_types() {
+    let interner = test_interner();
+
+    // Intern values of different types
+    let string_value = interner.intern(TestString::new("string"));
+    let u32_value = interner.intern(TestU32(42));
+    let i32_value = interner.intern(TestI32(-42));
+
+    let string_hash = interner.hash_128(&*string_value);
+    let u32_hash = interner.hash_128(&*u32_value);
+
+    // Drop some values
+    drop(string_value);
+
+    // Vacuum
+    interner.vacuum();
+
+    // Dropped value should be gone
+    assert!(interner.get_from_hash::<TestString>(string_hash).is_none());
+
+    // Live values should still exist
+    assert!(interner.get_from_hash::<TestU32>(u32_hash).is_some());
+    assert_eq!(*i32_value, TestI32(-42));
+}

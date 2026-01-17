@@ -125,8 +125,11 @@ use std::{
     hash::Hash,
     ops::Deref,
     sync::{Arc, Weak},
+    thread::JoinHandle,
+    time::Duration,
 };
 
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use fxhash::{FxBuildHasher, FxHashSet};
 use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 use qbice_serialize::{
@@ -419,9 +422,7 @@ impl<T: StableHash + ?Sized> DynStableHash for T {
 
 struct Shard {
     typed_shard: Box<dyn Any + Send + Sync>,
-
-    #[allow(unused)]
-    vaccuume: fn(&dyn Any),
+    vacuum_fn: fn(&dyn Any),
 }
 
 type TypedShard<T> = Sharded<HashMap<Compact128, Weak<T>, FxBuildHasher>>;
@@ -432,6 +433,9 @@ struct Repr {
 
     hasher_builder_erased: Box<dyn Any + Send + Sync>,
     stable_hash_fn: fn(&dyn Any, &dyn DynStableHash) -> u128,
+
+    /// Sender to signal the vacuum thread.
+    vacuum_command: Option<Sender<VacuumCommand>>,
 }
 
 /// A thread-safe interner for deduplicating values based on stable hashing.
@@ -471,9 +475,31 @@ struct Repr {
 /// - Values are kept alive only by [`Interned<T>`] handles
 /// - When all handles are dropped, the value is deallocated
 /// - Subsequent intern calls for the same value create a new allocation
-/// - No manual cleanup needed - automatic memory management
+/// - Dead weak references can be cleaned up via [`vacuum`](Self::vacuum) or
+///   automatically by a background vacuum thread
 ///
 /// This prevents memory leaks from long-lived interners accumulating values.
+///
+/// # Background Vacuum Thread
+///
+/// The interner can optionally run a background thread that periodically
+/// removes dead weak references from the shards. Use
+/// [`new_with_vacuum`](Self::new_with_vacuum) to create an interner with
+/// automatic cleanup:
+///
+/// ```ignore
+/// use std::time::Duration;
+///
+/// // Vacuum every 60 seconds
+/// let interner = Interner::new_with_vacuum(
+///     16,
+///     BuildStableHasher128::default(),
+///     Duration::from_secs(60),
+/// );
+///
+/// // Or trigger vacuum manually
+/// interner.vacuum();
+/// ```
 ///
 /// # Thread Safety
 ///
@@ -508,13 +534,52 @@ struct Repr {
 /// // "data" is now deallocated
 /// ```
 #[derive(Debug, Clone)]
-pub struct Interner(Arc<Repr>);
+pub struct Interner {
+    inner: Arc<Repr>,
+    /// Handle to the vacuum thread (if any). Kept for lifetime management.
+    _vacuum_thread: Option<Arc<VacuumThreadHandle>>,
+}
+
+/// Command sent to the vacuum thread.
+enum VacuumCommand {
+    /// Trigger an immediate vacuum cycle.
+    Trigger,
+    /// Stop the vacuum thread.
+    Stop,
+}
+
+/// Handle to manage the vacuum thread's lifecycle.
+struct VacuumThreadHandle {
+    command_sender: Sender<VacuumCommand>,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for VacuumThreadHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VacuumThreadHandle").finish_non_exhaustive()
+    }
+}
+
+impl Drop for VacuumThreadHandle {
+    fn drop(&mut self) {
+        // Signal the thread to stop
+        let _ = self.command_sender.send(VacuumCommand::Stop);
+
+        // Wait for the thread to finish
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 impl Interner {
     /// Creates a new shared interner with the specified sharding and hasher.
     ///
-    /// This is a convenience method equivalent to creating an [`Interner`] and
-    /// wrapping it in an `Arc`.
+    /// This creates an interner without a background vacuum thread. Dead weak
+    /// references will accumulate until you call [`vacuum`](Self::vacuum)
+    /// manually or until they are replaced by new intern calls.
+    ///
+    /// For automatic cleanup, use [`new_with_vacuum`](Self::new_with_vacuum).
     ///
     /// # Parameters
     ///
@@ -529,13 +594,158 @@ impl Interner {
     /// ```ignore
     /// use qbice_stable_hash::BuildStableHasher128;
     ///
-    /// let interner = SharedInterner::new(16, BuildStableHasher128::default());
+    /// let interner = Interner::new(16, BuildStableHasher128::default());
     /// ```
     pub fn new<S: BuildStableHasher<Hash = u128> + Send + Sync + 'static>(
         shard_amount: usize,
         hasher_builder: S,
     ) -> Self {
-        Self(Arc::new(Repr::new(shard_amount, hasher_builder)))
+        Self {
+            inner: Arc::new(Repr::new(shard_amount, hasher_builder)),
+            _vacuum_thread: None,
+        }
+    }
+
+    /// Creates a new shared interner with a background vacuum thread.
+    ///
+    /// The vacuum thread periodically removes dead weak references from the
+    /// interner's shards, freeing up memory from entries that are no longer
+    /// referenced.
+    ///
+    /// # Parameters
+    ///
+    /// - `shard_amount`: The number of shards for concurrent access. More
+    ///   shards reduce contention but increase memory overhead. Recommended:
+    ///   16-32 for multi-threaded use, or the number of CPU cores.
+    /// - `hasher_builder`: The builder for creating stable hashers used to hash
+    ///   interned values. Must produce deterministic 128-bit hashes.
+    /// - `vacuum_interval`: The duration between automatic vacuum runs. The
+    ///   vacuum thread will sleep for this duration between cleanup cycles.
+    ///
+    /// # Thread Behavior
+    ///
+    /// - The vacuum thread is automatically stopped when the interner is
+    ///   dropped
+    /// - You can still call [`vacuum`](Self::vacuum) manually for immediate
+    ///   cleanup
+    /// - The vacuum process acquires write locks on shards, so very frequent
+    ///   vacuuming may impact performance
+    ///
+    /// # Recommended Intervals
+    ///
+    /// - Low memory pressure: 5-10 minutes
+    /// - Moderate usage: 30-60 seconds
+    /// - High churn (many short-lived values): 5-15 seconds
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    /// use qbice_stable_hash::BuildStableHasher128;
+    ///
+    /// // Create interner with vacuum every 30 seconds
+    /// let interner = Interner::new_with_vacuum(
+    ///     16,
+    ///     BuildStableHasher128::default(),
+    ///     Duration::from_secs(30),
+    /// );
+    /// ```
+    pub fn new_with_vacuum<
+        S: BuildStableHasher<Hash = u128> + Send + Sync + 'static,
+    >(
+        shard_amount: usize,
+        hasher_builder: S,
+        vacuum_interval: Duration,
+    ) -> Self {
+        let (command_tx, command_rx) = unbounded::<VacuumCommand>();
+
+        let repr = Arc::new(Repr::new_with_vacuum(
+            shard_amount,
+            hasher_builder,
+            command_tx.clone(),
+        ));
+
+        let repr_weak = Arc::downgrade(&repr);
+
+        let join_handle = std::thread::Builder::new()
+            .name("interner-vacuum".to_string())
+            .spawn(move || {
+                vacuum_thread_loop(&repr_weak, &command_rx, vacuum_interval);
+            })
+            .expect("failed to spawn vacuum thread");
+
+        Self {
+            inner: repr,
+            _vacuum_thread: Some(Arc::new(VacuumThreadHandle {
+                command_sender: command_tx,
+                join_handle: Some(join_handle),
+            })),
+        }
+    }
+
+    /// Manually triggers a vacuum operation to clean up dead weak references.
+    ///
+    /// This method removes all dead [`Weak`] references from the interner's
+    /// internal hash maps. Dead references occur when all [`Interned<T>`]
+    /// handles for a value have been dropped.
+    ///
+    /// # When to Use
+    ///
+    /// - After a large batch of interned values has been dropped
+    /// - Before serializing the interner state (to reduce size)
+    /// - In memory-constrained environments
+    /// - When not using a background vacuum thread
+    ///
+    /// # Performance
+    ///
+    /// - Acquires write locks on all shards sequentially
+    /// - Time complexity: O(total entries across all shards)
+    /// - May briefly block other intern/lookup operations
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Intern many temporary values
+    /// for i in 0..10000 {
+    ///     let _ = interner.intern(format!("temp_{}", i));
+    /// }
+    /// // All Interned handles dropped, but weak refs remain
+    ///
+    /// // Clean up dead references
+    /// interner.vacuum();
+    /// ```
+    pub fn vacuum(&self) { vacuum_shards(&self.inner.shards); }
+
+    /// Requests the background vacuum thread to run immediately.
+    ///
+    /// If the interner was created with
+    /// [`new_with_vacuum`](Self::new_with_vacuum), this signals the
+    /// background thread to perform a vacuum cycle as soon as
+    /// possible, rather than waiting for the next scheduled interval.
+    ///
+    /// If no background vacuum thread exists (interner created with
+    /// [`new`](Self::new)), this method does nothing.
+    ///
+    /// # Non-blocking
+    ///
+    /// This method returns immediately after signaling the thread. It does not
+    /// wait for the vacuum operation to complete. If you need synchronous
+    /// cleanup, use [`vacuum`](Self::vacuum) instead.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Request early vacuum (non-blocking)
+    /// interner.request_vacuum();
+    ///
+    /// // Or use vacuum() for synchronous cleanup
+    /// interner.vacuum();
+    /// ```
+    pub fn request_vacuum(&self) {
+        if let Some(sender) = &self.inner.vacuum_command {
+            // Send trigger command; unbounded channel won't block
+            let _ = sender.send(VacuumCommand::Trigger);
+        }
     }
 
     /// Computes the 128-bit stable hash of a value.
@@ -572,8 +782,10 @@ impl Interner {
     /// assert_ne!(hash1, hash3);  // Different value, different hash
     /// ```
     pub fn hash_128<T: StableHash + ?Sized>(&self, value: &T) -> Compact128 {
-        let hash_u128 =
-            (self.0.stable_hash_fn)(&*self.0.hasher_builder_erased, &value);
+        let hash_u128 = (self.inner.stable_hash_fn)(
+            &*self.inner.hasher_builder_erased,
+            &value,
+        );
 
         hash_u128.into()
     }
@@ -581,12 +793,13 @@ impl Interner {
     fn obtain_read_shard<T: Identifiable + Send + Sync + 'static + ?Sized>(
         &self,
     ) -> MappedRwLockReadGuard<'_, Shard> {
-        let shard_amount = self.0.shards.shard_amount();
+        let shard_amount = self.inner.shards.shard_amount();
         let stable_type_id = T::STABLE_TYPE_ID;
 
         loop {
-            let shard_index = self.0.shards.shard_index(stable_type_id.low());
-            let shard = self.0.shards.read_shard(shard_index);
+            let shard_index =
+                self.inner.shards.shard_index(stable_type_id.low());
+            let shard = self.inner.shards.read_shard(shard_index);
 
             // fast path, obtain read lock if shard exists
             if let Ok(exist) =
@@ -597,7 +810,7 @@ impl Interner {
 
             // slow path, need to create the shard, the `shard` has already
             // dropped here
-            let mut write_shard = self.0.shards.write_shard(shard_index);
+            let mut write_shard = self.inner.shards.write_shard(shard_index);
 
             if let Entry::Vacant(entry) = write_shard.entry(stable_type_id) {
                 entry.insert(Shard {
@@ -606,7 +819,7 @@ impl Interner {
                             HashMap::default()
                         }))
                     },
-                    vaccuume: vaccuume_shard::<T>,
+                    vacuum_fn: vacuum_shard::<T>,
                 });
             }
         }
@@ -944,13 +1157,52 @@ impl std::fmt::Debug for Repr {
     }
 }
 
-fn vaccuume_shard<T: ?Sized + 'static>(shard: &dyn Any) {
+fn vacuum_shard<T: ?Sized + 'static>(shard: &dyn Any) {
     let typed_shard = shard
         .downcast_ref::<TypedShard<T>>()
-        .expect("invalid shard type for vaccuume");
+        .expect("invalid shard type for vacuum");
 
     for mut write_shard in typed_shard.iter_write_shards() {
         write_shard.retain(|_, weak_value| weak_value.upgrade().is_some());
+    }
+}
+
+/// Vacuum all shards in the interner, removing dead weak references.
+fn vacuum_shards(shards: &WholeShard) {
+    for read_shard in shards.iter_read_shards() {
+        for shard in read_shard.values() {
+            (shard.vacuum_fn)(&*shard.typed_shard);
+        }
+    }
+}
+
+/// The main loop for the background vacuum thread.
+fn vacuum_thread_loop(
+    repr_weak: &Weak<Repr>,
+    command_rx: &Receiver<VacuumCommand>,
+    vacuum_interval: Duration,
+) {
+    loop {
+        // Wait for a command with timeout as the vacuum interval
+        match command_rx.recv_timeout(vacuum_interval) {
+            Ok(VacuumCommand::Stop)
+            | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                // Stop signal received or channel disconnected, exit the loop
+                return;
+            }
+            Ok(VacuumCommand::Trigger)
+            | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                // Trigger signal received, run vacuum immediately
+            }
+        }
+
+        // Try to upgrade the weak reference to run vacuum
+        if let Some(repr) = repr_weak.upgrade() {
+            vacuum_shards(&repr.shards);
+        } else {
+            // The interner has been dropped, exit the loop
+            return;
+        }
     }
 }
 
@@ -997,6 +1249,24 @@ impl Repr {
             shards: Sharded::new(shard_amount, |_| HashMap::default()),
             hasher_builder_erased: Box::new(hasher_builder),
             stable_hash_fn: stable_hash::<S>,
+            vacuum_command: None,
+        }
+    }
+
+    /// Creates a new interner with vacuum thread support.
+    pub fn new_with_vacuum<S: BuildStableHasher + Send + Sync + 'static>(
+        shard_amount: usize,
+        hasher_builder: S,
+        vacuum_command: Sender<VacuumCommand>,
+    ) -> Self
+    where
+        <S as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
+    {
+        Self {
+            shards: Sharded::new(shard_amount, |_| HashMap::default()),
+            hasher_builder_erased: Box::new(hasher_builder),
+            stable_hash_fn: stable_hash::<S>,
+            vacuum_command: Some(vacuum_command),
         }
     }
 }
