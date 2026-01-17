@@ -81,11 +81,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use qbice_storage::intern::{Interner, SharedInterner};
+//! use qbice_storage::intern::Interner;
 //! use qbice_stable_hash::BuildStableHasher128;
 //!
-//! // Create a shared interner
-//! let interner = SharedInterner::new(16, BuildStableHasher128::default());
+//! // Create an interner
+//! let interner = Interner::new(16, BuildStableHasher128::default());
 //!
 //! // Intern some values
 //! let s1 = interner.intern("hello world".to_string());
@@ -342,7 +342,7 @@ impl<T: Identifiable + StableHash + Encode + Send + Sync + 'static + ?Sized>
         plugin: &Plugin,
         session: &mut Session,
     ) -> std::io::Result<()> {
-        let interner = plugin.get::<SharedInterner>().expect(
+        let interner = plugin.get::<Interner>().expect(
             "`SharedInterner` plugin missing for encoding `Interned<T>`",
         );
 
@@ -376,7 +376,7 @@ impl<T: Identifiable + StableHash + Decode + Send + Sync + 'static> Decode
         session: &mut Session,
     ) -> std::io::Result<Self> {
         let wired = WiredInterned::<T>::decode(decoder, plugin, session)?;
-        let interner = plugin.get::<SharedInterner>().expect(
+        let interner = plugin.get::<Interner>().expect(
             "`SharedInterner` plugin missing for decoding `Interned<T>`",
         );
 
@@ -427,6 +427,13 @@ struct Shard {
 type TypedShard<T> = Sharded<HashMap<Compact128, Weak<T>, FxBuildHasher>>;
 type WholeShard = Sharded<HashMap<StableTypeID, Shard, FxBuildHasher>>;
 
+struct Repr {
+    shards: WholeShard,
+
+    hasher_builder_erased: Box<dyn Any + Send + Sync>,
+    stable_hash_fn: fn(&dyn Any, &dyn DynStableHash) -> u128,
+}
+
 /// A thread-safe interner for deduplicating values based on stable hashing.
 ///
 /// The `Interner` uses sharding to enable high-concurrency access from multiple
@@ -470,23 +477,9 @@ type WholeShard = Sharded<HashMap<StableTypeID, Shard, FxBuildHasher>>;
 ///
 /// # Thread Safety
 ///
-/// Fully thread-safe and can be shared via `Arc<Interner>` (or
-/// [`SharedInterner`]). Multiple threads can safely call
-/// [`intern`](Self::intern) concurrently. Sharding ensures that operations
-/// on different hash buckets don't block each other.
-///
-/// # Choosing Shard Count
-///
-/// More shards reduce lock contention but increase memory overhead:
-///
-/// | Scenario | Recommended Shards |
-/// |----------|-------------------|
-/// | Single-threaded | 1-4 |
-/// | Multi-threaded (general) | 16-32 (power of 2) |
-/// | High contention | 64-128 or more |
-/// | Low contention | 8-16 |
-///
-/// Powers of two enable efficient shard selection via bit masking.
+/// Fully thread-safe and can be shared using `.clone()` directly. Multiple
+/// threads can safely call [`intern`](Self::intern) concurrently. Sharding
+/// ensures that operations on different hash buckets don't block each other.
 ///
 /// # Performance Characteristics
 ///
@@ -514,74 +507,10 @@ type WholeShard = Sharded<HashMap<StableTypeID, Shard, FxBuildHasher>>;
 /// drop(v2);
 /// // "data" is now deallocated
 /// ```
-pub struct Interner {
-    shards: WholeShard,
-
-    hasher_builder_erased: Box<dyn Any + Send + Sync>,
-    stable_hash_fn: fn(&dyn Any, &dyn DynStableHash) -> u128,
-}
-
-/// A shared, reference-counted interner for convenient multi-component usage.
-///
-/// `SharedInterner` is a convenience wrapper around `Arc<Interner>` that
-/// simplifies sharing an interner across multiple threads and components.
-/// It implements [`Deref`] to provide transparent access to the underlying
-/// [`Interner`] methods.
-///
-/// # When to Use
-///
-/// **Use `SharedInterner` when:**
-/// - Sharing interner across multiple components or threads
-/// - Want simpler API than manually wrapping in `Arc`
-/// - Using as a plugin in the serialization system
-/// - Building applications with dependency injection
-///
-/// **Use `Interner` directly when:**
-/// - Managing ownership manually with custom smart pointers
-/// - The interner doesn't need to be shared
-/// - Embedding in other reference-counted structures
-///
-/// # Cloning
-///
-/// Cloning a `SharedInterner` is cheap - it only increments the reference
-/// count of the underlying `Arc`. All clones refer to the same interner
-/// instance and share the same deduplicated values.
-///
-/// # Example
-///
-/// ```ignore
-/// use qbice_storage::intern::SharedInterner;
-/// use qbice_stable_hash::BuildStableHasher128;
-///
-/// // Create a shared interner
-/// let interner = SharedInterner::new(16, BuildStableHasher128::default());
-///
-/// // Clone to share with another component (cheap operation)
-/// let interner2 = interner.clone();
-///
-/// // Both refer to the same underlying interner
-/// let v1 = interner.intern("test".to_string());
-/// let v2 = interner2.intern("test".to_string());
-/// assert!(Arc::ptr_eq(&v1.0, &v2.0));
-/// ```
-///
-/// # Serialization Integration
-///
-/// `SharedInterner` is commonly used as a serialization plugin:
-///
-/// ```ignore
-/// use qbice_serialize::Plugin;
-///
-/// let mut plugin = Plugin::new();
-/// plugin.insert(interner);
-///
-/// // Now Interned<T> values will be automatically deduplicated
-/// // during serialization
-/// ```
 #[derive(Debug, Clone)]
-pub struct SharedInterner(Arc<Interner>);
+pub struct Interner(Arc<Repr>);
 
-impl SharedInterner {
+impl Interner {
     /// Creates a new shared interner with the specified sharding and hasher.
     ///
     /// This is a convenience method equivalent to creating an [`Interner`] and
@@ -606,88 +535,7 @@ impl SharedInterner {
         shard_amount: usize,
         hasher_builder: S,
     ) -> Self {
-        Self(Arc::new(Interner::new(shard_amount, hasher_builder)))
-    }
-
-    /// Creates a shared interner from an existing interner.
-    ///
-    /// This wraps the provided [`Interner`] in an `Arc` to make it shareable.
-    ///
-    /// # Parameters
-    ///
-    /// - `interner`: The interner to wrap.
-    #[must_use]
-    pub fn from_interner(interner: Interner) -> Self {
-        Self(Arc::new(interner))
-    }
-}
-
-impl Deref for SharedInterner {
-    type Target = Interner;
-
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-impl std::fmt::Debug for Interner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Interner").finish_non_exhaustive()
-    }
-}
-
-fn vaccuume_shard<T: ?Sized + 'static>(shard: &dyn Any) {
-    let typed_shard = shard
-        .downcast_ref::<TypedShard<T>>()
-        .expect("invalid shard type for vaccuume");
-
-    for mut write_shard in typed_shard.iter_write_shards() {
-        write_shard.retain(|_, weak_value| weak_value.upgrade().is_some());
-    }
-}
-
-impl Interner {
-    /// Creates a new interner with specified sharding and stable hasher.
-    ///
-    /// # Parameters
-    ///
-    /// * `shard_amount` - The number of shards for concurrent access. Each
-    ///   shard has its own lock, so more shards reduce contention at the cost
-    ///   of memory overhead.
-    ///
-    ///   **Recommended values:**
-    ///   - Single-threaded: 1-4 shards
-    ///   - Multi-threaded (typical): 16-32 shards
-    ///   - High contention: 64-128 shards
-    ///   - Powers of 2 work best (efficient bit masking)
-    ///
-    /// * `hasher_builder` - Builder for creating stable hashers. Must produce
-    ///   deterministic 128-bit hashes. The same input must always produce the
-    ///   same hash across all program executions for serialization to work
-    ///   correctly.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shard_amount` is not a power of two.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use qbice_stable_hash::BuildStableHasher128;
-    ///
-    /// // Create interner with 16 shards
-    /// let interner = Interner::new(16, BuildStableHasher128::default());
-    /// ```
-    pub fn new<S: BuildStableHasher + Send + Sync + 'static>(
-        shard_amount: usize,
-        hasher_builder: S,
-    ) -> Self
-    where
-        <S as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
-    {
-        Self {
-            shards: Sharded::new(shard_amount, |_| HashMap::default()),
-            hasher_builder_erased: Box::new(hasher_builder),
-            stable_hash_fn: stable_hash::<S>,
-        }
+        Self(Arc::new(Repr::new(shard_amount, hasher_builder)))
     }
 
     /// Computes the 128-bit stable hash of a value.
@@ -725,7 +573,7 @@ impl Interner {
     /// ```
     pub fn hash_128<T: StableHash + ?Sized>(&self, value: &T) -> Compact128 {
         let hash_u128 =
-            (self.stable_hash_fn)(&*self.hasher_builder_erased, &value);
+            (self.0.stable_hash_fn)(&*self.0.hasher_builder_erased, &value);
 
         hash_u128.into()
     }
@@ -733,12 +581,12 @@ impl Interner {
     fn obtain_read_shard<T: Identifiable + Send + Sync + 'static + ?Sized>(
         &self,
     ) -> MappedRwLockReadGuard<'_, Shard> {
-        let shard_amount = self.shards.shard_amount();
+        let shard_amount = self.0.shards.shard_amount();
         let stable_type_id = T::STABLE_TYPE_ID;
 
         loop {
-            let shard_index = self.shards.shard_index(stable_type_id.low());
-            let shard = self.shards.read_shard(shard_index);
+            let shard_index = self.0.shards.shard_index(stable_type_id.low());
+            let shard = self.0.shards.read_shard(shard_index);
 
             // fast path, obtain read lock if shard exists
             if let Ok(exist) =
@@ -749,7 +597,7 @@ impl Interner {
 
             // slow path, need to create the shard, the `shard` has already
             // dropped here
-            let mut write_shard = self.shards.write_shard(shard_index);
+            let mut write_shard = self.0.shards.write_shard(shard_index);
 
             if let Entry::Vacant(entry) = write_shard.entry(stable_type_id) {
                 entry.insert(Shard {
@@ -1086,6 +934,69 @@ impl Interner {
                     Interned(arc)
                 }
             }
+        }
+    }
+}
+
+impl std::fmt::Debug for Repr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Interner").finish_non_exhaustive()
+    }
+}
+
+fn vaccuume_shard<T: ?Sized + 'static>(shard: &dyn Any) {
+    let typed_shard = shard
+        .downcast_ref::<TypedShard<T>>()
+        .expect("invalid shard type for vaccuume");
+
+    for mut write_shard in typed_shard.iter_write_shards() {
+        write_shard.retain(|_, weak_value| weak_value.upgrade().is_some());
+    }
+}
+
+impl Repr {
+    /// Creates a new interner with specified sharding and stable hasher.
+    ///
+    /// # Parameters
+    ///
+    /// * `shard_amount` - The number of shards for concurrent access. Each
+    ///   shard has its own lock, so more shards reduce contention at the cost
+    ///   of memory overhead.
+    ///
+    ///   **Recommended values:**
+    ///   - Single-threaded: 1-4 shards
+    ///   - Multi-threaded (typical): 16-32 shards
+    ///   - High contention: 64-128 shards
+    ///   - Powers of 2 work best (efficient bit masking)
+    ///
+    /// * `hasher_builder` - Builder for creating stable hashers. Must produce
+    ///   deterministic 128-bit hashes. The same input must always produce the
+    ///   same hash across all program executions for serialization to work
+    ///   correctly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `shard_amount` is not a power of two.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use qbice_stable_hash::BuildStableHasher128;
+    ///
+    /// // Create interner with 16 shards
+    /// let interner = Interner::new(16, BuildStableHasher128::default());
+    /// ```
+    pub fn new<S: BuildStableHasher + Send + Sync + 'static>(
+        shard_amount: usize,
+        hasher_builder: S,
+    ) -> Self
+    where
+        <S as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
+    {
+        Self {
+            shards: Sharded::new(shard_amount, |_| HashMap::default()),
+            hasher_builder_erased: Box::new(hasher_builder),
+            stable_hash_fn: stable_hash::<S>,
         }
     }
 }

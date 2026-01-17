@@ -72,7 +72,7 @@ impl<C: Config> Engine<C> {
                     } else if current.0.is_superset(&other.0) {
                     } else {
                         // create a new archetype set that is the union of both
-                        let mut union_set = current.inner_owned();
+                        let mut union_set = current.clone_inner();
                         union_set.0.extend(other.0.iter().copied());
 
                         new_archetype = Some(union_set.0);

@@ -41,7 +41,7 @@ use qbice_serialize::Plugin;
 use qbice_stable_hash::{
     BuildStableHasher, Compact128, StableHash, StableHasher,
 };
-use qbice_storage::{intern::SharedInterner, kv_database::KvDatabaseFactory};
+use qbice_storage::{intern::Interner, kv_database::KvDatabaseFactory};
 
 use crate::{
     config::{Config, DefaultConfig},
@@ -126,7 +126,7 @@ pub(super) mod computation_graph;
 /// Large result sets should use shared ownership (`Arc`, `Arc<[T]>`) to avoid
 /// expensive cloning.
 pub struct Engine<C: Config> {
-    interner: SharedInterner,
+    interner: Interner,
     computation_graph: ComputationGraph<C>,
     executor_registry: Registry<C>,
     rayon_thread_pool: rayon::ThreadPool,
@@ -275,7 +275,7 @@ impl<C: Config> Engine<C> {
         stable_hasher: C::BuildStableHasher,
     ) -> Result<Self, F::Error> {
         let shared_interner =
-            SharedInterner::new(default_shard_amount(), stable_hasher.clone());
+            Interner::new(default_shard_amount(), stable_hasher.clone());
 
         assert!(
             serialization_plugin.insert(shared_interner.clone()).is_none(),

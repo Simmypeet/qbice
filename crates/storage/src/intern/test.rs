@@ -12,7 +12,7 @@ use qbice_stable_hash::{BuildStableHasherDefault, StableHash, StableHasher};
 use qbice_stable_type_id::Identifiable;
 use siphasher::sip128::SipHasher;
 
-use super::{Interned, Interner, SharedInterner};
+use super::{Interned, Interner};
 
 /// A type alias for the default hasher builder used in tests.
 type TestHasherBuilder = BuildStableHasherDefault<SipHasher>;
@@ -20,11 +20,6 @@ type TestHasherBuilder = BuildStableHasherDefault<SipHasher>;
 /// Creates a new interner for testing.
 fn test_interner() -> Interner {
     Interner::new(4, TestHasherBuilder::default())
-}
-
-/// Creates a new shared interner for testing.
-fn test_shared_interner() -> SharedInterner {
-    SharedInterner::new(4, TestHasherBuilder::default())
 }
 
 // =============================================================================
@@ -268,39 +263,6 @@ fn intern_after_drop_creates_new_allocation() {
 }
 
 // =============================================================================
-// SharedInterner Tests
-// =============================================================================
-
-#[test]
-fn shared_interner_deref_works() {
-    let shared = test_shared_interner();
-
-    let interned = shared.intern(TestString::new("shared test"));
-    assert_eq!(interned.as_str(), "shared test");
-}
-
-#[test]
-fn shared_interner_clone_shares_interner() {
-    let shared1 = test_shared_interner();
-    let shared2 = shared1.clone();
-
-    let a = shared1.intern(TestString::new("shared"));
-    let b = shared2.intern(TestString::new("shared"));
-
-    // Should share the same interned value
-    assert!(Arc::ptr_eq(&a.0, &b.0));
-}
-
-#[test]
-fn shared_interner_from_interner() {
-    let interner = test_interner();
-    let shared = SharedInterner::from_interner(interner);
-
-    let interned = shared.intern(TestString::new("from interner"));
-    assert_eq!(interned.as_str(), "from interner");
-}
-
-// =============================================================================
 // Serialization and Deserialization Tests
 // =============================================================================
 
@@ -320,7 +282,7 @@ fn decode_from_bytes<T: Decode>(bytes: &[u8], plugin: &Plugin) -> T {
 
 #[test]
 fn serialize_interned_value_first_occurrence_encodes_full_value() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());
 
@@ -336,7 +298,7 @@ fn serialize_interned_value_first_occurrence_encodes_full_value() {
 
 #[test]
 fn serialize_interned_value_second_occurrence_encodes_reference() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());
 
@@ -374,7 +336,7 @@ fn serialize_interned_value_second_occurrence_encodes_reference() {
 
 #[test]
 fn deserialize_interned_value_from_source() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());
 
@@ -389,7 +351,7 @@ fn deserialize_interned_value_from_source() {
 
 #[test]
 fn deserialize_interned_value_shares_allocation() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());
 
@@ -408,7 +370,7 @@ fn deserialize_interned_value_shares_allocation() {
 
 #[test]
 fn serialize_deserialize_tuple_with_duplicate_interned_values() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());
 
@@ -430,7 +392,7 @@ fn serialize_deserialize_tuple_with_duplicate_interned_values() {
 
 #[test]
 fn serialize_deserialize_vec_with_interned_values() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());
 
@@ -458,7 +420,7 @@ fn serialize_deserialize_vec_with_interned_values() {
 
 #[test]
 fn deserialize_with_fresh_interner_interns_values() {
-    let encode_interner = test_shared_interner();
+    let encode_interner = test_interner();
     let mut encode_plugin = Plugin::new();
     encode_plugin.insert(encode_interner.clone());
 
@@ -467,7 +429,7 @@ fn deserialize_with_fresh_interner_interns_values() {
     let bytes = encode_to_bytes(&interned, &encode_plugin);
 
     // Decode with a completely fresh interner
-    let decode_interner = test_shared_interner();
+    let decode_interner = test_interner();
     let mut decode_plugin = Plugin::new();
     decode_plugin.insert(decode_interner.clone());
 
@@ -564,7 +526,7 @@ fn multiple_types_in_same_interner() {
 fn concurrent_intern_same_value() {
     use std::thread;
 
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut handles = vec![];
 
     for _ in 0..10 {
@@ -588,7 +550,7 @@ fn concurrent_intern_same_value() {
 fn concurrent_intern_different_values() {
     use std::thread;
 
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut handles = vec![];
 
     for i in 0..10 {
@@ -613,7 +575,7 @@ fn concurrent_intern_different_values() {
 fn concurrent_serialize_deserialize() {
     use std::thread;
 
-    let shared = test_shared_interner();
+    let shared = test_interner();
 
     // Pre-populate with some values
     let data = TestData { name: "concurrent_serde".to_string(), value: 100 };
@@ -682,7 +644,7 @@ fn same_value_different_type_produces_different_interned_id() {
 
 #[test]
 fn encoding_same_interned_twice_in_sequence_uses_reference() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());
 
@@ -716,7 +678,7 @@ fn decoding_reference_before_source_fails() {
     // In practice, proper serialization should never produce such output.
 
     // We'll manually construct invalid bytes to test error handling
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared);
 
@@ -767,7 +729,7 @@ fn intern_nested_structure() {
 
 #[test]
 fn serialize_deserialize_nested_interned() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());
 
@@ -1008,7 +970,7 @@ fn get_from_hash_returns_none_for_dropped_unsized_str() {
 fn concurrent_intern_unsized_same_value() {
     use std::thread;
 
-    let shared = test_shared_interner();
+    let shared = test_interner();
     let mut handles = vec![];
 
     for _ in 0..10 {
@@ -1078,7 +1040,7 @@ fn intern_unsized_i32_slice() {
 
 #[test]
 fn shared_interner_intern_unsized_works() {
-    let shared = test_shared_interner();
+    let shared = test_interner();
 
     let a: Interned<str> = shared.intern_unsized("shared unsized".to_string());
     let b: Interned<str> = shared.intern_unsized("shared unsized".to_string());
@@ -1089,7 +1051,7 @@ fn shared_interner_intern_unsized_works() {
 
 #[test]
 fn shared_interner_clone_shares_unsized_values() {
-    let shared1 = test_shared_interner();
+    let shared1 = test_interner();
     let shared2 = shared1.clone();
 
     let a: Interned<str> = shared1.intern_unsized("shared clone".to_string());
