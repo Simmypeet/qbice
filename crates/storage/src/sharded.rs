@@ -26,6 +26,8 @@ impl<T> Sharded<T> {
         Self { shards: shards.into_boxed_slice(), mask: shard_amount - 1 }
     }
 
+    pub fn shard_amount(&self) -> usize { self.shards.len() }
+
     pub fn read_shard(
         &self,
         shard_index: usize,
@@ -44,6 +46,12 @@ impl<T> Sharded<T> {
         &self,
     ) -> impl Iterator<Item = parking_lot::RwLockReadGuard<'_, T>> {
         self.shards.iter().map(|shard| shard.read())
+    }
+
+    pub fn iter_write_shards(
+        &self,
+    ) -> impl Iterator<Item = parking_lot::RwLockWriteGuard<'_, T>> {
+        self.shards.iter().map(|shard| shard.write())
     }
 
     #[allow(clippy::cast_possible_truncation)]

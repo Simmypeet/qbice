@@ -833,3 +833,268 @@ fn interned_hash_uses_value() {
     // b should be found in the set because it has the same value
     assert!(set.contains(&b));
 }
+
+// =============================================================================
+// Unsized Type Interning Tests
+// =============================================================================
+
+#[test]
+fn intern_unsized_str_returns_same_allocation() {
+    let interner = test_interner();
+
+    let a: Interned<str> = interner.intern_unsized("hello world".to_string());
+    let b: Interned<str> = interner.intern_unsized("hello world".to_string());
+
+    // Both should point to the same allocation
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+    assert_eq!(&*a, "hello world");
+    assert_eq!(&*b, "hello world");
+}
+
+#[test]
+fn intern_unsized_str_different_values_different_allocations() {
+    let interner = test_interner();
+
+    let a: Interned<str> = interner.intern_unsized("hello".to_string());
+    let b: Interned<str> = interner.intern_unsized("world".to_string());
+
+    // Should be different allocations
+    assert!(!Arc::ptr_eq(&a.0, &b.0));
+    assert_eq!(&*a, "hello");
+    assert_eq!(&*b, "world");
+}
+
+#[test]
+fn intern_unsized_str_from_box() {
+    let interner = test_interner();
+
+    let boxed: Box<str> = "test string".into();
+    let a: Interned<str> = interner.intern_unsized(boxed);
+    let b: Interned<str> = interner.intern_unsized("test string".to_string());
+
+    // Should share the same allocation
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+}
+
+#[test]
+fn intern_unsized_byte_slice_returns_same_allocation() {
+    let interner = test_interner();
+
+    let a: Interned<[u8]> = interner.intern_unsized(vec![1u8, 2, 3, 4, 5]);
+    let b: Interned<[u8]> = interner.intern_unsized(vec![1u8, 2, 3, 4, 5]);
+
+    // Both should point to the same allocation
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+    assert_eq!(&*a, &[1u8, 2, 3, 4, 5]);
+}
+
+#[test]
+fn intern_unsized_byte_slice_different_values_different_allocations() {
+    let interner = test_interner();
+
+    let a: Interned<[u8]> = interner.intern_unsized(vec![1u8, 2, 3]);
+    let b: Interned<[u8]> = interner.intern_unsized(vec![4u8, 5, 6]);
+
+    // Should be different allocations
+    assert!(!Arc::ptr_eq(&a.0, &b.0));
+    assert_eq!(&*a, &[1u8, 2, 3]);
+    assert_eq!(&*b, &[4u8, 5, 6]);
+}
+
+#[test]
+fn intern_unsized_byte_slice_from_box() {
+    let interner = test_interner();
+
+    let boxed: Box<[u8]> = vec![10u8, 20, 30].into_boxed_slice();
+    let a: Interned<[u8]> = interner.intern_unsized(boxed);
+    let b: Interned<[u8]> = interner.intern_unsized(vec![10u8, 20, 30]);
+
+    // Should share the same allocation
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+}
+
+#[test]
+fn intern_unsized_empty_str() {
+    let interner = test_interner();
+
+    let a: Interned<str> = interner.intern_unsized(String::new());
+    let b: Interned<str> = interner.intern_unsized(String::new());
+
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+    assert!(a.is_empty());
+}
+
+#[test]
+fn intern_unsized_empty_byte_slice() {
+    let interner = test_interner();
+
+    let a: Interned<[u8]> = interner.intern_unsized(Vec::<u8>::new());
+    let b: Interned<[u8]> = interner.intern_unsized(Vec::<u8>::new());
+
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+    assert!(a.is_empty());
+}
+
+#[test]
+fn intern_unsized_large_str() {
+    let interner = test_interner();
+    let large_string = "x".repeat(100_000);
+
+    let a: Interned<str> = interner.intern_unsized(large_string.clone());
+    let b: Interned<str> = interner.intern_unsized(large_string);
+
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+    assert_eq!(a.len(), 100_000);
+}
+
+#[test]
+fn intern_unsized_str_deref_works() {
+    let interner = test_interner();
+
+    let interned: Interned<str> =
+        interner.intern_unsized("hello world".to_string());
+
+    // Should be able to call str methods via Deref
+    assert_eq!(interned.len(), 11);
+    assert!(interned.starts_with("hello"));
+    assert!(interned.ends_with("world"));
+    assert!(interned.contains(' '));
+}
+
+#[test]
+fn intern_unsized_byte_slice_deref_works() {
+    let interner = test_interner();
+
+    let interned: Interned<[u8]> = interner.intern_unsized(vec![1u8, 2, 3, 4]);
+
+    // Should be able to call slice methods via Deref
+    assert_eq!(interned.len(), 4);
+    assert_eq!(interned.first(), Some(&1u8));
+    assert_eq!(interned.last(), Some(&4u8));
+}
+
+#[test]
+fn get_from_hash_works_for_unsized_str() {
+    let interner = test_interner();
+    let value = "test string";
+    let hash = interner.hash_128(value);
+
+    let interned: Interned<str> = interner.intern_unsized(value.to_string());
+    let retrieved = interner.get_from_hash::<str>(hash);
+
+    assert!(retrieved.is_some());
+    let retrieved = retrieved.unwrap();
+    assert!(Arc::ptr_eq(&interned.0, &retrieved.0));
+}
+
+#[test]
+fn get_from_hash_returns_none_for_dropped_unsized_str() {
+    let interner = test_interner();
+    let value = "temporary string";
+    let hash = interner.hash_128(value);
+
+    {
+        let _interned: Interned<str> =
+            interner.intern_unsized(value.to_string());
+        // Value should be retrievable while interned exists
+        assert!(interner.get_from_hash::<str>(hash).is_some());
+    }
+
+    // After the Interned is dropped, the weak reference should be dead
+    assert!(interner.get_from_hash::<str>(hash).is_none());
+}
+
+#[test]
+fn concurrent_intern_unsized_same_value() {
+    use std::thread;
+
+    let shared = test_shared_interner();
+    let mut handles = vec![];
+
+    for _ in 0..10 {
+        let interner = shared.clone();
+        handles.push(thread::spawn(move || {
+            interner
+                .intern_unsized::<str, String>("concurrent string".to_string())
+        }));
+    }
+
+    let results: Vec<_> =
+        handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    // All results should share the same allocation
+    let first = &results[0];
+    for result in &results[1..] {
+        assert!(Arc::ptr_eq(&first.0, &result.0));
+    }
+}
+
+#[test]
+fn intern_unsized_str_and_string_are_separate() {
+    let interner = test_interner();
+
+    // Interning as str
+    let str_interned: Interned<str> =
+        interner.intern_unsized("hello".to_string());
+
+    // Interning as String (sized type)
+    let string_interned: Interned<TestString> =
+        interner.intern(TestString::new("hello"));
+
+    // These are different types, so they should be stored separately
+    // (different StableTypeIDs)
+    assert_eq!(&*str_interned, "hello");
+    assert_eq!(string_interned.as_str(), "hello");
+}
+
+#[test]
+fn intern_unsized_after_drop_creates_new_allocation() {
+    let interner = test_interner();
+
+    let first: Interned<str> =
+        interner.intern_unsized("reused string".to_string());
+    let first_ptr = Arc::as_ptr(&first.0);
+    drop(first);
+
+    let second: Interned<str> =
+        interner.intern_unsized("reused string".to_string());
+
+    // Should be a different allocation since the first was dropped
+    assert_ne!(Arc::as_ptr(&second.0), first_ptr);
+    assert_eq!(&*second, "reused string");
+}
+
+#[test]
+fn intern_unsized_i32_slice() {
+    let interner = test_interner();
+
+    let a: Interned<[i32]> = interner.intern_unsized(vec![1, 2, 3, 4, 5]);
+    let b: Interned<[i32]> = interner.intern_unsized(vec![1, 2, 3, 4, 5]);
+
+    // Both should point to the same allocation
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+    assert_eq!(&*a, &[1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn shared_interner_intern_unsized_works() {
+    let shared = test_shared_interner();
+
+    let a: Interned<str> = shared.intern_unsized("shared unsized".to_string());
+    let b: Interned<str> = shared.intern_unsized("shared unsized".to_string());
+
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+    assert_eq!(&*a, "shared unsized");
+}
+
+#[test]
+fn shared_interner_clone_shares_unsized_values() {
+    let shared1 = test_shared_interner();
+    let shared2 = shared1.clone();
+
+    let a: Interned<str> = shared1.intern_unsized("shared clone".to_string());
+    let b: Interned<str> = shared2.intern_unsized("shared clone".to_string());
+
+    // Should share the same interned value
+    assert!(Arc::ptr_eq(&a.0, &b.0));
+}

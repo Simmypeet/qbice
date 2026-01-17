@@ -23,6 +23,25 @@
 //! - 1000 copies of "hello" → 1 allocation + 1000 small handles
 //! - Large duplicate structures → single allocation shared by all references
 //!
+//! ## Unsized Type Support
+//!
+//! The interner supports interning unsized types like `str` and `[T]` through
+//! the [`Interner::intern_unsized`] method. This is especially useful for
+//! string interning where you want to store `Interned<str>` rather than
+//! `Interned<String>`, saving the extra indirection of the `String` wrapper:
+//!
+//! ```ignore
+//! // Intern a str slice directly
+//! let s1: Interned<str> = interner.intern_unsized("hello world".to_string());
+//! let s2: Interned<str> = interner.intern_unsized("hello world".to_string());
+//!
+//! // Same allocation
+//! assert!(Arc::ptr_eq(&s1.0, &s2.0));
+//!
+//! // Can also use Box<str> or any type that converts to Arc<str>
+//! let s3: Interned<str> = interner.intern_unsized(Box::<str>::from("hello world"));
+//! ```
+//!
 //! ## Serialization Optimization
 //!
 //! The interning system integrates with the serialization framework:
@@ -101,13 +120,15 @@
 
 use std::{
     any::Any,
-    collections::HashMap,
+    borrow::Borrow,
+    collections::{HashMap, hash_map::Entry},
     hash::Hash,
     ops::Deref,
     sync::{Arc, Weak},
 };
 
-use fxhash::FxHashSet;
+use fxhash::{FxBuildHasher, FxHashSet};
+use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 use qbice_serialize::{
     Decode, Decoder, Encode, Encoder, Plugin,
     session::{Session, SessionKey},
@@ -174,6 +195,13 @@ pub struct InternedID {
 /// instances contain equal values (as determined by stable hash), they share
 /// the same underlying allocation when created through the same [`Interner`].
 ///
+/// # Unsized Type Support
+///
+/// `Interned<T>` supports unsized types like `str` and `[T]`. Use
+/// [`Interner::intern_unsized`] to create `Interned<str>` or `Interned<[T]>`
+/// values. This avoids the extra layer of indirection from wrapper types like
+/// `String` or `Vec<T>`.
+///
 /// # Memory Management
 ///
 /// - **Automatic deallocation**: The value is freed when all `Interned<T>`
@@ -225,16 +253,16 @@ pub struct InternedID {
 /// assert_eq!(s1.len(), 5);
 ///
 /// // Get owned copy if needed
-/// let owned: String = s1.inner_owned();
+/// let owned: String = s1.clone_inner();
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash)]
 #[stable_hash_crate(qbice_stable_hash)]
-pub struct Interned<T>(Arc<T>);
+pub struct Interned<T: ?Sized>(Arc<T>);
 
 impl<T> Interned<T> {
     /// Returns an owned clone of the interned value.
     #[must_use]
-    pub fn inner_owned(&self) -> T
+    pub fn clone_inner(&self) -> T
     where
         T: Clone,
     {
@@ -242,7 +270,7 @@ impl<T> Interned<T> {
     }
 }
 
-impl<T> Deref for Interned<T> {
+impl<T: ?Sized> Deref for Interned<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target { &self.0 }
@@ -305,8 +333,8 @@ impl SessionKey for SeenInterned {
     type Value = FxHashSet<InternedID>;
 }
 
-impl<T: Identifiable + StableHash + Encode + Send + Sync + 'static> Encode
-    for Interned<T>
+impl<T: Identifiable + StableHash + Encode + Send + Sync + 'static + ?Sized>
+    Encode for Interned<T>
 {
     fn encode<E: Encoder + ?Sized>(
         &self,
@@ -383,11 +411,21 @@ trait DynStableHash {
     fn stable_hash_dyn(&self, hasher: &mut dyn StableHasher<Hash = u128>);
 }
 
-impl<T: StableHash> DynStableHash for T {
+impl<T: StableHash + ?Sized> DynStableHash for T {
     fn stable_hash_dyn(&self, hasher: &mut dyn StableHasher<Hash = u128>) {
         StableHash::stable_hash(self, hasher);
     }
 }
+
+struct Shard {
+    typed_shard: Box<dyn Any + Send + Sync>,
+
+    #[allow(unused)]
+    vaccuume: fn(&dyn Any),
+}
+
+type TypedShard<T> = Sharded<HashMap<Compact128, Weak<T>, FxBuildHasher>>;
+type WholeShard = Sharded<HashMap<StableTypeID, Shard, FxBuildHasher>>;
 
 /// A thread-safe interner for deduplicating values based on stable hashing.
 ///
@@ -477,7 +515,7 @@ impl<T: StableHash> DynStableHash for T {
 /// // "data" is now deallocated
 /// ```
 pub struct Interner {
-    shards: Sharded<HashMap<InternedID, Weak<dyn Any + Send + Sync>>>,
+    shards: WholeShard,
 
     hasher_builder_erased: Box<dyn Any + Send + Sync>,
     stable_hash_fn: fn(&dyn Any, &dyn DynStableHash) -> u128,
@@ -596,6 +634,16 @@ impl std::fmt::Debug for Interner {
     }
 }
 
+fn vaccuume_shard<T: ?Sized + 'static>(shard: &dyn Any) {
+    let typed_shard = shard
+        .downcast_ref::<TypedShard<T>>()
+        .expect("invalid shard type for vaccuume");
+
+    for mut write_shard in typed_shard.iter_write_shards() {
+        write_shard.retain(|_, weak_value| weak_value.upgrade().is_some());
+    }
+}
+
 impl Interner {
     /// Creates a new interner with specified sharding and stable hasher.
     ///
@@ -636,7 +684,7 @@ impl Interner {
         <S as BuildStableHasher>::Hasher: StableHasher<Hash = u128>,
     {
         Self {
-            shards: Sharded::new(shard_amount, |_| HashMap::new()),
+            shards: Sharded::new(shard_amount, |_| HashMap::default()),
             hasher_builder_erased: Box::new(hasher_builder),
             stable_hash_fn: stable_hash::<S>,
         }
@@ -675,11 +723,45 @@ impl Interner {
     /// let hash3 = interner.hash_128(&"world".to_string());
     /// assert_ne!(hash1, hash3);  // Different value, different hash
     /// ```
-    pub fn hash_128<T: StableHash>(&self, value: &T) -> Compact128 {
+    pub fn hash_128<T: StableHash + ?Sized>(&self, value: &T) -> Compact128 {
         let hash_u128 =
-            (self.stable_hash_fn)(&*self.hasher_builder_erased, value);
+            (self.stable_hash_fn)(&*self.hasher_builder_erased, &value);
 
         hash_u128.into()
+    }
+
+    fn obtain_read_shard<T: Identifiable + Send + Sync + 'static + ?Sized>(
+        &self,
+    ) -> MappedRwLockReadGuard<'_, Shard> {
+        let shard_amount = self.shards.shard_amount();
+        let stable_type_id = T::STABLE_TYPE_ID;
+
+        loop {
+            let shard_index = self.shards.shard_index(stable_type_id.low());
+            let shard = self.shards.read_shard(shard_index);
+
+            // fast path, obtain read lock if shard exists
+            if let Ok(exist) =
+                RwLockReadGuard::try_map(shard, |x| x.get(&stable_type_id))
+            {
+                return exist;
+            }
+
+            // slow path, need to create the shard, the `shard` has already
+            // dropped here
+            let mut write_shard = self.shards.write_shard(shard_index);
+
+            if let Entry::Vacant(entry) = write_shard.entry(stable_type_id) {
+                entry.insert(Shard {
+                    typed_shard: {
+                        Box::new(TypedShard::<T>::new(shard_amount, |_| {
+                            HashMap::default()
+                        }))
+                    },
+                    vaccuume: vaccuume_shard::<T>,
+                });
+            }
+        }
     }
 
     /// Retrieves an interned value by its 128-bit hash, if it exists and is
@@ -740,26 +822,24 @@ impl Interner {
     /// drop(retrieved);
     /// assert!(interner.get_from_hash::<String>(hash).is_none());
     /// ```
-    pub fn get_from_hash<T: Identifiable + Send + Sync + 'static>(
+    #[must_use]
+    pub fn get_from_hash<T: Identifiable + Send + Sync + 'static + ?Sized>(
         &self,
         hash_128: Compact128,
     ) -> Option<Interned<T>> {
-        let shard_index = self.shards.shard_index(hash_128.low());
+        let read_shard = self.obtain_read_shard::<T>();
+        let typed_shard = read_shard
+            .typed_shard
+            .downcast_ref::<TypedShard<T>>()
+            .expect("should be correct type");
 
-        let interned_id =
-            InternedID { stable_type_id: T::STABLE_TYPE_ID, hash_128 };
+        let shard_index = typed_shard.shard_index(hash_128.low());
+        let read_lock = typed_shard.read_shard(shard_index);
 
-        let read_shard = self.shards.read_shard(shard_index);
-
-        if let Some(arc) = read_shard
-            .get(&interned_id)
+        read_lock
+            .get(&hash_128)
             .and_then(std::sync::Weak::upgrade)
-            .map(|x| x.downcast::<T>().expect("should've been a correct type"))
-        {
-            return Some(Interned(arc));
-        }
-
-        None
+            .map(|arc| Interned(arc))
     }
 
     /// Interns a value, returning a reference-counted handle to the shared
@@ -845,21 +925,20 @@ impl Interner {
         value: T,
     ) -> Interned<T> {
         let hash_128 = self.hash_128(&value);
-        let shard_index = self.shards.shard_index(hash_128.low());
+        let read_shard = self.obtain_read_shard::<T>();
+        let typed_shard = read_shard
+            .typed_shard
+            .downcast_ref::<TypedShard<T>>()
+            .expect("should be correct type");
 
-        let interned_id =
-            InternedID { stable_type_id: T::STABLE_TYPE_ID, hash_128 };
+        let shard_index = typed_shard.shard_index(hash_128.low());
 
         // First, try to find an existing interned value
         {
-            let read_shard = self.shards.read_shard(shard_index);
+            let read_shard = typed_shard.read_shard(shard_index);
 
-            if let Some(arc) = read_shard
-                .get(&interned_id)
-                .and_then(std::sync::Weak::upgrade)
-                .map(|x| {
-                    x.downcast::<T>().expect("should've been a correct type")
-                })
+            if let Some(arc) =
+                read_shard.get(&hash_128).and_then(std::sync::Weak::upgrade)
             {
                 return Interned(arc);
             }
@@ -867,23 +946,18 @@ impl Interner {
 
         // Not found, so insert a new one
         {
-            let mut write_shard = self.shards.write_shard(shard_index);
+            let mut write_shard = typed_shard.write_shard(shard_index);
 
-            match write_shard.entry(interned_id) {
+            match write_shard.entry(hash_128) {
                 // double check in case another thread inserted it
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    if let Some(arc) = entry
-                        .get()
-                        .upgrade()
-                        .and_then(|x| x.downcast::<T>().ok())
-                    {
+                    if let Some(arc) = entry.get().upgrade() {
                         return Interned(arc);
                     }
 
                     // The weak reference is dead, we can replace it
                     let arc = Arc::new(value);
                     let weak = Arc::downgrade(&arc);
-                    let weak = weak as Weak<dyn Any + Send + Sync>;
 
                     entry.insert(weak);
 
@@ -893,7 +967,119 @@ impl Interner {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let arc = Arc::new(value);
                     let weak = Arc::downgrade(&arc);
-                    let weak = weak as Weak<dyn Any + Send + Sync>;
+
+                    entry.insert(weak);
+
+                    Interned(arc)
+                }
+            }
+        }
+    }
+
+    /// Interns an unsized value, returning a reference-counted handle to the
+    /// shared allocation.
+    ///
+    /// This method is similar to [`intern`](Self::intern) but supports unsized
+    /// types like `str` and `[T]`. The value is provided as a sized type `Q`
+    /// that can be borrowed as `T` and converted into `Arc<T>`.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - The unsized type to intern (e.g., `str`, `[u8]`). Must
+    ///   implement:
+    ///   - [`StableHash`]: For computing the deterministic content hash
+    ///   - [`Identifiable`]: For the stable type ID
+    ///   - `Send + Sync + 'static`: For safe sharing across threads
+    ///
+    /// * `Q` - The sized type that owns the value. Must implement:
+    ///   - [`Borrow<T>`]: To access the unsized value for hashing
+    ///   - `Send + Sync + 'static`: For safe sharing across threads
+    ///   - `Arc<T>: From<Q>`: For efficient conversion to `Arc<T>`
+    ///
+    /// # Common Type Combinations
+    ///
+    /// | Unsized `T` | Sized `Q` options |
+    /// |-------------|-------------------|
+    /// | `str` | `String`, `Box<str>`, `Cow<'static, str>` |
+    /// | `[u8]` | `Vec<u8>`, `Box<[u8]>` |
+    /// | `[T]` | `Vec<T>`, `Box<[T]>` |
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Intern strings as str slices
+    /// let s1: Interned<str> = interner.intern_unsized("hello".to_string());
+    /// let s2: Interned<str> = interner.intern_unsized("hello".to_string());
+    ///
+    /// // Same allocation
+    /// assert!(Arc::ptr_eq(&s1.0, &s2.0));
+    ///
+    /// // Transparent access via Deref
+    /// assert_eq!(&*s1, "hello");
+    /// assert_eq!(s1.len(), 5);
+    ///
+    /// // Works with byte slices too
+    /// let bytes: Interned<[u8]> = interner.intern_unsized(vec![1, 2, 3]);
+    /// assert_eq!(&*bytes, &[1, 2, 3]);
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// Same as [`intern`](Self::intern) - O(1) expected time with hashing
+    /// overhead proportional to value size.
+    pub fn intern_unsized<
+        T: StableHash + Identifiable + Send + Sync + 'static + ?Sized,
+        Q: Borrow<T> + Send + Sync + 'static,
+    >(
+        &self,
+        value: Q,
+    ) -> Interned<T>
+    where
+        Arc<T>: From<Q>,
+    {
+        let hash_128 = self.hash_128(value.borrow());
+        let read_shard = self.obtain_read_shard::<T>();
+        let typed_shard = read_shard
+            .typed_shard
+            .downcast_ref::<TypedShard<T>>()
+            .expect("should be correct type");
+
+        let shard_index = typed_shard.shard_index(hash_128.low());
+
+        // First, try to find an existing interned value
+        {
+            let read_shard = typed_shard.read_shard(shard_index);
+
+            if let Some(arc) =
+                read_shard.get(&hash_128).and_then(std::sync::Weak::upgrade)
+            {
+                return Interned(arc);
+            }
+        }
+
+        // Not found, so insert a new one
+        {
+            let mut write_shard = typed_shard.write_shard(shard_index);
+
+            match write_shard.entry(hash_128) {
+                // double check in case another thread inserted it
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if let Some(arc) = entry.get().upgrade() {
+                        return Interned(arc);
+                    }
+
+                    // The weak reference is dead, we can replace it
+                    let arc = Arc::from(value);
+                    let weak = Arc::downgrade(&arc);
+
+                    entry.insert(weak);
+
+                    Interned(arc)
+                }
+
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let arc = Arc::from(value);
+                    let weak = Arc::downgrade(&arc);
 
                     entry.insert(weak);
 
