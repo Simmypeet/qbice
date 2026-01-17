@@ -488,6 +488,54 @@ impl<T: Decode> Decode for Arc<[T]> {
     }
 }
 
+impl<T: Decode> Decode for Rc<[T]> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<Self> {
+        let len = decoder.read_usize()?;
+        let mut vec = Vec::with_capacity(len);
+        for _ in 0..len {
+            vec.push(T::decode(decoder, plugin, session)?);
+        }
+        Ok(Self::from(vec))
+    }
+}
+
+impl Decode for Box<str> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        _plugin: &Plugin,
+        _session: &mut Session,
+    ) -> io::Result<Self> {
+        let s = decoder.read_str()?;
+        Ok(s.into_boxed_str())
+    }
+}
+
+impl Decode for Rc<str> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        _plugin: &Plugin,
+        _session: &mut Session,
+    ) -> io::Result<Self> {
+        let s = decoder.read_str()?;
+        Ok(Self::from(s))
+    }
+}
+
+impl Decode for Arc<str> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        _plugin: &Plugin,
+        _session: &mut Session,
+    ) -> io::Result<Self> {
+        let s = decoder.read_str()?;
+        Ok(Self::from(s))
+    }
+}
+
 impl<T: ToOwned + ?Sized> Decode for Cow<'_, T>
 where
     T::Owned: Decode,
