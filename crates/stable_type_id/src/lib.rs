@@ -535,3 +535,604 @@ impl<T: Identifiable> Identifiable for Vec<T> {
         base.combine(T::STABLE_TYPE_ID)
     };
 }
+
+impl Identifiable for str {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("str");
+}
+
+impl Identifiable for String {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("alloc::string::String");
+}
+
+// Primitive types
+macro_rules! impl_identifiable_for_primitive {
+    ($($ty:ty => $name:expr),* $(,)?) => {
+        $(
+            impl Identifiable for $ty {
+                const STABLE_TYPE_ID: StableTypeID =
+                    StableTypeID::from_unique_type_name($name);
+            }
+        )*
+    };
+}
+
+impl_identifiable_for_primitive! {
+    u8 => "u8",
+    u16 => "u16",
+    u32 => "u32",
+    u64 => "u64",
+    u128 => "u128",
+    usize => "usize",
+    i8 => "i8",
+    i16 => "i16",
+    i32 => "i32",
+    i64 => "i64",
+    i128 => "i128",
+    isize => "isize",
+    bool => "bool",
+    char => "char",
+    f32 => "f32",
+    f64 => "f64",
+}
+
+// Box<T>
+impl<T: Identifiable + ?Sized> Identifiable for Box<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("alloc::boxed::Box");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Rc<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::rc::Rc<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("alloc::rc::Rc");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Weak<T> (Arc)
+impl<T: Identifiable + ?Sized> Identifiable for std::sync::Weak<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("alloc::sync::Weak");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Weak<T> (Rc)
+impl<T: Identifiable + ?Sized> Identifiable for std::rc::Weak<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("alloc::rc::Weak");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Option<T>
+impl<T: Identifiable> Identifiable for Option<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::option::Option");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Result<T, E>
+impl<T: Identifiable, E: Identifiable> Identifiable for Result<T, E> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::result::Result");
+        base.combine(T::STABLE_TYPE_ID).combine(E::STABLE_TYPE_ID)
+    };
+}
+
+// RefCell<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::cell::RefCell<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::cell::RefCell");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Cell<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::cell::Cell<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::cell::Cell");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// UnsafeCell<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::cell::UnsafeCell<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::cell::UnsafeCell");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// OnceCell<T>
+impl<T: Identifiable> Identifiable for std::cell::OnceCell<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::cell::OnceCell");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Mutex<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::sync::Mutex<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("std::sync::Mutex");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// RwLock<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::sync::RwLock<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("std::sync::RwLock");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// OnceLock<T>
+impl<T: Identifiable> Identifiable for std::sync::OnceLock<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("std::sync::OnceLock");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Cow<'_, T>
+impl<T: Identifiable + ToOwned + ?Sized> Identifiable
+    for std::borrow::Cow<'_, T>
+where
+    T::Owned: Identifiable,
+{
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("alloc::borrow::Cow");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// PhantomData<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::marker::PhantomData<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::marker::PhantomData");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// ManuallyDrop<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::mem::ManuallyDrop<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::mem::ManuallyDrop");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// MaybeUninit<T>
+impl<T: Identifiable> Identifiable for std::mem::MaybeUninit<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::mem::MaybeUninit");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Pin<P>
+impl<P: Identifiable> Identifiable for std::pin::Pin<P> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::pin::Pin");
+        base.combine(P::STABLE_TYPE_ID)
+    };
+}
+
+// NonNull<T>
+impl<T: Identifiable + ?Sized> Identifiable for std::ptr::NonNull<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::ptr::NonNull");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// References
+impl<T: Identifiable + ?Sized> Identifiable for &T {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::primitive::reference");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable + ?Sized> Identifiable for &mut T {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name(
+            "core::primitive::reference_mut",
+        );
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Raw pointers
+impl<T: Identifiable + ?Sized> Identifiable for *const T {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::primitive::ptr_const");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable + ?Sized> Identifiable for *mut T {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::primitive::ptr_mut");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Arrays
+impl<T: Identifiable, const N: usize> Identifiable for [T; N] {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::primitive::array");
+        // Include the array size in the type ID
+        let size_id = unsafe { StableTypeID::from_raw_parts(N as u64, 0) };
+        base.combine(T::STABLE_TYPE_ID).combine(size_id)
+    };
+}
+
+// Wrapping<T>
+impl<T: Identifiable> Identifiable for std::num::Wrapping<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::num::Wrapping");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Saturating<T>
+impl<T: Identifiable> Identifiable for std::num::Saturating<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::num::Saturating");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// NonZero types
+macro_rules! impl_identifiable_for_nonzero {
+    ($($ty:ty => $name:expr),* $(,)?) => {
+        $(
+            impl Identifiable for $ty {
+                const STABLE_TYPE_ID: StableTypeID =
+                    StableTypeID::from_unique_type_name($name);
+            }
+        )*
+    };
+}
+
+impl_identifiable_for_nonzero! {
+    std::num::NonZeroU8 => "core::num::NonZeroU8",
+    std::num::NonZeroU16 => "core::num::NonZeroU16",
+    std::num::NonZeroU32 => "core::num::NonZeroU32",
+    std::num::NonZeroU64 => "core::num::NonZeroU64",
+    std::num::NonZeroU128 => "core::num::NonZeroU128",
+    std::num::NonZeroUsize => "core::num::NonZeroUsize",
+    std::num::NonZeroI8 => "core::num::NonZeroI8",
+    std::num::NonZeroI16 => "core::num::NonZeroI16",
+    std::num::NonZeroI32 => "core::num::NonZeroI32",
+    std::num::NonZeroI64 => "core::num::NonZeroI64",
+    std::num::NonZeroI128 => "core::num::NonZeroI128",
+    std::num::NonZeroIsize => "core::num::NonZeroIsize",
+}
+
+// Atomic types
+macro_rules! impl_identifiable_for_atomic {
+    ($($ty:ty => $name:expr),* $(,)?) => {
+        $(
+            impl Identifiable for $ty {
+                const STABLE_TYPE_ID: StableTypeID =
+                    StableTypeID::from_unique_type_name($name);
+            }
+        )*
+    };
+}
+
+impl_identifiable_for_atomic! {
+    std::sync::atomic::AtomicBool => "core::sync::atomic::AtomicBool",
+    std::sync::atomic::AtomicI8 => "core::sync::atomic::AtomicI8",
+    std::sync::atomic::AtomicI16 => "core::sync::atomic::AtomicI16",
+    std::sync::atomic::AtomicI32 => "core::sync::atomic::AtomicI32",
+    std::sync::atomic::AtomicI64 => "core::sync::atomic::AtomicI64",
+    std::sync::atomic::AtomicIsize => "core::sync::atomic::AtomicIsize",
+    std::sync::atomic::AtomicU8 => "core::sync::atomic::AtomicU8",
+    std::sync::atomic::AtomicU16 => "core::sync::atomic::AtomicU16",
+    std::sync::atomic::AtomicU32 => "core::sync::atomic::AtomicU32",
+    std::sync::atomic::AtomicU64 => "core::sync::atomic::AtomicU64",
+    std::sync::atomic::AtomicUsize => "core::sync::atomic::AtomicUsize",
+}
+
+// AtomicPtr<T>
+impl<T: Identifiable> Identifiable for std::sync::atomic::AtomicPtr<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name(
+            "core::sync::atomic::AtomicPtr",
+        );
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Range types
+impl<T: Identifiable> Identifiable for std::ops::Range<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::ops::Range");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable> Identifiable for std::ops::RangeFrom<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::ops::RangeFrom");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl Identifiable for std::ops::RangeFull {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::ops::RangeFull");
+}
+
+impl<T: Identifiable> Identifiable for std::ops::RangeInclusive<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::ops::RangeInclusive");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable> Identifiable for std::ops::RangeTo<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::ops::RangeTo");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable> Identifiable for std::ops::RangeToInclusive<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("core::ops::RangeToInclusive");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable> Identifiable for std::ops::Bound<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("core::ops::Bound");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// Duration and Instant
+impl Identifiable for std::time::Duration {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::time::Duration");
+}
+
+impl Identifiable for std::time::Instant {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::time::Instant");
+}
+
+impl Identifiable for std::time::SystemTime {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::time::SystemTime");
+}
+
+// Ordering
+impl Identifiable for std::cmp::Ordering {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::cmp::Ordering");
+}
+
+impl Identifiable for std::sync::atomic::Ordering {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::sync::atomic::Ordering");
+}
+
+// Infallible and Never-like types
+impl Identifiable for std::convert::Infallible {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::convert::Infallible");
+}
+
+// Path types
+impl Identifiable for std::path::Path {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::path::Path");
+}
+
+impl Identifiable for std::path::PathBuf {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::path::PathBuf");
+}
+
+// OsStr and OsString
+impl Identifiable for std::ffi::OsStr {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::ffi::OsStr");
+}
+
+impl Identifiable for std::ffi::OsString {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::ffi::OsString");
+}
+
+// CStr and CString
+impl Identifiable for std::ffi::CStr {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::ffi::CStr");
+}
+
+impl Identifiable for std::ffi::CString {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("alloc::ffi::CString");
+}
+
+// Hash builder types
+impl Identifiable for std::hash::RandomState {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::hash::RandomState");
+}
+
+impl Identifiable for std::hash::DefaultHasher {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::hash::DefaultHasher");
+}
+
+impl<S: Identifiable> Identifiable for std::hash::BuildHasherDefault<S> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name(
+            "std::hash::BuildHasherDefault",
+        );
+
+        base.combine(S::STABLE_TYPE_ID)
+    };
+}
+
+// Collections
+impl<K: Identifiable, V: Identifiable, S: Identifiable> Identifiable
+    for std::collections::HashMap<K, V, S>
+{
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("std::collections::HashMap");
+        base.combine(K::STABLE_TYPE_ID)
+            .combine(V::STABLE_TYPE_ID)
+            .combine(S::STABLE_TYPE_ID)
+    };
+}
+
+impl<K: Identifiable, V: Identifiable> Identifiable
+    for std::collections::BTreeMap<K, V>
+{
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("alloc::collections::BTreeMap");
+        base.combine(K::STABLE_TYPE_ID).combine(V::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable, S: Identifiable> Identifiable
+    for std::collections::HashSet<T, S>
+{
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("std::collections::HashSet");
+        base.combine(T::STABLE_TYPE_ID).combine(S::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable> Identifiable for std::collections::BTreeSet<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("alloc::collections::BTreeSet");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable> Identifiable for std::collections::VecDeque<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base =
+            StableTypeID::from_unique_type_name("alloc::collections::VecDeque");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable> Identifiable for std::collections::LinkedList<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name(
+            "alloc::collections::LinkedList",
+        );
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+impl<T: Identifiable> Identifiable for std::collections::BinaryHeap<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name(
+            "alloc::collections::BinaryHeap",
+        );
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+// TypeId itself
+impl Identifiable for std::any::TypeId {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::any::TypeId");
+}
+
+// Phantom types
+impl Identifiable for std::marker::PhantomPinned {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::marker::PhantomPinned");
+}
+
+// IO types
+impl Identifiable for std::io::Error {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::io::Error");
+}
+
+impl Identifiable for std::io::ErrorKind {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("std::io::ErrorKind");
+}
+
+// fmt types
+impl Identifiable for std::fmt::Error {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::fmt::Error");
+}
+
+// alloc types
+impl Identifiable for std::alloc::Layout {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::alloc::Layout");
+}
+
+impl Identifiable for std::alloc::LayoutError {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::alloc::LayoutError");
+}
+
+// IpAddr types
+impl Identifiable for std::net::IpAddr {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::net::IpAddr");
+}
+
+impl Identifiable for std::net::Ipv4Addr {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::net::Ipv4Addr");
+}
+
+impl Identifiable for std::net::Ipv6Addr {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::net::Ipv6Addr");
+}
+
+impl Identifiable for std::net::SocketAddr {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::net::SocketAddr");
+}
+
+impl Identifiable for std::net::SocketAddrV4 {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::net::SocketAddrV4");
+}
+
+impl Identifiable for std::net::SocketAddrV6 {
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("core::net::SocketAddrV6");
+}
