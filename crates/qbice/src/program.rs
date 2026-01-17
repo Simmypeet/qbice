@@ -65,8 +65,6 @@
 
 use std::sync::Arc;
 
-use linkme::DistributedSlice;
-
 use crate::{Config, Engine, Executor, Query};
 
 /// A registration entry for an executor in a distributed slice.
@@ -169,9 +167,9 @@ impl<C: Config> Engine<C> {
     ///     engine.register_program(MY_PROGRAM);
     /// }
     /// ```
-    pub fn register_program(
+    pub fn register_program<'x>(
         &mut self,
-        registrations: DistributedSlice<[Registration<C>]>,
+        registrations: impl IntoIterator<Item = &'x Registration<C>>,
     ) {
         for reg in registrations {
             (reg.register_executor_fn)(self);
