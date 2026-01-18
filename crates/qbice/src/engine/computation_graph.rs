@@ -5,7 +5,8 @@ pub(crate) use caller::CallerInformation;
 use dashmap::DashSet;
 pub(crate) use persist::QueryDebug;
 use qbice_serialize::{Decode, Encode};
-use qbice_stable_hash::{BuildStableHasher, StableHasher};
+use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};
+use qbice_stable_type_id::Identifiable;
 pub(crate) use slow_path::GuardedTrackedEngine;
 
 use crate::{
@@ -256,6 +257,40 @@ impl<C: Config> TrackedEngine<C> {
 
         // panic! with CyclicPanicPayload if cyclic error detected
         result.unwrap_or_else(|_| CyclicPanicPayload::unwind())
+    }
+
+    /// Interns a value, returning a reference-counted handle to the shared
+    /// allocation.
+    ///
+    /// This is a delegation to [`Interner::intern`]. See its documentation for
+    /// more details.
+    ///
+    /// [`Interner::intern`]: qbice_storage::intern::Interner::intern
+    pub fn intern<T: StableHash + Identifiable + Send + Sync + 'static>(
+        &self,
+        value: T,
+    ) -> qbice_storage::intern::Interned<T> {
+        self.engine.intern(value)
+    }
+
+    /// Interns an unsized value, returning a reference-counted handle to the
+    /// shared allocation.
+    ///
+    /// This is a delegation to [`Interner::intern_unsized`]. See its
+    /// documentation for more details.
+    ///
+    /// [`Interner::intern_unsized`]: qbice_storage::intern::Interner::intern_unsized
+    pub fn intern_unsized<
+        T: StableHash + Identifiable + Send + Sync + 'static + ?Sized,
+        Q: std::borrow::Borrow<T> + Send + Sync + 'static,
+    >(
+        &self,
+        value: Q,
+    ) -> qbice_storage::intern::Interned<T>
+    where
+        Arc<T>: From<Q>,
+    {
+        self.engine.intern_unsized(value)
     }
 }
 

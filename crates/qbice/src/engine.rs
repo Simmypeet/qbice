@@ -41,6 +41,7 @@ use qbice_serialize::Plugin;
 use qbice_stable_hash::{
     BuildStableHasher, Compact128, StableHash, StableHasher,
 };
+use qbice_stable_type_id::Identifiable;
 use qbice_storage::{intern::Interner, kv_database::KvDatabaseFactory};
 
 use crate::{
@@ -196,6 +197,40 @@ impl<C: Config> Engine<C> {
         executor: Arc<E>,
     ) {
         self.executor_registry.register(executor);
+    }
+
+    /// Interns a value, returning a reference-counted handle to the shared
+    /// allocation.
+    ///
+    /// This is a delegation to [`Interner::intern`]. See its documentation for
+    /// more details.
+    ///
+    /// [`Interner::intern`]: qbice_storage::intern::Interner::intern
+    pub fn intern<T: StableHash + Identifiable + Send + Sync + 'static>(
+        &self,
+        value: T,
+    ) -> qbice_storage::intern::Interned<T> {
+        self.interner.intern(value)
+    }
+
+    /// Interns an unsized value, returning a reference-counted handle to the
+    /// shared allocation.
+    ///
+    /// This is a delegation to [`Interner::intern_unsized`]. See its
+    /// documentation for more details.
+    ///
+    /// [`Interner::intern_unsized`]: qbice_storage::intern::Interner::intern_unsized
+    pub fn intern_unsized<
+        T: StableHash + Identifiable + Send + Sync + 'static + ?Sized,
+        Q: std::borrow::Borrow<T> + Send + Sync + 'static,
+    >(
+        &self,
+        value: Q,
+    ) -> qbice_storage::intern::Interned<T>
+    where
+        Arc<T>: From<Q>,
+    {
+        self.interner.intern_unsized(value)
     }
 }
 
