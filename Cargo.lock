@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_stable_hash"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "dashmap",
  "flexstr",
