@@ -31,13 +31,14 @@ async fn cancellation_safety() {
 
     engine.register_executor(slow_executor.clone());
 
-    let mut input_session = engine.input_session();
-
-    input_session.set_input(Variable(0), 123);
-
-    drop(input_session);
-
     let engine = Arc::new(engine);
+
+    {
+        let mut input_session = engine.input_session();
+
+        input_session.set_input(Variable(0), 123);
+    }
+
     let tracked_engine = engine.tracked();
 
     // Now, set the executor to make it stuck
@@ -166,11 +167,13 @@ async fn cancellation_with_dependency_chain() {
     engine.register_executor(executor_a.clone());
     engine.register_executor(executor_b.clone());
 
-    let mut input_session = engine.input_session();
-    input_session.set_input(Variable(0), 50);
-    drop(input_session);
-
     let engine = Arc::new(engine);
+
+    {
+        let mut input_session = engine.input_session();
+        input_session.set_input(Variable(0), 50);
+    }
+
     let tracked_engine = engine.tracked();
 
     // Set executor A to get stuck after querying B
@@ -271,12 +274,13 @@ async fn parallel_queries_with_cancellation() {
 
     engine.register_executor(executor.clone());
 
-    let mut input_session = engine.input_session();
-    input_session.set_input(Variable(0), 100);
-    input_session.set_input(Variable(1), 200);
-    drop(input_session);
-
     let engine = Arc::new(engine);
+
+    {
+        let mut input_session = engine.input_session();
+        input_session.set_input(Variable(0), 100);
+        input_session.set_input(Variable(1), 200);
+    }
 
     // Spawn multiple queries in parallel, but cancel some of them
     let tracked_engine_1 = engine.clone().tracked();
@@ -399,13 +403,15 @@ async fn cancellation_with_partial_dependencies() {
     let executor = Arc::new(MultiDependencyExecutor::default());
     engine.register_executor(executor.clone());
 
-    let mut input_session = engine.input_session();
-    input_session.set_input(Variable(0), 10);
-    input_session.set_input(Variable(1), 20);
-    input_session.set_input(Variable(2), 30);
-    drop(input_session);
-
     let engine = Arc::new(engine);
+
+    {
+        let mut input_session = engine.input_session();
+        input_session.set_input(Variable(0), 10);
+        input_session.set_input(Variable(1), 20);
+        input_session.set_input(Variable(2), 30);
+    }
+
     let tracked_engine = engine.clone().tracked();
 
     // Cancel after querying 2 dependencies
@@ -505,11 +511,13 @@ async fn cancellation_during_repair() {
     let executor = Arc::new(RepairableCancellableExecutor::default());
     engine.register_executor(executor.clone());
 
-    let mut input_session = engine.input_session();
-    input_session.set_input(Variable(0), 100);
-    drop(input_session);
-
     let engine = Arc::new(engine);
+
+    {
+        let mut input_session = engine.input_session();
+        input_session.set_input(Variable(0), 100);
+    }
+
     let tracked_engine = engine.clone().tracked();
 
     // First, compute the query successfully
@@ -668,11 +676,12 @@ async fn cancellation_at_different_nesting_levels() {
     engine.register_executor(outer_executor.clone());
     engine.register_executor(inner_executor.clone());
 
-    let mut input_session = engine.input_session();
-    input_session.set_input(Variable(0), 50);
-    drop(input_session);
-
     let engine = Arc::new(engine);
+
+    {
+        let mut input_session = engine.input_session();
+        input_session.set_input(Variable(0), 50);
+    }
 
     // Test 1: Cancel before inner query
     {

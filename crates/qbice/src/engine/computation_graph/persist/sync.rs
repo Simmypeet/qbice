@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use qbice_stable_hash::Compact128;
-use qbice_stable_type_id::Identifiable;
+use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{
     kv_database::{DiscriminantEncoding, WideColumn, WideColumnValue},
     sieve::{BackgroundWriter, WideColumnSieve, WriteBuffer},
@@ -13,9 +13,9 @@ use crate::{
     engine::computation_graph::{
         CallerInformation, QueryKind,
         persist::{
-            BackwardEdge, ForwardEdgeObservation, ForwardEdgeOrder,
-            LastVerified, NodeInfo, Observation, PendingBackwardProjection,
-            QueryResult, Timestamp,
+            BackwardEdge, ExternalInputSet, ForwardEdgeObservation,
+            ForwardEdgeOrder, LastVerified, NodeInfo, Observation,
+            PendingBackwardProjection, QueryInput, QueryResult, Timestamp,
         },
     },
     query::QueryID,
@@ -370,6 +370,30 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
+    pub(in crate::engine::computation_graph) async fn get_query_input<
+        Q: Query,
+    >(
+        &self,
+        query_id: Compact128,
+        caller_information: &CallerInformation,
+    ) -> Option<Q> {
+        {
+            let guard =
+                self.computation_graph.persist.sync.timestamp_lock.read();
+
+            if *guard == caller_information.timestamp() {
+                return self
+                    .computation_graph
+                    .persist
+                    .query_store
+                    .get_normal::<QueryInput<Q>>(query_id)
+                    .map(|x| x.0.clone());
+            }
+        }
+
+        self.cancel().await
+    }
+
     pub(in crate::engine::computation_graph) unsafe fn get_forward_edges_order_unchecked(
         &self,
         query_id: QueryID,
@@ -408,5 +432,29 @@ impl<C: Config> Engine<C> {
             .query_node
             .get_normal::<NodeInfo>(query_id)
             .map(|x| x.clone())
+    }
+
+    pub(in crate::engine::computation_graph) unsafe fn get_query_input_unchecked<
+        Q: Query,
+    >(
+        &self,
+        query_id: Compact128,
+    ) -> Option<Q> {
+        self.computation_graph
+            .persist
+            .query_store
+            .get_normal::<QueryInput<Q>>(query_id)
+            .map(|x| x.0.clone())
+    }
+
+    pub(in crate::engine::computation_graph) fn get_external_input_queries(
+        &self,
+        type_id: &StableTypeID,
+    ) -> ExternalInputSet<C> {
+        self.computation_graph
+            .persist
+            .external_input_queries
+            .get_set(type_id)
+            .clone()
     }
 }

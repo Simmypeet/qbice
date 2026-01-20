@@ -85,15 +85,15 @@ async fn basic_timestamp_cancellation() {
 
     engine.register_executor(hanging_executor.clone());
 
+    let cancellation_token = CancellationToken::new();
+
+    let engine = Arc::new(engine);
+
     // start with zero
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 0);
     }
-
-    let cancellation_token = CancellationToken::new();
-
-    let engine = Arc::new(engine);
 
     let new_session_handle = {
         let engine = engine.clone();
@@ -184,6 +184,9 @@ async fn multiple_concurrent_queries_cancelled() {
 
     engine.register_executor(hanging_executor.clone());
 
+    let cancellation_token = CancellationToken::new();
+    let engine = Arc::new(engine);
+
     // start with zero
     {
         let mut input_session = engine.input_session();
@@ -191,9 +194,6 @@ async fn multiple_concurrent_queries_cancelled() {
         input_session.set_input(Variable(1), 0);
         input_session.set_input(Variable(2), 0);
     }
-
-    let cancellation_token = CancellationToken::new();
-    let engine = Arc::new(engine);
 
     let new_session_handle = {
         let engine = engine.clone();
@@ -295,14 +295,14 @@ async fn rapid_timestamp_increments() {
 
     engine.register_executor(hanging_executor.clone());
 
+    let cancellation_token = CancellationToken::new();
+    let engine = Arc::new(engine);
+
     // start with zero
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 0);
     }
-
-    let cancellation_token = CancellationToken::new();
-    let engine = Arc::new(engine);
 
     let increment_handle = {
         let engine = engine.clone();
@@ -371,13 +371,13 @@ async fn stale_tracked_engine_queries_timeout() {
 
     engine.register_executor(hanging_executor.clone());
 
+    let engine = Arc::new(engine);
+
     // start with zero
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 0);
     }
-
-    let engine = Arc::new(engine);
 
     // create tracked engine before timestamp increment
     let stale_tracked_engine = engine.clone().tracked();

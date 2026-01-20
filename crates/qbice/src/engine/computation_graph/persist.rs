@@ -186,6 +186,123 @@ impl<C: Config> RemoveElementFromSet for BackwardEdge<C> {
     }
 }
 
+/// Container for storing query hashes (Compact128) that were computed
+/// with [`ExecutionStyle::ExternalInput`] for a specific query type.
+///
+/// This enables refreshing all external input queries of a given type
+/// during an input session.
+pub struct ExternalInputSet<C: Config>(
+    Arc<DashSet<Compact128, C::BuildHasher>>,
+);
+
+impl<C: Config> ExternalInputSet<C> {
+    /// Returns an iterator over all query hashes in this set.
+    pub fn iter(
+        &self,
+    ) -> dashmap::iter_set::Iter<
+        '_,
+        Compact128,
+        C::BuildHasher,
+        DashMap<Compact128, (), C::BuildHasher>,
+    > {
+        self.0.iter()
+    }
+}
+
+impl<C: Config> std::fmt::Debug for ExternalInputSet<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalInputSet")
+            .field("queries", &self.0)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<C: Config> Clone for ExternalInputSet<C> {
+    fn clone(&self) -> Self { Self(self.0.clone()) }
+}
+
+impl<C: Config> Encode for ExternalInputSet<C> {
+    fn encode<E: qbice_serialize::Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &qbice_serialize::Plugin,
+        session: &mut qbice_serialize::session::Session,
+    ) -> std::io::Result<()> {
+        (*self.0).encode(encoder, plugin, session)
+    }
+}
+
+impl<C: Config> Decode for ExternalInputSet<C> {
+    fn decode<D: qbice_serialize::Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &qbice_serialize::Plugin,
+        session: &mut qbice_serialize::session::Session,
+    ) -> std::io::Result<Self> {
+        let set = DashSet::decode(decoder, plugin, session)?;
+        Ok(Self(Arc::new(set)))
+    }
+}
+
+impl<C: Config> Default for ExternalInputSet<C> {
+    fn default() -> Self { Self(Arc::new(DashSet::default())) }
+}
+
+impl<C: Config> Extend<Compact128> for ExternalInputSet<C> {
+    fn extend<T: IntoIterator<Item = Compact128>>(&mut self, iter: T) {
+        for hash in iter {
+            self.0.insert(hash);
+        }
+    }
+}
+
+impl<C: Config> FromIterator<Compact128> for ExternalInputSet<C> {
+    fn from_iter<T: IntoIterator<Item = Compact128>>(iter: T) -> Self {
+        Self(Arc::new(FromIterator::from_iter(iter)))
+    }
+}
+
+impl<'x, C: Config> IntoIterator for &'x ExternalInputSet<C> {
+    type Item = RefMulti<'x, Compact128>;
+    type IntoIter = dashmap::iter_set::Iter<
+        'x,
+        Compact128,
+        C::BuildHasher,
+        DashMap<Compact128, (), C::BuildHasher>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter { self.0.iter() }
+}
+
+impl<C: Config> RemoveElementFromSet for ExternalInputSet<C> {
+    type Element = Compact128;
+
+    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
+    where
+        Self::Element: Borrow<Q>,
+    {
+        self.0.remove(element).is_some()
+    }
+}
+
+/// Column marker for storing external input queries grouped by their type.
+///
+/// Maps [`StableTypeID`] (query type) → `HashSet<Compact128>` (query hashes).
+/// This allows retrieving all external input queries of a specific type
+/// for refreshing during input sessions.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+pub struct ExternalInputColumn<C: Config>(PhantomData<C>);
+
+impl<C: Config> KeyOfSetColumn for ExternalInputColumn<C> {
+    type Key = StableTypeID;
+    type Element = Compact128;
+}
+
+impl<C: Config> KeyOfSetContainer for ExternalInputColumn<C> {
+    type Container = ExternalInputSet<C>;
+}
+
 #[derive(Identifiable)]
 pub struct DirtySetColumn;
 
@@ -419,6 +536,13 @@ pub struct Persist<C: Config> {
         Arc<WideColumnSieve<QueryStoreColumn, C::Database, C::BuildHasher>>,
     backward_edges:
         Arc<KeyOfSetSieve<BackwardEdgeColumn<C>, C::Database, C::BuildHasher>>,
+    /// Stores external input queries grouped by their type.
+    ///
+    /// Maps [`StableTypeID`] → `HashSet<Compact128>` for all queries computed
+    /// with [`ExecutionStyle::ExternalInput`]. Used by `InputSession::refresh`
+    /// to find and re-invoke all external input queries of a specific type.
+    external_input_queries:
+        Arc<KeyOfSetSieve<ExternalInputColumn<C>, C::Database, C::BuildHasher>>,
 
     sync: sync::Sync<C>,
 }
@@ -445,6 +569,12 @@ impl<C: Config> Persist<C> {
                 C::BuildHasher::default(),
             )),
             backward_edges: Arc::new(Sieve::<_, C>::new(
+                C::cache_entry_capacity(),
+                shard_amount,
+                db.clone(),
+                C::BuildHasher::default(),
+            )),
+            external_input_queries: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
                 db.clone(),
@@ -575,10 +705,23 @@ impl<C: Config> Engine<C> {
                 tx.writer_buffer(),
             );
 
+            // Track external input queries by type for refresh support
+            if query_kind.is_external_input() {
+                self.computation_graph
+                    .persist
+                    .external_input_queries
+                    .insert_set_element(
+                        &query_id.id.stable_type_id(),
+                        query_id.id.compact_hash_128(),
+                        tx.writer_buffer(),
+                    );
+            }
+
             self.submit_write_buffer(tx);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn set_computed_input<Q: Query>(
         &self,
         query: Q,
@@ -586,6 +729,7 @@ impl<C: Config> Engine<C> {
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
         tx: &mut WriterBufferWithLock<C>,
+        set_input: bool,
         timestamp: Timestamp,
     ) {
         let query_id = QueryID::new::<Q>(query_hash_128);
@@ -626,11 +770,13 @@ impl<C: Config> Engine<C> {
                 }
             }
 
-            self.computation_graph.persist.query_node.put(
-                query_id,
-                Some(QueryKind::Input),
-                tx.writer_buffer(),
-            );
+            if set_input {
+                self.computation_graph.persist.query_node.put(
+                    query_id,
+                    Some(QueryKind::Input),
+                    tx.writer_buffer(),
+                );
+            }
 
             self.computation_graph.persist.query_node.put(
                 query_id,
@@ -741,17 +887,6 @@ impl<C: Config> Engine<C> {
             .dirty_edge_set
             .get_normal::<Unit>(Edge { from, to })
             .is_some()
-    }
-
-    pub(super) fn get_query_input<Q: Query>(
-        &self,
-        query_id: Compact128,
-    ) -> Option<Q> {
-        self.computation_graph
-            .persist
-            .query_store
-            .get_normal::<QueryInput<Q>>(query_id)
-            .map(|x| x.0.clone())
     }
 
     pub(super) async fn done_backward_projection(

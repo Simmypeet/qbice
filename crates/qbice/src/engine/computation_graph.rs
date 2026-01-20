@@ -304,6 +304,21 @@ impl<C: Config> Clone for TrackedEngine<C> {
     }
 }
 
+impl<C: Config> TrackedEngine<C> {
+    /// Creates a new `TrackedEngine` with the given engine, cache, and caller
+    /// information.
+    ///
+    /// This is an internal constructor used for refresh operations on external
+    /// input queries.
+    pub(crate) const fn new(
+        engine: Arc<Engine<C>>,
+        cache: Arc<DashSet<QueryID>>,
+        caller: CallerInformation,
+    ) -> Self {
+        Self { engine, cache, caller }
+    }
+}
+
 static_assertions::assert_impl_all!(&TrackedEngine<DefaultConfig>: Send, Sync);
 
 impl<C: Config> std::fmt::Debug for TrackedEngine<C> {

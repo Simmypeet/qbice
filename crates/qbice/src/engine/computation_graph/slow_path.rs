@@ -31,6 +31,15 @@ pub struct GuardedTrackedEngine<C: Config> {
 }
 
 impl<C: Config> GuardedTrackedEngine<C> {
+    /// Creates a new `GuardedTrackedEngine` wrapping the given
+    /// `TrackedEngine`.
+    ///
+    /// When dropped, this will wait for any spawned tasks associated with the
+    /// tracked engine to complete.
+    pub(crate) const fn new(tracked_engine: TrackedEngine<C>) -> Self {
+        Self { tracked_engine }
+    }
+
     pub const fn tracked_engine(&self) -> &TrackedEngine<C> {
         &self.tracked_engine
     }

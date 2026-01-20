@@ -135,6 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.register_executor(divide_executor.clone());
     engine.register_executor(safe_divide_executor.clone());
 
+    // Wrap engine in Arc
+    let engine = Arc::new(engine);
+
     // Set initial values
     {
         let mut input_session = engine.input_session();
@@ -142,7 +145,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_session.set_input(Variable::B, 2);
     }
 
-    let engine = Arc::new(engine);
     let tracked = engine.tracked();
 
     // Execute queries

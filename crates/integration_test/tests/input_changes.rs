@@ -20,14 +20,15 @@ async fn division_input_change() {
 
         engine.register_executor(division_ex.clone());
 
-        let mut input_session = engine.input_session();
-
-        input_session.set_input(Variable(0), 40);
-        input_session.set_input(Variable(1), 4);
-
-        drop(input_session);
-
         let engine = Arc::new(engine);
+
+        {
+            let mut input_session = engine.input_session();
+
+            input_session.set_input(Variable(0), 40);
+            input_session.set_input(Variable(1), 4);
+        }
+
         let tracked_engine = engine.clone().tracked();
 
         assert_eq!(
@@ -46,12 +47,14 @@ async fn division_input_change() {
 
         engine.register_executor(division_ex.clone());
 
-        let mut input_session = engine.input_session();
+        let engine = Arc::new(engine);
 
-        input_session.set_input(Variable(1), 2);
-        drop(input_session);
+        {
+            let mut input_session = engine.input_session();
+            input_session.set_input(Variable(1), 2);
+        }
 
-        let tracked_engine = Arc::new(engine).tracked();
+        let tracked_engine = engine.tracked();
 
         assert_eq!(
             tracked_engine
@@ -78,14 +81,15 @@ async fn safe_division_input_changes() {
         engine.register_executor(division_ex.clone());
         engine.register_executor(safe_division_ex.clone());
 
-        let mut input_session = engine.input_session();
-
-        input_session.set_input(Variable(0), 42);
-        input_session.set_input(Variable(1), 2);
-
-        drop(input_session);
-
         let engine = Arc::new(engine);
+
+        {
+            let mut input_session = engine.input_session();
+
+            input_session.set_input(Variable(0), 42);
+            input_session.set_input(Variable(1), 2);
+        }
+
         let tracked_engine = engine.clone().tracked();
 
         assert_eq!(
@@ -109,11 +113,14 @@ async fn safe_division_input_changes() {
         engine.register_executor(division_ex.clone());
         engine.register_executor(safe_division_ex.clone());
 
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(1), 0);
-        drop(input_session);
+        let engine = Arc::new(engine);
 
-        let tracked_engine = Arc::new(engine).tracked();
+        {
+            let mut input_session = engine.input_session();
+            input_session.set_input(Variable(1), 0);
+        }
+
+        let tracked_engine = engine.tracked();
 
         assert_eq!(
             tracked_engine
@@ -138,11 +145,14 @@ async fn safe_division_input_changes() {
         engine.register_executor(division_ex.clone());
         engine.register_executor(safe_division_ex.clone());
 
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(1), 2);
-        drop(input_session);
+        let engine = Arc::new(engine);
 
-        let tracked_engine = Arc::new(engine).tracked();
+        {
+            let mut input_session = engine.input_session();
+            input_session.set_input(Variable(1), 2);
+        }
+
+        let tracked_engine = engine.tracked();
 
         assert_eq!(
             tracked_engine
@@ -175,14 +185,15 @@ async fn add_two_absolutes_sign_change() {
         engine.register_executor(absolute_ex.clone());
         engine.register_executor(add_two_absolutes_ex.clone());
 
-        let mut input_session = engine.input_session();
-
-        input_session.set_input(Variable(0), 200);
-        input_session.set_input(Variable(1), 150);
-
-        drop(input_session);
-
         let engine = Arc::new(engine);
+
+        {
+            let mut input_session = engine.input_session();
+
+            input_session.set_input(Variable(0), 200);
+            input_session.set_input(Variable(1), 150);
+        }
+
         let tracked_engine = engine.clone().tracked();
 
         // Initial query: abs(200) + abs(150) = 350
@@ -208,12 +219,15 @@ async fn add_two_absolutes_sign_change() {
         engine.register_executor(absolute_ex.clone());
         engine.register_executor(add_two_absolutes_ex.clone());
 
-        // Change Variable(0) from 200 to -200
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), -200);
-        drop(input_session);
+        let engine = Arc::new(engine);
 
-        let tracked_engine = Arc::new(engine).tracked();
+        // Change Variable(0) from 200 to -200
+        {
+            let mut input_session = engine.input_session();
+            input_session.set_input(Variable(0), -200);
+        }
+
+        let tracked_engine = engine.tracked();
 
         // Result should still be 350: abs(-200) + abs(150) = 200 + 150 = 350
         assert_eq!(
@@ -240,12 +254,15 @@ async fn add_two_absolutes_sign_change() {
         engine.register_executor(absolute_ex.clone());
         engine.register_executor(add_two_absolutes_ex.clone());
 
-        // Change Variable(1) from 150 to -150
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(1), -150);
-        drop(input_session);
+        let engine = Arc::new(engine);
 
-        let tracked_engine = Arc::new(engine).tracked();
+        // Change Variable(1) from 150 to -150
+        {
+            let mut input_session = engine.input_session();
+            input_session.set_input(Variable(1), -150);
+        }
+
+        let tracked_engine = engine.tracked();
 
         // Result should still be 350: abs(-200) + abs(-150) = 200 + 150 = 350
         assert_eq!(

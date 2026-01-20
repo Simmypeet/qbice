@@ -30,8 +30,8 @@
 //!
 //! 1. **Create**: Instantiate an `Engine` with your configuration
 //! 2. **Register**: Add executors for each query type
-//! 3. **Input**: Set initial input values via `InputSession`
-//! 4. **Wrap**: Convert to `Arc<Engine>` and create `TrackedEngine`
+//! 3. **Wrap**: Convert to `Arc<Engine>` and create `TrackedEngine`
+//! 4. **Input**: Set initial input values via `InputSession`
 //! 5. **Query**: Execute queries through `TrackedEngine`
 //! 6. **Update**: Drop `TrackedEngine`, modify inputs, repeat from step 4
 

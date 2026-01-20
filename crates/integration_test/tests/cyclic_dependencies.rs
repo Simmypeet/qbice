@@ -433,13 +433,14 @@ async fn conditional_cyclic_dependency() {
     engine.register_executor(Arc::clone(&executor_a));
     engine.register_executor(Arc::clone(&executor_b));
 
+    let engine = Arc::new(engine);
+
     // Phase 1: Set control value to create NO cycle (control_value != 1)
     {
         let mut input_session = engine.input_session();
         input_session.set_input(CycleControlVariable, 5);
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     // Query both A and B - they should compute normal values without cycles
@@ -548,13 +549,14 @@ async fn conditional_cyclic_with_dependent_query() {
     engine.register_executor(Arc::clone(&executor_b));
     engine.register_executor(Arc::clone(&executor_dependent));
 
+    let engine = Arc::new(engine);
+
     // Phase 1: No cycle - dependent query should use computed values
     {
         let mut input_session = engine.input_session();
         input_session.set_input(CycleControlVariable, 2);
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     let result_dependent = tracked_engine.query(&DependentQuery).await;

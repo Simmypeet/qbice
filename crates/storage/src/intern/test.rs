@@ -1070,7 +1070,8 @@ fn test_interner_with_vacuum() -> Interner {
     Interner::new_with_vacuum(
         4,
         TestHasherBuilder::default(),
-        std::time::Duration::from_secs(60), // Long interval, we'll trigger manually
+        std::time::Duration::from_secs(60), /* Long interval, we'll trigger
+                                             * manually */
     )
 }
 

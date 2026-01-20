@@ -20,14 +20,15 @@ async fn safe_division_basic() {
     engine.register_executor(division_ex.clone());
     engine.register_executor(safe_division_ex.clone());
 
-    let mut input_session = engine.input_session();
-
-    input_session.set_input(Variable(0), 42);
-    input_session.set_input(Variable(1), 2);
-
-    drop(input_session);
-
     let engine = Arc::new(engine);
+
+    {
+        let mut input_session = engine.input_session();
+
+        input_session.set_input(Variable(0), 42);
+        input_session.set_input(Variable(1), 2);
+    }
+
     let tracked_engine = engine.tracked();
 
     assert_eq!(

@@ -341,7 +341,11 @@ impl<C: Config> Engine<C> {
     ) -> Pin<Box<dyn Future<Output = Result<(), CyclicError>> + Send + 'x>>
     {
         Box::pin(async move {
-            let query_input = self.get_query_input::<Q>(query_id).unwrap();
+            let query_input = self
+                .get_query_input::<Q>(query_id, &called_from)
+                .await
+                .unwrap();
+
             let query_for = QueryWithID {
                 id: QueryID::new::<Q>(query_id),
                 query: &query_input,

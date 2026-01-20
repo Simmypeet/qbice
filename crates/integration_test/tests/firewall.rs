@@ -141,13 +141,14 @@ async fn firewall() {
     engine.register_executor(negative_square_ex.clone());
     engine.register_executor(negative_square_to_string_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Step 1: initial to 3
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 3);
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -355,13 +356,14 @@ async fn chained_firewalls() {
     engine.register_executor(clamp_ex.clone());
     engine.register_executor(double_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Step 1: initial value 50
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 50);
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -549,6 +551,8 @@ async fn diamond_dependency_with_firewalls() {
     engine.register_executor(square_ex.clone());
     engine.register_executor(sum_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initial: Variable(0) = 3, Variable(1) = 4
     {
         let mut input_session = engine.input_session();
@@ -556,7 +560,6 @@ async fn diamond_dependency_with_firewalls() {
         input_session.set_input(Variable(1), 4);
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -735,13 +738,14 @@ async fn firewall_multiple_callers() {
     engine.register_executor(times_two_ex.clone());
     engine.register_executor(plus_one_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initial: Variable(0) = 3
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 3);
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     // Query both consumers
@@ -866,6 +870,8 @@ async fn firewall_conditional_dependency() {
     engine.register_executor(square_ex.clone());
     engine.register_executor(conditional_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initial: condition = 1 (true), value = 3
     {
         let mut input_session = engine.input_session();
@@ -873,7 +879,6 @@ async fn firewall_conditional_dependency() {
         input_session.set_input(Variable(1), 3); // value
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(
@@ -992,13 +997,14 @@ async fn firewall_dirty_propagation_on_change() {
     engine.register_executor(square_ex.clone());
     engine.register_executor(negative_square_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initial: 2
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 2);
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     assert_eq!(

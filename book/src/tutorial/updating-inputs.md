@@ -4,7 +4,7 @@ The real power of incremental computation shines when inputs change. QBICE autom
 
 ## Updating Input Values
 
-To update inputs, create a new input session:
+To update inputs, create a new input session. Note that the engine must be wrapped in `Arc` to call `input_session()`:
 
 ```rust
 // First execution
@@ -17,7 +17,7 @@ To update inputs, create a new input session:
     println!("SafeDivide(A, B) = {:?}", result); // Some(21)
 } // Drop tracked
 
-// Update input
+// Update input (engine is already in Arc)
 {
     let mut input_session = engine.input_session();
     input_session.set_input(Variable::A, 84); // Changed from 42 to 84
@@ -45,6 +45,9 @@ use std::sync::atomic::Ordering;
 // Reset call counters
 divide_executor.call_count.store(0, Ordering::SeqCst);
 safe_divide_executor.call_count.store(0, Ordering::SeqCst);
+
+// Wrap engine in Arc (required for input_session)
+let engine = Arc::new(engine);
 
 // Set up initial state: A=42, B=2
 {
@@ -74,7 +77,7 @@ println!("  SafeDivide called: {}", safe_divide_executor.call_count.load(Orderin
 Now let's change B to 0 to trigger division by zero:
 
 ```rust
-// Change B to 0
+// Change B to 0 (engine is already in Arc)
 {
     let mut input_session = engine.input_session();
     input_session.set_input(Variable::B, 0);
@@ -196,14 +199,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.register_executor(divide_executor.clone());
     engine.register_executor(safe_divide_executor.clone());
 
+    // Wrap engine in Arc
+    let engine = Arc::new(engine);
+
     // Initial setup
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable::A, 42);
         input_session.set_input(Variable::B, 2);
     }
-
-    let engine = Arc::new(engine);
 
     // Computation 1: Initial A=42, B=2
     println!("=== Initial Computation (A=42, B=2) ===");

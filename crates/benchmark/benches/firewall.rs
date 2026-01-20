@@ -336,6 +336,8 @@ async fn run(firewall: bool) {
     engine.register_executor::<Variance, _>(Arc::new(VarianceExecutor));
 
     // first session: run as normal
+    let engine = Arc::new(engine);
+
     let mut input_session = engine.input_session();
     let var_count = 5_000u64;
     input_session.set_input(VariableRange, 0..var_count);
@@ -344,7 +346,6 @@ async fn run(firewall: bool) {
     }
     drop(input_session);
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     tracked_engine.query(&Variance).await;

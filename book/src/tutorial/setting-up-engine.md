@@ -108,12 +108,23 @@ A few important notes:
 - It's expected to register the same executors again after reloading an engine
   from disk
 
+## Creating a TrackedEngine
+
+To actually execute queries and set inputs, first convert the engine to an `Arc`:
+
+```rust
+// Move engine into Arc for shared ownership
+let engine = Arc::new(engine);
+```
+
+The `Arc` (Atomic Reference Count) enables shared ownership of the engine, which is required for both input sessions and query execution.
+
 ## Setting Input Values
 
 Before querying, set the initial values for input queries:
 
 ```rust
-// Create an input session
+// Create an input session (requires &Arc<Engine>)
 {
     let mut input_session = engine.input_session();
 
@@ -130,14 +141,11 @@ The input session is a transaction-like mechanism:
 - Dirty propagation happens when the session is dropped
 - You can set many inputs efficiently
 
-## Creating a TrackedEngine
+## Executing Queries
 
-To actually execute queries, convert the engine to an `Arc` and create a `TrackedEngine`:
+Create a `TrackedEngine` to execute queries:
 
 ```rust
-// Move engine into Arc for shared ownership
-let engine = Arc::new(engine);
-
 // Create a tracked engine for querying
 let tracked = engine.tracked();
 
@@ -201,18 +209,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.register_executor(divide_executor.clone());
     engine.register_executor(safe_divide_executor.clone());
 
-    // 3. Set input values
+    // 3. Wrap in Arc for shared ownership
+    let engine = Arc::new(engine);
+
+    // 4. Set input values
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable::A, 42);
         input_session.set_input(Variable::B, 2);
     }
 
-    // 4. Create tracked engine
-    let engine = Arc::new(engine);
+    // 5. Create tracked engine for querying
     let tracked = engine.tracked();
 
-    // 5. Ready to execute queries!
+    // 6. Ready to execute queries!
     println!("Setup complete!");
 
     Ok(())
@@ -243,12 +253,13 @@ Key points about engine lifetime:
 Typical pattern:
 
 ```rust
+// The engine is wrapped in Arc, so no mutable access is needed
 {
     let tracked = engine.tracked();
     // Use tracked for queries...
 } // Drop tracked
 
-// Now we can get mutable access again
+// Create a new input session to update inputs
 {
     let mut input_session = engine.input_session();
     // Update inputs...

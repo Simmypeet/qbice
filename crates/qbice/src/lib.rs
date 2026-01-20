@@ -210,6 +210,9 @@
 //!         engine.register_executor(divide_executor.clone());
 //!         engine.register_executor(safe_divide_executor.clone());
 //!
+//!         // wrap in Arc for shared ownership
+//!         let engine = Arc::new(engine);
+//!
 //!         // create an input session to set input values
 //!         {
 //!             let mut input_session = engine.input_session();
@@ -218,7 +221,7 @@
 //!         } // once the input session is dropped, the values are set
 //!
 //!         // create a tracked engine for querying
-//!         let tracked_engine = Arc::new(engine).tracked();
+//!         let tracked_engine = engine.tracked();
 //!
 //!         // perform a safe division
 //!         let result = tracked_engine
@@ -250,7 +253,7 @@
 //!         engine.register_executor(safe_divide_executor.clone());
 //!
 //!         // wrap in Arc for shared ownership
-//!         let mut engine = Arc::new(engine);
+//!         let engine = Arc::new(engine);
 //!
 //!         // create a tracked engine for querying
 //!         let tracked_engine = engine.clone().tracked();
@@ -311,14 +314,17 @@
 //!         engine.register_executor(divide_executor.clone());
 //!         engine.register_executor(safe_divide_executor.clone());
 //!
+//!         // wrap in Arc for shared ownership
+//!         let engine = Arc::new(engine);
+//!
 //!         // let's restore the denominator to 2
 //!         {
 //!             let mut input_session = engine.input_session();
 //!             input_session.set_input(Variable::B, 2);
 //!         } // once the input session is dropped, the value is set
 //!
-//!         // wrap in Arc for shared ownership
-//!         let tracked_engine = Arc::new(engine).tracked();
+//!         // create tracked engine for querying
+//!         let tracked_engine = engine.tracked();
 //!
 //!         let result = tracked_engine
 //!             .query(&SafeDivide {

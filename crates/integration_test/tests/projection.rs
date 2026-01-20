@@ -256,6 +256,8 @@ async fn double_square_summing() {
     engine.register_executor(double_square_ex.clone());
     engine.register_executor(sum_all_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // initialze variables
     {
         let mut input_session = engine.input_session();
@@ -269,7 +271,6 @@ async fn double_square_summing() {
         input_session.set_input(VariableTarget, Arc::from(target_vars));
     }
 
-    let engine = Arc::new(engine);
     let tracked_engine = engine.clone().tracked();
 
     // 1^2 = 1
@@ -359,6 +360,8 @@ async fn multiple_projections_single_firewall() {
     engine.register_executor(collect_doubled_ex.clone());
     engine.register_executor(double_square_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initialize 4 variables
     {
         let mut input_session = engine.input_session();
@@ -371,8 +374,6 @@ async fn multiple_projections_single_firewall() {
 
         input_session.set_input(VariableTarget, Arc::from(target_vars));
     }
-
-    let engine = Arc::new(engine);
 
     // Query all three projections
     {
@@ -618,6 +619,8 @@ async fn diamond_projection_pattern() {
     engine.register_executor(proj1_ex.clone());
     engine.register_executor(combiner_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initialize variables
     {
         let mut input_session = engine.input_session();
@@ -625,8 +628,6 @@ async fn diamond_projection_pattern() {
             input_session.set_input(Variable(i), i.cast_signed() + 1);
         }
     }
-
-    let engine = Arc::new(engine);
 
     // Query the combiner
     {
@@ -847,14 +848,14 @@ async fn firewall_same_output_no_propagation() {
     engine.register_executor(proj_ex.clone());
     engine.register_executor(consumer_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initialize: Variable(0)=5, Variable(1)=5, sum=10
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 5_i64);
         input_session.set_input(Variable(1), 5_i64);
     }
-
-    let engine = Arc::new(engine);
 
     // Initial query
     {
@@ -926,6 +927,8 @@ async fn concurrent_projection_access() {
     engine.register_executor(firewall_ex.clone());
     engine.register_executor(proj1_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initialize variables
     {
         let mut input_session = engine.input_session();
@@ -933,8 +936,6 @@ async fn concurrent_projection_access() {
             input_session.set_input(Variable(i), i.cast_signed() + 1);
         }
     }
-
-    let engine = Arc::new(engine);
 
     // Spawn concurrent queries to all 4 projections
     let mut handles = Vec::new();
@@ -1148,13 +1149,13 @@ async fn nested_firewall_with_projection() {
     engine.register_executor(proj_ex.clone());
     engine.register_executor(consumer_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initialize
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 5_i64);
     }
-
-    let engine = Arc::new(engine);
 
     // Initial query
     // Variable(0)=5 -> Outer=10 -> Inner=20 -> Proj=60 -> Consumer=1060
@@ -1408,14 +1409,14 @@ async fn projection_with_two_firewalls() {
     engine.register_executor(proj_ex.clone());
     engine.register_executor(consumer_ex.clone());
 
+    let engine = Arc::new(engine);
+
     // Initialize: Variable(0)=5, Variable(1)=10
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable(0), 5_i64);
         input_session.set_input(Variable(1), 10_i64);
     }
-
-    let engine = Arc::new(engine);
 
     // Initial query
     // FirewallA: 5*2=10, FirewallB: 10*3=30, Proj: 10+30=40, Consumer:

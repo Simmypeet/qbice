@@ -1,15 +1,23 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
+use crossbeam::sync::WaitGroup;
+use dashmap::DashSet;
 use parking_lot::RwLock;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{
-    Engine, Query, config::Config,
-    engine::computation_graph::persist::WriterBufferWithLock, query::QueryID,
+    Engine, Query, TrackedEngine,
+    config::Config,
+    engine::computation_graph::{
+        caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
+        persist::WriterBufferWithLock,
+        slow_path::GuardedTrackedEngine,
+    },
+    query::QueryID,
 };
 
 pub struct InputSession<'x, C: Config> {
-    engine: &'x Engine<C>,
+    engine: &'x Arc<Engine<C>>,
     dirty_batch: VecDeque<QueryID>,
     transaction: Option<WriterBufferWithLock<'x, C>>,
 }
@@ -94,10 +102,11 @@ impl<C: Config> Engine<C> {
     /// create a new session while another is active will result in a
     /// deadlock.
     #[must_use]
-    pub fn input_session(&self) -> InputSession<'_, C> {
+    pub fn input_session(self: &Arc<Self>) -> InputSession<'_, C> {
         // acquire a write lock on the write buffer and increment timestamp
         let mut write_buffer_with_lock =
             self.new_write_buffer_with_write_lock();
+
         unsafe {
             self.increment_timestamp(&mut write_buffer_with_lock);
         }
@@ -166,7 +175,120 @@ impl<C: Config> InputSession<'_, C> {
             new_value,
             query_value_fingerprint,
             self.transaction.as_mut().unwrap(),
+            true,
             ts,
         );
+    }
+
+    /// Refreshes all external input queries of type `Q`.
+    ///
+    /// This method re-executes all queries of type `Q` that were previously
+    /// computed with [`ExecutionStyle::ExternalInput`]. For each query:
+    ///
+    /// 1. The executor is re-invoked to fetch the latest external data
+    /// 2. The new result is compared with the old result via fingerprints
+    /// 3. Only if the result changed, the query is marked dirty for propagation
+    ///
+    /// # Use Case
+    ///
+    /// External input queries represent data from the outside world (files,
+    /// network, databases, etc.). When you know the external data has changed,
+    /// call this method to refresh and update all queries of that type.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Assume ConfigFileQuery reads configuration from disk
+    /// // and was executed with ExecutionStyle::ExternalInput
+    ///
+    /// // When you know the config file has changed:
+    /// {
+    ///     let mut session = engine.input_session();
+    ///     session.refresh::<ConfigFileQuery>().await;
+    /// } // Only changed ConfigFileQuery instances will trigger dirty
+    ///   // propagation
+    /// ```
+    ///
+    /// # Type Parameters
+    ///
+    /// - `Q`: The query type to refresh. Must implement [`Query`].
+    pub async fn refresh<Q: Query>(&mut self) {
+        let type_id = Q::STABLE_TYPE_ID;
+
+        // Get all query hashes for this type that were computed as
+        // ExternalInput
+        let external_input_set =
+            self.engine.get_external_input_queries(&type_id);
+
+        let timestamp = self.transaction.as_ref().unwrap().timestamp();
+
+        // Re-execute each external input query and check for changes
+        for hash_ref in &external_input_set {
+            let query_hash = *hash_ref;
+            let query_id = QueryID::new::<Q>(query_hash);
+
+            let (query, old_node_info) = unsafe {
+                (
+                    self.engine
+                        .get_query_input_unchecked::<Q>(query_hash)
+                        .unwrap(),
+                    self.engine.get_node_info_unchecked(query_id).unwrap(),
+                )
+            };
+
+            // Create a tracked engine to execute the query
+            let cache = Arc::new(DashSet::default());
+            let wait_group = WaitGroup::new();
+
+            let tracked_engine = TrackedEngine::new(
+                Arc::clone(self.engine),
+                cache,
+                CallerInformation::new(
+                    CallerKind::Query(QueryCaller::new(
+                        query_id,
+                        CallerReason::RequireValue(Some(wait_group)),
+                    )),
+                    timestamp,
+                ),
+            );
+            let guarded_tracked_engine =
+                GuardedTrackedEngine::new(tracked_engine);
+
+            // Invoke the executor to get the new value
+            let entry = self.engine.executor_registry.get_executor_entry::<Q>();
+            let result = entry
+                .invoke_executor::<Q>(&query, &guarded_tracked_engine)
+                .await;
+
+            // Wait for any spawned tasks to complete
+            drop(guarded_tracked_engine);
+
+            let new_value = match result {
+                Ok(value) => value,
+                Err(panic) => panic.resume_unwind(),
+            };
+
+            let new_fingerprint = self.engine.hash(&new_value);
+
+            // Check if the value has changed
+            let value_changed =
+                old_node_info.value_fingerprint() != new_fingerprint;
+
+            if value_changed {
+                // Add to dirty batch for propagation
+                self.dirty_batch.push_back(query_id);
+            }
+
+            // Store the new result
+            self.engine.set_computed_input(
+                query,
+                query_hash,
+                new_value,
+                new_fingerprint,
+                self.transaction.as_mut().unwrap(),
+                false,
+                timestamp,
+            );
+        }
     }
 }
