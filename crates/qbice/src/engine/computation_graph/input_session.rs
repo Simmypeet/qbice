@@ -3,14 +3,16 @@ use std::{collections::VecDeque, sync::Arc};
 use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
 use parking_lot::RwLock;
+use qbice_stable_hash::Compact128;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use tokio::task::JoinSet;
 
 use crate::{
     Engine, Query, TrackedEngine,
     config::Config,
     engine::computation_graph::{
         caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
-        persist::WriterBufferWithLock,
+        persist::{NodeInfo, WriterBufferWithLock},
         slow_path::GuardedTrackedEngine,
     },
     query::QueryID,
@@ -212,7 +214,15 @@ impl<C: Config> InputSession<'_, C> {
     /// # Type Parameters
     ///
     /// - `Q`: The query type to refresh. Must implement [`Query`].
+    #[allow(clippy::too_many_lines)]
     pub async fn refresh<Q: Query>(&mut self) {
+        struct RefreshResult<V> {
+            query_input_hash: Compact128,
+            query_result_hash: Compact128,
+            old_node_info: NodeInfo,
+            new_value: V,
+        }
+
         let type_id = Q::STABLE_TYPE_ID;
 
         // Get all query hashes for this type that were computed as
@@ -221,74 +231,125 @@ impl<C: Config> InputSession<'_, C> {
             self.engine.get_external_input_queries(&type_id);
 
         let timestamp = self.transaction.as_ref().unwrap().timestamp();
+        let hashes = external_input_set.iter().map(|x| *x).collect::<Vec<_>>();
 
-        // Re-execute each external input query and check for changes
-        for hash_ref in &external_input_set {
-            let query_hash = *hash_ref;
-            let query_id = QueryID::new::<Q>(query_hash);
+        let expected_parallelism = std::thread::available_parallelism()
+            .map_or_else(|_| 1, std::num::NonZero::get)
+            * 4;
+        let chunk_size =
+            std::cmp::max((hashes.len()) / expected_parallelism, 1);
 
-            let (query, old_node_info) = unsafe {
-                (
-                    self.engine
-                        .get_query_input_unchecked::<Q>(query_hash)
-                        .unwrap(),
-                    self.engine.get_node_info_unchecked(query_id).unwrap(),
-                )
-            };
+        let mut join_set = JoinSet::new();
 
-            // Create a tracked engine to execute the query
-            let cache = Arc::new(DashSet::default());
-            let wait_group = WaitGroup::new();
+        for chunk in hashes.chunks(chunk_size) {
+            let engine = self.engine.clone();
+            let chunk = chunk.to_owned();
 
-            let tracked_engine = TrackedEngine::new(
-                Arc::clone(self.engine),
-                cache,
-                CallerInformation::new(
-                    CallerKind::Query(QueryCaller::new(
-                        query_id,
-                        CallerReason::RequireValue(Some(wait_group)),
-                    )),
-                    timestamp,
-                ),
-            );
-            let guarded_tracked_engine =
-                GuardedTrackedEngine::new(tracked_engine);
+            join_set.spawn(async move {
+                let mut results = Vec::with_capacity(chunk.len());
 
-            // Invoke the executor to get the new value
-            let entry = self.engine.executor_registry.get_executor_entry::<Q>();
-            let result = entry
-                .invoke_executor::<Q>(&query, &guarded_tracked_engine)
-                .await;
+                for query_hash in chunk.iter().copied() {
+                    let query_id = QueryID::new::<Q>(query_hash);
 
-            // Wait for any spawned tasks to complete
-            drop(guarded_tracked_engine);
+                    let (query, old_node_info) = unsafe {
+                        (
+                            engine
+                                .get_query_input_unchecked::<Q>(query_hash)
+                                .unwrap(),
+                            engine.get_node_info_unchecked(query_id).unwrap(),
+                        )
+                    };
 
-            let new_value = match result {
-                Ok(value) => value,
-                Err(panic) => panic.resume_unwind(),
-            };
+                    // Create a tracked engine to execute the query
+                    let cache = Arc::new(DashSet::default());
+                    let wait_group = WaitGroup::new();
 
-            let new_fingerprint = self.engine.hash(&new_value);
+                    let tracked_engine = TrackedEngine::new(
+                        engine.clone(),
+                        cache,
+                        CallerInformation::new(
+                            CallerKind::Query(QueryCaller::new(
+                                query_id,
+                                CallerReason::RequireValue(Some(wait_group)),
+                            )),
+                            timestamp,
+                        ),
+                    );
+                    let guarded_tracked_engine =
+                        GuardedTrackedEngine::new(tracked_engine);
 
-            // Check if the value has changed
-            let value_changed =
-                old_node_info.value_fingerprint() != new_fingerprint;
+                    // Invoke the executor to get the new value
+                    let entry =
+                        engine.executor_registry.get_executor_entry::<Q>();
+                    let result = entry
+                        .invoke_executor::<Q>(&query, &guarded_tracked_engine)
+                        .await;
 
-            if value_changed {
-                // Add to dirty batch for propagation
-                self.dirty_batch.push_back(query_id);
+                    // Wait for any spawned tasks to complete
+                    drop(guarded_tracked_engine);
+
+                    let new_value = match result {
+                        Ok(value) => value,
+                        Err(panic) => panic.resume_unwind(),
+                    };
+
+                    let new_fingerprint = engine.hash(&new_value);
+
+                    results.push(RefreshResult {
+                        query_input_hash: query_hash,
+                        query_result_hash: new_fingerprint,
+                        old_node_info,
+                        new_value,
+                    });
+                }
+
+                results
+            });
+        }
+
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok(results) => {
+                    for refresh_result in results {
+                        let fingerprint_diff =
+                            refresh_result.old_node_info.value_fingerprint()
+                                != refresh_result.query_result_hash;
+
+                        if fingerprint_diff {
+                            let query_id = QueryID::new::<Q>(
+                                refresh_result.query_input_hash,
+                            );
+
+                            self.dirty_batch.push_back(query_id);
+                        }
+
+                        self.engine.set_computed_input(
+                            unsafe {
+                                self.engine
+                                    .get_query_input_unchecked::<Q>(
+                                        refresh_result.query_input_hash,
+                                    )
+                                    .unwrap()
+                            },
+                            refresh_result.query_input_hash,
+                            refresh_result.new_value,
+                            refresh_result.query_result_hash,
+                            self.transaction.as_mut().unwrap(),
+                            false,
+                            timestamp,
+                        );
+                    }
+                }
+
+                Err(er) => match er.try_into_panic() {
+                    Ok(panic_reason) => {
+                        std::panic::resume_unwind(panic_reason);
+                    }
+                    Err(er) => {
+                        panic!("Failed to refresh external input query: {er}");
+                    }
+                },
             }
-
-            // Store the new result
-            self.engine.set_computed_input(
-                query,
-                query_hash,
-                new_value,
-                new_fingerprint,
-                self.transaction.as_mut().unwrap(),
-                false,
-                timestamp,
-            );
         }
     }
 }
