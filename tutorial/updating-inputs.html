@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e0492d05.js";
+            window.path_to_searchindex_js = "../searchindex-bb82a940.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-40332333.js"></script>
@@ -183,7 +183,7 @@
                         <h1 id="updating-inputs"><a class="header" href="#updating-inputs">Updating Inputs</a></h1>
 <p>The real power of incremental computation shines when inputs change. QBICE automatically determines what needs to be recomputed and what can remain cached. Let’s see how this works!</p>
 <h2 id="updating-input-values"><a class="header" href="#updating-input-values">Updating Input Values</a></h2>
-<p>To update inputs, create a new input session:</p>
+<p>To update inputs, create a new input session. Note that the engine must be wrapped in <code>Arc</code> to call <code>input_session()</code>:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>// First execution
@@ -196,7 +196,7 @@
     println!("SafeDivide(A, B) = {:?}", result); // Some(21)
 } // Drop tracked
 
-// Update input
+// Update input (engine is already in Arc)
 {
     let mut input_session = engine.input_session();
     input_session.set_input(Variable::A, 84); // Changed from 42 to 84
@@ -222,6 +222,9 @@ tracks executor call counts.</p>
 // Reset call counters
 divide_executor.call_count.store(0, Ordering::SeqCst);
 safe_divide_executor.call_count.store(0, Ordering::SeqCst);
+
+// Wrap engine in Arc (required for input_session)
+let engine = Arc::new(engine);
 
 // Set up initial state: A=42, B=2
 {
@@ -250,7 +253,7 @@ println!("  SafeDivide called: {}", safe_divide_executor.call_count.load(Orderin
 <p>Now let’s change B to 0 to trigger division by zero:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>// Change B to 0
+</span>// Change B to 0 (engine is already in Arc)
 {
     let mut input_session = engine.input_session();
     input_session.set_input(Variable::B, 0);
@@ -367,14 +370,15 @@ async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     engine.register_executor(divide_executor.clone());
     engine.register_executor(safe_divide_executor.clone());
 
+    // Wrap engine in Arc
+    let engine = Arc::new(engine);
+
     // Initial setup
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable::A, 42);
         input_session.set_input(Variable::B, 2);
     }
-
-    let engine = Arc::new(engine);
 
     // Computation 1: Initial A=42, B=2
     println!("=== Initial Computation (A=42, B=2) ===");

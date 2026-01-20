@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e0492d05.js";
+            window.path_to_searchindex_js = "searchindex-bb82a940.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-40332333.js"></script>
@@ -869,11 +869,19 @@ engine.register_executor(safe_divide_executor.clone());
 <li>It’s expected to register the same executors again after reloading an engine
 from disk</li>
 </ul>
+<h2 id="creating-a-trackedengine"><a class="header" href="#creating-a-trackedengine">Creating a TrackedEngine</a></h2>
+<p>To actually execute queries and set inputs, first convert the engine to an <code>Arc</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Move engine into Arc for shared ownership
+let engine = Arc::new(engine);
+<span class="boring">}</span></code></pre>
+<p>The <code>Arc</code> (Atomic Reference Count) enables shared ownership of the engine, which is required for both input sessions and query execution.</p>
 <h2 id="setting-input-values"><a class="header" href="#setting-input-values">Setting Input Values</a></h2>
 <p>Before querying, set the initial values for input queries:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>// Create an input session
+</span>// Create an input session (requires &amp;Arc&lt;Engine&gt;)
 {
     let mut input_session = engine.input_session();
 
@@ -889,14 +897,11 @@ from disk</li>
 <li>Dirty propagation happens when the session is dropped</li>
 <li>You can set many inputs efficiently</li>
 </ul>
-<h2 id="creating-a-trackedengine"><a class="header" href="#creating-a-trackedengine">Creating a TrackedEngine</a></h2>
-<p>To actually execute queries, convert the engine to an <code>Arc</code> and create a <code>TrackedEngine</code>:</p>
+<h2 id="executing-queries"><a class="header" href="#executing-queries">Executing Queries</a></h2>
+<p>Create a <code>TrackedEngine</code> to execute queries:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>// Move engine into Arc for shared ownership
-let engine = Arc::new(engine);
-
-// Create a tracked engine for querying
+</span>// Create a tracked engine for querying
 let tracked = engine.tracked();
 
 // Now you can execute queries!
@@ -952,18 +957,20 @@ async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     engine.register_executor(divide_executor.clone());
     engine.register_executor(safe_divide_executor.clone());
 
-    // 3. Set input values
+    // 3. Wrap in Arc for shared ownership
+    let engine = Arc::new(engine);
+
+    // 4. Set input values
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable::A, 42);
         input_session.set_input(Variable::B, 2);
     }
 
-    // 4. Create tracked engine
-    let engine = Arc::new(engine);
+    // 5. Create tracked engine for querying
     let tracked = engine.tracked();
 
-    // 5. Ready to execute queries!
+    // 6. Ready to execute queries!
     println!("Setup complete!");
 
     Ok(())
@@ -988,12 +995,13 @@ let mut engine = Engine::&lt;DefaultConfig&gt;::new_with(...)?;
 <p>Typical pattern:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>{
+</span>// The engine is wrapped in Arc, so no mutable access is needed
+{
     let tracked = engine.tracked();
     // Use tracked for queries...
 } // Drop tracked
 
-// Now we can get mutable access again
+// Create a new input session to update inputs
 {
     let mut input_session = engine.input_session();
     // Update inputs...
@@ -1010,7 +1018,7 @@ updates</li>
 </ul>
 <p>Next, we’ll execute some queries and see incremental computation in action!</p>
 <div style="break-before: page; page-break-before: always;"></div>
-<h1 id="executing-queries"><a class="header" href="#executing-queries">Executing Queries</a></h1>
+<h1 id="executing-queries-1"><a class="header" href="#executing-queries-1">Executing Queries</a></h1>
 <p>Now that we’ve set up the engine, let’s execute some queries and see QBICE’s incremental computation in action!</p>
 <h2 id="basic-query-execution"><a class="header" href="#basic-query-execution">Basic Query Execution</a></h2>
 <p>Executing a query is straightforward—call <code>query()</code> on a <code>TrackedEngine</code>:</p>
@@ -1124,6 +1132,9 @@ async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     engine.register_executor(divide_executor.clone());
     engine.register_executor(safe_divide_executor.clone());
 
+    // Wrap engine in Arc
+    let engine = Arc::new(engine);
+
     // Set initial values
     {
         let mut input_session = engine.input_session();
@@ -1131,7 +1142,6 @@ async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
         input_session.set_input(Variable::B, 2);
     }
 
-    let engine = Arc::new(engine);
     let tracked = engine.tracked();
 
     // Execute queries
@@ -1181,7 +1191,7 @@ SafeDivide called: 1 times
 <h1 id="updating-inputs"><a class="header" href="#updating-inputs">Updating Inputs</a></h1>
 <p>The real power of incremental computation shines when inputs change. QBICE automatically determines what needs to be recomputed and what can remain cached. Let’s see how this works!</p>
 <h2 id="updating-input-values"><a class="header" href="#updating-input-values">Updating Input Values</a></h2>
-<p>To update inputs, create a new input session:</p>
+<p>To update inputs, create a new input session. Note that the engine must be wrapped in <code>Arc</code> to call <code>input_session()</code>:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>// First execution
@@ -1194,7 +1204,7 @@ SafeDivide called: 1 times
     println!("SafeDivide(A, B) = {:?}", result); // Some(21)
 } // Drop tracked
 
-// Update input
+// Update input (engine is already in Arc)
 {
     let mut input_session = engine.input_session();
     input_session.set_input(Variable::A, 84); // Changed from 42 to 84
@@ -1220,6 +1230,9 @@ tracks executor call counts.</p>
 // Reset call counters
 divide_executor.call_count.store(0, Ordering::SeqCst);
 safe_divide_executor.call_count.store(0, Ordering::SeqCst);
+
+// Wrap engine in Arc (required for input_session)
+let engine = Arc::new(engine);
 
 // Set up initial state: A=42, B=2
 {
@@ -1248,7 +1261,7 @@ println!("  SafeDivide called: {}", safe_divide_executor.call_count.load(Orderin
 <p>Now let’s change B to 0 to trigger division by zero:</p>
 <pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>// Change B to 0
+</span>// Change B to 0 (engine is already in Arc)
 {
     let mut input_session = engine.input_session();
     input_session.set_input(Variable::B, 0);
@@ -1365,14 +1378,15 @@ async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
     engine.register_executor(divide_executor.clone());
     engine.register_executor(safe_divide_executor.clone());
 
+    // Wrap engine in Arc
+    let engine = Arc::new(engine);
+
     // Initial setup
     {
         let mut input_session = engine.input_session();
         input_session.set_input(Variable::A, 42);
         input_session.set_input(Variable::B, 2);
     }
-
-    let engine = Arc::new(engine);
 
     // Computation 1: Initial A=42, B=2
     println!("=== Initial Computation (A=42, B=2) ===");
