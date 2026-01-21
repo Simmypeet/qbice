@@ -736,10 +736,15 @@ fn executor_impl(
     // Get visibility
     let vis = &input.vis;
 
+    // Copy doc comments from the function to the struct
+    let doc_attrs: Vec<_> =
+        input.attrs.iter().filter(|attr| attr.path().is_ident("doc")).collect();
+
     // Clone the function for the const block
     let original_fn = input.clone();
 
     let expanded = quote! {
+        #(#doc_attrs)*
         #[derive(
             ::std::fmt::Debug,
             ::std::clone::Clone,
