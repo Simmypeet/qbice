@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, LinkedList, VecDeque},
     hash::{BuildHasher, Hash},
     io,
+    path::Path,
     rc::Rc,
     sync::Arc,
 };
@@ -533,6 +534,39 @@ impl Decode for Arc<str> {
     ) -> io::Result<Self> {
         let s = decoder.read_str()?;
         Ok(Self::from(s))
+    }
+}
+
+impl Decode for Arc<Path> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        _plugin: &Plugin,
+        _session: &mut Session,
+    ) -> io::Result<Self> {
+        let s = decoder.read_str()?;
+        Ok(Self::from(Path::new(&s)))
+    }
+}
+
+impl Decode for Rc<Path> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        _plugin: &Plugin,
+        _session: &mut Session,
+    ) -> io::Result<Self> {
+        let s = decoder.read_str()?;
+        Ok(Self::from(Path::new(&s)))
+    }
+}
+
+impl Decode for Box<Path> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        _plugin: &Plugin,
+        _session: &mut Session,
+    ) -> io::Result<Self> {
+        let s = decoder.read_str()?;
+        Ok(Self::from(Path::new(&s)))
     }
 }
 
