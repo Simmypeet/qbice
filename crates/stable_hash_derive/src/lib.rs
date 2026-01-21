@@ -100,9 +100,9 @@ pub fn derive_stable_hash(input: TokenStream) -> TokenStream {
     for param in &input.generics.params {
         if let syn::GenericParam::Type(type_param) = param {
             let ident = &type_param.ident;
-            where_clause.predicates.push(
-                syn::parse_quote!(#ident: ::qbice_stable_hash::StableHash),
-            );
+            where_clause
+                .predicates
+                .push(syn::parse_quote!(#ident: #trait_crate_path::StableHash));
         }
     }
 

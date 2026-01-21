@@ -1,6 +1,6 @@
 [package]
 name = "qbice_storage"
-version = "0.4.1"
+version = "0.4.2"
 authors.workspace = true
 description.workspace = true
 edition.workspace = true
@@ -13,8 +13,8 @@ rocksdb = ["dep:rust-rocksdb"]
 
 [dependencies]
 qbice_serialize = { version = "0.1.1", path = "../serialize" }
-qbice_stable_type_id = { version = "0.1.4", path = "../stable_type_id" }
-qbice_stable_hash = { version = "0.1.4", path = "../stable_hash" }
+qbice_stable_type_id = { version = "0.1.5", path = "../stable_type_id" }
+qbice_stable_hash = { version = "0.1.5", path = "../stable_hash" }
 parking_lot.workspace = true
 fxhash.workspace = true
 dashmap.workspace = true
