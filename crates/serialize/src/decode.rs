@@ -1038,3 +1038,16 @@ impl<T: Decode + Eq + Hash, S: BuildHasher + Default + Clone> Decode
         Ok(set)
     }
 }
+
+// =============================================================================
+
+impl Decode for std::path::PathBuf {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<Self> {
+        let s = String::decode(decoder, plugin, session)?;
+        Ok(Self::from(s))
+    }
+}

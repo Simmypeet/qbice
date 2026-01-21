@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "qbice"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "crossbeam",
  "dashmap",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_serialize"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dashmap",
  "qbice_serialize_derive",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_stable_hash_derive"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "proc-macro2",
  "quote",

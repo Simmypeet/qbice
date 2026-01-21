@@ -962,3 +962,30 @@ impl<K: Encode + Eq + std::hash::Hash, S: BuildHasher + Clone> Encode
         Ok(())
     }
 }
+
+// =============================================================================
+
+impl Encode for std::path::PathBuf {
+    fn encode<E: Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<()> {
+        self.as_path().encode(encoder, plugin, session)
+    }
+}
+
+impl Encode for std::path::Path {
+    fn encode<E: Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<()> {
+        let s = self.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8 in Path")
+        })?;
+        s.encode(encoder, plugin, session)
+    }
+}
