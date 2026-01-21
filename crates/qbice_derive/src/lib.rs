@@ -64,7 +64,7 @@
 use proc_macro::TokenStream;
 use quote::{ToTokens, format_ident, quote};
 use syn::{
-    DeriveInput, Error, FnArg, GenericParam, Ident, ItemFn, Meta, Pat, PatType,
+    DeriveInput, Error, FnArg, GenericParam, Ident, ItemFn, Meta, PatType,
     ReturnType, Type, parse_macro_input,
 };
 
@@ -733,29 +733,6 @@ fn executor_impl(
             ));
         }
     };
-
-    // Extract parameter names
-    let param_names: Vec<_> = input
-        .sig
-        .inputs
-        .iter()
-        .filter_map(|arg| {
-            if let FnArg::Typed(PatType { pat, .. }) = arg
-                && let Pat::Ident(ident) = &**pat
-            {
-                return Some(&ident.ident);
-            }
-            None
-        })
-        .collect();
-
-    if param_names.len() != 2 {
-        return Err(Error::new_spanned(
-            &input.sig.inputs,
-            "could not extract parameter names",
-        ));
-    }
-
     // Get visibility
     let vis = &input.vis;
 
