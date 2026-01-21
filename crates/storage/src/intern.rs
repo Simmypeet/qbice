@@ -124,6 +124,7 @@ use std::{
     collections::{HashMap, hash_map::Entry},
     hash::Hash,
     ops::Deref,
+    path::Path,
     sync::{Arc, Weak},
     thread::JoinHandle,
     time::Duration,
@@ -326,6 +327,83 @@ impl<T: Decode> Decode for WiredInterned<T> {
                 "invalid tag for WiredInterned",
             )),
         }
+    }
+}
+
+impl Decode for Interned<str> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> std::io::Result<Self> {
+        let wired =
+            WiredInterned::<Box<str>>::decode(decoder, plugin, session)?;
+
+        let interner = plugin.get::<Interner>().expect(
+            "`SharedInterner` plugin missing for decoding `Interned<str>`",
+        );
+
+        let value = match wired {
+            WiredInterned::Source(source) => interner.intern_unsized(source),
+
+            WiredInterned::Reference(compact128) => interner
+                .get_from_hash::<str>(compact128)
+                .expect("referenced interned value not found in interner"),
+        };
+
+        Ok(value)
+    }
+}
+
+impl<T: Decode + StableHash + Identifiable + Send + Sync + 'static> Decode
+    for Interned<[T]>
+{
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> std::io::Result<Self> {
+        let wired =
+            WiredInterned::<Box<[T]>>::decode(decoder, plugin, session)?;
+
+        let interner = plugin.get::<Interner>().expect(
+            "`SharedInterner` plugin missing for decoding `Interned<[T]>`",
+        );
+
+        let value = match wired {
+            WiredInterned::Source(source) => interner.intern_unsized(source),
+
+            WiredInterned::Reference(compact128) => interner
+                .get_from_hash::<[T]>(compact128)
+                .expect("referenced interned value not found in interner"),
+        };
+
+        Ok(value)
+    }
+}
+
+impl Decode for Interned<Path> {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> std::io::Result<Self> {
+        let wired =
+            WiredInterned::<Box<Path>>::decode(decoder, plugin, session)?;
+
+        let interner = plugin.get::<Interner>().expect(
+            "`SharedInterner` plugin missing for decoding `Interned<Path>`",
+        );
+
+        let value = match wired {
+            WiredInterned::Source(source) => interner.intern_unsized(source),
+
+            WiredInterned::Reference(compact128) => interner
+                .get_from_hash::<Path>(compact128)
+                .expect("referenced interned value not found in interner"),
+        };
+
+        Ok(value)
     }
 }
 

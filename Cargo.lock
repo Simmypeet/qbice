@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_serialize"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "dashmap",
  "qbice_serialize_derive",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_storage"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-deque",
