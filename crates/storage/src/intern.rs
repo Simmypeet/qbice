@@ -280,6 +280,14 @@ impl<T: ?Sized> Deref for Interned<T> {
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
+impl<T: ?Sized> AsRef<T> for Interned<T> {
+    fn as_ref(&self) -> &T { &self.0 }
+}
+
+impl<T: ?Sized> Borrow<T> for Interned<T> {
+    fn borrow(&self) -> &T { &self.0 }
+}
+
 enum WiredInterned<T> {
     Source(T),
     Reference(Compact128),
