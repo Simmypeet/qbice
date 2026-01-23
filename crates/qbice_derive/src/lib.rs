@@ -564,6 +564,59 @@ pub fn derive_for_query_id(
 /// }
 /// ```
 ///
+/// # Custom Execution Style
+///
+/// You can specify an execution style for the generated executor:
+///
+/// ```ignore
+/// #[executor(style = ExecutionStyle::Firewall)]
+/// async fn my_firewall_executor<C: Config>(
+///     query: &MyQuery,
+///     engine: &TrackedEngine<C>,
+/// ) -> Result<String, CyclicError> {
+///     // Implementation
+/// }
+/// ```
+///
+/// You can also combine both attributes:
+///
+/// ```ignore
+/// #[executor(config = MyConfig, style = ExecutionStyle::Projection)]
+/// async fn my_projection_executor(
+///     query: &MyQuery,
+///     engine: &TrackedEngine<MyConfig>,
+/// ) -> Result<String, CyclicError> {
+///     // Implementation
+/// }
+/// ```
+///
+/// # SCC Value for Cyclic Dependencies
+///
+/// You can specify an SCC (strongly-connected component) value for queries
+/// that participate in cycles:
+///
+/// ```ignore
+/// #[executor(scc_value = 0)]
+/// async fn my_cyclic_executor<C: Config>(
+///     query: &MyCyclicQuery,
+///     engine: &TrackedEngine<C>,
+/// ) -> i32 {
+///     // Implementation that may form cycles
+/// }
+/// ```
+///
+/// All attributes can be combined:
+///
+/// ```ignore
+/// #[executor(config = MyConfig, style = ExecutionStyle::Firewall, scc_value = Default::default())]
+/// async fn my_executor(
+///     query: &MyQuery,
+///     engine: &TrackedEngine<MyConfig>,
+/// ) -> Value {
+///     // Implementation
+/// }
+/// ```
+///
 /// # Requirements
 ///
 /// - Function must be async
@@ -588,25 +641,8 @@ fn executor_impl(
     input: &mut ItemFn,
 ) -> Result<proc_macro2::TokenStream, Error> {
     // Parse attribute arguments
-    let custom_config = if attr.is_empty() {
-        None
-    } else {
-        // Parse config = Type
-        let meta: Meta = syn::parse2(attr)?;
-        match meta {
-            Meta::NameValue(nv) if nv.path.is_ident("config") => {
-                let config_type: Type =
-                    syn::parse2(nv.value.to_token_stream())?;
-                Some(config_type)
-            }
-            _ => {
-                return Err(Error::new_spanned(
-                    meta,
-                    "expected #[executor(config = Type)] format",
-                ));
-            }
-        }
-    };
+    let (custom_config, execution_style, scc_value) =
+        parse_executor_attributes(attr)?;
 
     // Verify function is async
     if input.sig.asyncness.is_none() {
@@ -743,6 +779,24 @@ fn executor_impl(
     // Clone the function for the const block
     let original_fn = input.clone();
 
+    // Generate execution_style method if specified
+    let execution_style_method = execution_style.map(|style| {
+        quote! {
+            fn execution_style() -> ::qbice::ExecutionStyle {
+                #style
+            }
+        }
+    });
+
+    // Generate scc_value method if specified
+    let scc_value_method = scc_value.map(|value| {
+        quote! {
+            fn scc_value() -> <#query_type as ::qbice::Query>::Value {
+                #value
+            }
+        }
+    });
+
     let expanded = quote! {
         #(#doc_attrs)*
         #[derive(
@@ -771,11 +825,57 @@ fn executor_impl(
                 ) -> #return_type {
                     #fn_name(a, b).await
                 }
+
+                #execution_style_method
+                #scc_value_method
             }
         };
     };
 
     Ok(expanded)
+}
+
+/// Parse executor attribute arguments: config, style, and scc_value
+#[allow(clippy::type_complexity)]
+fn parse_executor_attributes(
+    attr: proc_macro2::TokenStream,
+) -> Result<
+    (
+        Option<Type>,
+        Option<proc_macro2::TokenStream>,
+        Option<proc_macro2::TokenStream>,
+    ),
+    Error,
+> {
+    if attr.is_empty() {
+        return Ok((None, None, None));
+    }
+
+    let mut custom_config: Option<Type> = None;
+    let mut execution_style: Option<proc_macro2::TokenStream> = None;
+    let mut scc_value: Option<proc_macro2::TokenStream> = None;
+
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("config") {
+            let value: syn::Expr = meta.value()?.parse()?;
+            custom_config = Some(syn::parse2(value.to_token_stream())?);
+            Ok(())
+        } else if meta.path.is_ident("style") {
+            let value: syn::Expr = meta.value()?.parse()?;
+            execution_style = Some(value.to_token_stream());
+            Ok(())
+        } else if meta.path.is_ident("scc_value") {
+            let value: syn::Expr = meta.value()?.parse()?;
+            scc_value = Some(value.to_token_stream());
+            Ok(())
+        } else {
+            Err(meta.error("expected `config`, `style`, or `scc_value`"))
+        }
+    });
+
+    syn::parse::Parser::parse2(parser, attr)?;
+
+    Ok((custom_config, execution_style, scc_value))
 }
 
 /// Converts snake_case to PascalCase
