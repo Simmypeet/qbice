@@ -259,9 +259,13 @@ pub struct InternedID {
 /// // Get owned copy if needed
 /// let owned: String = s1.clone_inner();
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash)]
 #[stable_hash_crate(qbice_stable_hash)]
 pub struct Interned<T: ?Sized>(Arc<T>);
+
+impl<T: ?Sized> Clone for Interned<T> {
+    fn clone(&self) -> Self { Self(self.0.clone()) }
+}
 
 impl<T> Interned<T> {
     /// Returns an owned clone of the interned value.
