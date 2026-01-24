@@ -1,6 +1,6 @@
 [package]
 name = "qbice_storage"
-version = "0.4.6"
+version = "0.4.7"
 authors.workspace = true
 description.workspace = true
 edition.workspace = true

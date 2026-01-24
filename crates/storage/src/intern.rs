@@ -259,8 +259,11 @@ pub struct InternedID {
 /// // Get owned copy if needed
 /// let owned: String = s1.clone_inner();
 /// ```
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash)]
+#[derive(
+    Debug, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash, Identifiable,
+)]
 #[stable_hash_crate(qbice_stable_hash)]
+#[stable_type_id_crate(qbice_stable_type_id)]
 pub struct Interned<T: ?Sized>(Arc<T>);
 
 impl<T: ?Sized> Interned<T> {
