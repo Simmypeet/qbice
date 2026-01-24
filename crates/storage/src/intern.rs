@@ -263,6 +263,32 @@ pub struct InternedID {
 #[stable_hash_crate(qbice_stable_hash)]
 pub struct Interned<T: ?Sized>(Arc<T>);
 
+impl<T: ?Sized> Interned<T> {
+    /// Creates a new `Interned<T>` by wrapping the given value in an `Arc`.
+    ///
+    /// This method doesn't guarantee deduplication. To intern values with
+    /// deduplication, use the [`Interner::intern`] or
+    /// [`Interner::intern_unsized`]
+    pub fn new_duplicating(value: T) -> Self
+    where
+        T: Sized,
+    {
+        Self(Arc::new(value))
+    }
+
+    /// Creates a new `Interned<T>` for an unsized type by wrapping the given
+    /// value in an `Arc`.
+    ///
+    /// This method doesn't guarantee deduplication. To intern values with
+    /// deduplication, use the [`Interner::intern_unsized`]
+    pub fn new_duplicating_unsized<U>(value: U) -> Self
+    where
+        U: Into<Arc<T>>,
+    {
+        Self(value.into())
+    }
+}
+
 impl<T: ?Sized> Clone for Interned<T> {
     fn clone(&self) -> Self { Self(self.0.clone()) }
 }
