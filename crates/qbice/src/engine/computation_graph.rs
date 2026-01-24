@@ -3,6 +3,7 @@ use std::sync::Arc;
 // re-export
 pub(crate) use caller::CallerInformation;
 use dashmap::DashSet;
+pub use input_session::{InputSession, SetInputResult};
 pub(crate) use persist::QueryDebug;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};

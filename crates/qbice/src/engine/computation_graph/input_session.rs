@@ -18,6 +18,64 @@ use crate::{
     query::QueryID,
 };
 
+/// A transactional session for setting and updating input query values.
+///
+/// `InputSession` provides a batch interface for modifying input queries with
+/// automatic dirty propagation. All changes are buffered during the session
+/// lifetime and committed atomically when the session is dropped.
+///
+/// # Lifecycle
+///
+/// 1. **Creation**: Obtained via [`Engine::input_session()`]
+///    - Acquires a write lock on the computation graph
+///    - Increments the global timestamp to invalidate running queries
+/// 2. **Modification**: Use [`set_input`](Self::set_input) or
+///    [`refresh`](Self::refresh)
+///    - Changes are buffered in memory
+///    - Dirty queries are tracked for later propagation
+/// 3. **Commit**: Automatically triggered on drop
+///    - Dirty propagation executes in parallel via the Rayon thread pool
+///    - Write buffer is submitted to persistent storage
+///    - Statistics are reset and internal state is cleaned up
+///
+/// # Dirty Propagation
+///
+/// When the session ends, the engine:
+/// - Compares new values with stored values via fingerprint hashing
+/// - Marks queries whose values changed as dirty
+/// - Recursively marks all dependent queries as dirty
+/// - Ensures downstream queries will recompute on next access
+///
+/// # Concurrency
+///
+/// **Only one input session can be active at a time.** Creating a new session
+/// while another exists will deadlock, as the write lock cannot be acquired.
+///
+/// The session increments the timestamp on creation, causing any in-flight
+/// queries to become stale and await cancellation. This ensures consistency
+/// between the input changes and query results.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use qbice::Engine;
+///
+/// // Initial setup
+/// {
+///     let mut session = engine.input_session();
+///     session.set_input(UserId, 42);
+///     session.set_input(UserName, "Alice");
+/// } // Changes committed and dirty propagation occurs here
+///
+/// // Query dependent values
+/// let profile = engine.query(UserProfile(42)).await;
+///
+/// // Update an input
+/// {
+///     let mut session = engine.input_session();
+///     session.set_input(UserName, "Alice Smith"); // Only this query marked dirty
+/// } // Dirty propagation recomputes affected queries
+/// ```
 pub struct InputSession<'x, C: Config> {
     engine: &'x Arc<Engine<C>>,
     dirty_batch: VecDeque<QueryID>,

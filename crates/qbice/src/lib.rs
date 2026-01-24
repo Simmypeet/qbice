@@ -353,7 +353,10 @@ pub mod program;
 pub mod query;
 
 pub use config::{Config, DefaultConfig};
-pub use engine::{Engine, computation_graph::TrackedEngine};
+pub use engine::{
+    Engine,
+    computation_graph::{InputSession, SetInputResult, TrackedEngine},
+};
 pub use executor::{CyclicError, Executor};
 // re-export companion crates
 pub use qbice_derive::{Query, derive_for_query_id, executor};
