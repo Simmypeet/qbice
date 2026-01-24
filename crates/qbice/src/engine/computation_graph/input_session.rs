@@ -3,7 +3,7 @@ use std::{collections::VecDeque, sync::Arc};
 use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
 use parking_lot::RwLock;
-use qbice_stable_hash::Compact128;
+use qbice_stable_hash::{Compact128, StableHash};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tokio::task::JoinSet;
 
@@ -121,6 +121,40 @@ impl<C: Config> Engine<C> {
     }
 }
 
+/// The result of setting an input query value.
+///
+/// This enum indicates whether an input query was newly created, had its value
+/// updated, or remained unchanged after a
+/// [`set_input`](InputSession::set_input) operation.
+///
+/// The variant determines whether dirty propagation will occur when the input
+/// session is dropped.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, StableHash,
+)]
+pub enum SetInputResult {
+    /// The input query was set for the first time.
+    ///
+    /// This indicates that no prior value existed for this query. A new entry
+    /// was created in the computation graph. No dirty propagation is needed
+    /// since there are no dependents yet.
+    Fresh,
+
+    /// The input query's value was updated.
+    ///
+    /// The new value's fingerprint differs from the previously stored value,
+    /// indicating a semantic change. This query and all its dependents will be
+    /// marked dirty for recomputation when the input session is dropped.
+    Updated,
+
+    /// The input query's value remained unchanged.
+    ///
+    /// The new value's fingerprint matches the previously stored value,
+    /// indicating no semantic change occurred. No dirty propagation will be
+    /// performed, and dependents remain valid.
+    Unchanged,
+}
+
 impl<C: Config> InputSession<'_, C> {
     /// Sets the value for an input query.
     ///
@@ -149,7 +183,11 @@ impl<C: Config> InputSession<'_, C> {
     ///
     /// - `query`: The input query key
     /// - `new_value`: The new value to associate with this query
-    pub fn set_input<Q: Query>(&mut self, query: Q, new_value: Q::Value) {
+    pub fn set_input<Q: Query>(
+        &mut self,
+        query: Q,
+        new_value: Q::Value,
+    ) -> SetInputResult {
         let query_hash = self.engine.hash(&query);
         let query_id = QueryID::new::<Q>(query_hash);
 
@@ -157,7 +195,7 @@ impl<C: Config> InputSession<'_, C> {
 
         // has prior node infos, check for fingerprint diff
         // also, unwire the backward edges (if any)
-        if let Some(node_info) =
+        let set_input_result = if let Some(node_info) =
             unsafe { self.engine.get_node_info_unchecked(query_id) }
         {
             let fingerprint_diff =
@@ -166,8 +204,13 @@ impl<C: Config> InputSession<'_, C> {
             // only dirty propagate if the fingerprint differs
             if fingerprint_diff {
                 self.dirty_batch.push_back(query_id);
+                SetInputResult::Updated
+            } else {
+                SetInputResult::Unchanged
             }
-        }
+        } else {
+            SetInputResult::Fresh
+        };
 
         let ts = self.transaction.as_ref().unwrap().timestamp();
 
@@ -180,6 +223,8 @@ impl<C: Config> InputSession<'_, C> {
             true,
             ts,
         );
+
+        set_input_result
     }
 
     /// Refreshes all external input queries of type `Q`.
