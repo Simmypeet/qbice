@@ -455,4 +455,36 @@ impl<C: Config> InputSession<'_, C> {
             }
         }
     }
+
+    /// Interns a value, returning a reference-counted handle to the shared
+    /// allocation.
+    ///
+    /// This is a delegation to [`Engine::intern`]. See its documentation for
+    /// more details.
+    pub fn intern<
+        T: StableHash + crate::Identifiable + Send + Sync + 'static,
+    >(
+        &self,
+        value: T,
+    ) -> qbice_storage::intern::Interned<T> {
+        self.engine.intern(value)
+    }
+
+    /// Interns an unsized value, returning a reference-counted handle to the
+    /// shared allocation.
+    ///
+    /// This is a delegation to [`Engine::intern_unsized`]. See its
+    /// documentation for more details.
+    pub fn intern_unsized<
+        T: StableHash + crate::Identifiable + Send + Sync + 'static + ?Sized,
+        Q: std::borrow::Borrow<T> + Send + Sync + 'static,
+    >(
+        &self,
+        value: Q,
+    ) -> qbice_storage::intern::Interned<T>
+    where
+        Arc<T>: From<Q>,
+    {
+        self.engine.intern_unsized(value)
+    }
 }
