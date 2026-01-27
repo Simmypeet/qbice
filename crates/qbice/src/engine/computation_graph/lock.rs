@@ -288,6 +288,7 @@ impl<C: Config> Engine<C> {
         &self,
         query_id: QueryID,
         caller_information: &CallerInformation,
+        type_name: &'static str,
     ) -> Option<ComputingLockGuard<'_, C>> {
         match self.computation_graph.lock.lock.entry(query_id) {
             dashmap::Entry::Occupied(_) => {
@@ -308,9 +309,11 @@ impl<C: Config> Engine<C> {
 
                     (ComputingMode::Repair, kind)
                 } else {
-                    let executor =
-                        self.executor_registry.get_executor_entry_by_type_id(
+                    let executor = self
+                        .executor_registry
+                        .get_executor_entry_by_type_id_with_type_name(
                             &query_id.stable_type_id(),
+                            type_name,
                         );
 
                     let style = executor.obtain_execution_style();
@@ -374,10 +377,11 @@ impl<C: Config> Engine<C> {
         query_id: QueryID,
         slow_path: SlowPath,
         caller_information: &CallerInformation,
+        type_name: &'static str,
     ) -> Option<LockGuard<'_, C>> {
         match slow_path {
             SlowPath::Computing => self
-                .computing_lock_guard(query_id, caller_information)
+                .computing_lock_guard(query_id, caller_information, type_name)
                 .await
                 .map(LockGuard::ComputingLockGuard),
 

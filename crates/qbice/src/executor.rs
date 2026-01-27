@@ -586,6 +586,17 @@ impl<C: Config> Registry<C> {
         })
     }
 
+    #[must_use]
+    pub(crate) fn get_executor_entry_by_type_id_with_type_name(
+        &self,
+        type_id: &StableTypeID,
+        type_name: &'static str,
+    ) -> &Entry<C> {
+        self.executors_by_key_type_id.get(type_id).unwrap_or_else(|| {
+            panic!("Failed to find executor for query type: {type_name}")
+        })
+    }
+
     /// Retrieves the executor entry for the given query type ID.
     ///
     /// Returns `None` if no executor is registered for the query type.
