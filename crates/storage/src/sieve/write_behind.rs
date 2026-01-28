@@ -1,5 +1,6 @@
 use std::{
     any::{Any, TypeId},
+    cell::RefCell,
     collections::{BinaryHeap, HashMap},
     sync::{
         Arc,
@@ -11,6 +12,7 @@ use std::{
 use crossbeam_deque::{Injector, Stealer};
 use crossbeam_utils::Backoff;
 use parking_lot::{Condvar, Mutex};
+use thread_local::ThreadLocal;
 
 use crate::{
     kv_database::{KvDatabase, WideColumn, WideColumnValue, WriteBatch},
@@ -456,7 +458,7 @@ pub struct BackgroundWriter<Db: KvDatabase, S: BuildHasher> {
     registry: Arc<Registry<Db, S>>,
     write_handles: Vec<thread::JoinHandle<()>>,
     commit_handle: Option<thread::JoinHandle<()>>,
-    pool: Arc<Mutex<WriteBufferPool<Db, S>>>,
+    pool: Arc<WriteBufferPool<Db, S>>,
 
     db: Arc<Db>,
 }
@@ -552,7 +554,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
             })
             .collect();
 
-        let pool = Arc::new(Mutex::new(WriteBufferPool::new()));
+        let pool = Arc::new(WriteBufferPool::new());
 
         Self {
             registry,
@@ -576,8 +578,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
     /// Creates a new write buffer for accumulating write operations.
     #[must_use]
     pub fn new_write_buffer(&self) -> WriteBuffer<Db, S> {
-        let mut pool = self.pool.lock();
-        pool.get_buffer()
+        self.pool.get_buffer()
     }
 
     /// Submits a write buffer to be processed by the background writer.
@@ -598,7 +599,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
 
     fn commit_worker(
         receiver: &crossbeam_channel::Receiver<CommitTask<Db, S>>,
-        pool: &Mutex<WriteBufferPool<Db, S>>,
+        pool: &WriteBufferPool<Db, S>,
     ) {
         let mut expected_epoch = 0;
         let mut pending_commits = BinaryHeap::new();
@@ -627,7 +628,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
     fn process_pending_commits(
         pending_commits: &mut BinaryHeap<CommitTask<Db, S>>,
         expected_epoch: &mut usize,
-        pool: &Mutex<WriteBufferPool<Db, S>>,
+        pool: &WriteBufferPool<Db, S>,
     ) {
         while let Some(top) = pending_commits.peek() {
             if top.write_task.write_buffer.epoch == *expected_epoch {
@@ -637,8 +638,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
                 *expected_epoch += 1;
 
                 // return write buffer to pool
-                let mut pool_guard = pool.lock();
-                pool_guard.return_buffer(task.write_task.write_buffer);
+                pool.return_buffer(task.write_task.write_buffer);
             } else {
                 break;
             }
@@ -826,33 +826,35 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
 }
 
 struct WriteBufferPool<Db: KvDatabase, S: BuildHasher> {
-    pool: Vec<WriteBuffer<Db, S>>,
-    epoch: usize,
+    pool: ThreadLocal<RefCell<Vec<WriteBuffer<Db, S>>>>,
+    epoch: AtomicUsize,
 }
 
 impl<Db: KvDatabase, S: BuildHasher> WriteBufferPool<Db, S> {
     #[must_use]
-    pub const fn new() -> Self { Self { pool: Vec::new(), epoch: 0 } }
-
-    pub fn get_buffer(&mut self) -> WriteBuffer<Db, S> {
-        if let Some(mut buffer) = self.pool.pop() {
-            // reset epoch
-            buffer.epoch = self.epoch;
-            buffer.active = true;
-
-            self.epoch += 1;
-
-            buffer
-        } else {
-            let epoch = self.epoch;
-            self.epoch += 1;
-
-            WriteBuffer::new(epoch, true)
-        }
+    pub const fn new() -> Self {
+        Self { pool: ThreadLocal::new(), epoch: AtomicUsize::new(0) }
     }
 
-    pub fn return_buffer(&mut self, mut buffer: WriteBuffer<Db, S>) {
+    pub fn get_buffer(&self) -> WriteBuffer<Db, S> {
+        let curr_epoch = self.epoch.fetch_add(1, Ordering::SeqCst);
+        let curr_pool = self.pool.get_or(|| RefCell::new(Vec::new()));
+
+        let mut pool = curr_pool.borrow_mut();
+
+        pool.pop().map_or_else(
+            || WriteBuffer::new(curr_epoch, true),
+            |mut buffer| {
+                buffer.epoch = curr_epoch;
+                buffer.active = true;
+
+                buffer
+            },
+        )
+    }
+
+    pub fn return_buffer(&self, mut buffer: WriteBuffer<Db, S>) {
         buffer.active = false;
-        self.pool.push(buffer);
+        self.pool.get_or(|| RefCell::new(Vec::new())).borrow_mut().push(buffer);
     }
 }
