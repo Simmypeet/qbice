@@ -132,7 +132,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use fxhash::{FxBuildHasher, FxHashSet};
-use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
+use parking_lot::RwLockReadGuard;
 use qbice_serialize::{
     Decode, Decoder, Encode, Encoder, Plugin,
     session::{Session, SessionKey},
@@ -545,7 +545,7 @@ struct Shard {
 }
 
 type TypedShard<T> = Sharded<HashMap<Compact128, Weak<T>, FxBuildHasher>>;
-type WholeShard = Sharded<HashMap<StableTypeID, Shard, FxBuildHasher>>;
+type WholeShard = Sharded<HashMap<StableTypeID, Arc<Shard>, FxBuildHasher>>;
 
 struct Repr {
     shards: WholeShard,
@@ -911,7 +911,7 @@ impl Interner {
 
     fn obtain_read_shard<T: Identifiable + Send + Sync + 'static + ?Sized>(
         &self,
-    ) -> MappedRwLockReadGuard<'_, Shard> {
+    ) -> Arc<Shard> {
         let shard_amount = self.inner.shards.shard_amount();
         let stable_type_id = T::STABLE_TYPE_ID;
 
@@ -924,7 +924,7 @@ impl Interner {
             if let Ok(exist) =
                 RwLockReadGuard::try_map(shard, |x| x.get(&stable_type_id))
             {
-                return exist;
+                return exist.clone();
             }
 
             // slow path, need to create the shard, the `shard` has already
@@ -932,14 +932,14 @@ impl Interner {
             let mut write_shard = self.inner.shards.write_shard(shard_index);
 
             if let Entry::Vacant(entry) = write_shard.entry(stable_type_id) {
-                entry.insert(Shard {
+                entry.insert(Arc::new(Shard {
                     typed_shard: {
                         Box::new(TypedShard::<T>::new(shard_amount, |_| {
                             HashMap::default()
                         }))
                     },
                     vacuum_fn: vacuum_shard::<T>,
-                });
+                }));
             }
         }
     }
