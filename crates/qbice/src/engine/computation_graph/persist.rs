@@ -585,7 +585,7 @@ impl<C: Config> Persist<C> {
     }
 }
 
-#[derive(Debug, Encode, Decode)]
+#[derive(Debug, Clone, Copy, Encode, Decode)]
 pub struct Observation {
     pub seen_value_fingerprint: Compact128,
     pub seen_transitive_firewall_callees_fingerprint: Compact128,

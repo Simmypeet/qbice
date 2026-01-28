@@ -510,6 +510,7 @@ impl<C: Config> Engine<C> {
         };
 
         // if cyclic dependency is detected, return error
+
         self.is_query_running_in_scc(caller.get_caller())?;
 
         Ok(value)

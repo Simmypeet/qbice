@@ -110,7 +110,7 @@ impl<C: Config> Engine<C> {
 
         let old_kind = self.get_query_kind(query.id, caller_information).await;
         let existing_forward_edges =
-            unsafe { self.get_forward_edges_order_unchecked(query.id).await };
+            self.get_forward_edges_order(query.id, caller_information).await;
 
         // if the old node info is a firewall or projection node, we compare
         // the old and new value fingerprints to determine if we need to

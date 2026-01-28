@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use dashmap::mapref::one::Ref;
+
 use crate::{
     Engine, Query,
     config::Config,
@@ -48,38 +50,11 @@ impl<C: Config> Engine<C> {
         );
     }
 
-    /// Checks whether the stack of computing queries contains a cycle
-    fn check_cyclic(&self, computing: &Computing, target: QueryID) -> bool {
-        if computing.contains_query(&target) {
-            computing.mark_scc();
-
-            return true;
-        }
-
-        let mut found = false;
-
-        // OPTIMIZE: this can be parallelized
-        for dep in computing.registered_callees() {
-            let Some(state) = self.computation_graph.lock.try_get_lcok(*dep)
-            else {
-                continue;
-            };
-
-            found |= self.check_cyclic(&state, target);
-        }
-
-        if found {
-            computing.mark_scc();
-        }
-
-        found
-    }
-
     /// Exit early if a cyclic dependency is detected.
     fn exit_scc(
         &self,
         called_from: Option<QueryID>,
-        running_state: &Computing,
+        running_state: Ref<'_, QueryID, Computing>,
     ) -> Result<(), CyclicError> {
         // if there is no caller, we are at the root.
         let Some(called_from) = called_from else {
@@ -106,13 +81,11 @@ impl<C: Config> Engine<C> {
         caller: &CallerInformation,
     ) -> Result<FastPathResult<Q::Value>, CyclicError> {
         if let Some(computing) =
-            self.computation_graph.lock.try_get_lcok(query_id)
+            self.computation_graph.lock.try_get_lock(query_id)
         {
             // exit out of the scc query to avoid circular waits
-            self.exit_scc(caller.get_caller(), &computing)?;
-
             let notified_owned = computing.notified_owned();
-            drop(computing);
+            self.exit_scc(caller.get_caller(), computing)?;
 
             notified_owned.await;
 

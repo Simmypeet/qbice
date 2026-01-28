@@ -523,31 +523,36 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                 .ok();
             }
 
-            let Some(db_value) = self
-                .single_flight
+            self.single_flight
                 .work_or_wait(
                     (combined_key.0.clone(), std::any::TypeId::of::<W>()),
-                    || self.backing_db.get_wide_column::<C, W>(&combined_key.0),
+                    || {
+                        let db_value = self
+                            .backing_db
+                            .get_wide_column::<C, W>(&combined_key.0);
+
+                        let mut write_lock =
+                            self.shards.write_shard(shard_index);
+
+                        if let Retrieve::Hit(_) =
+                            write_lock.get(&combined_key, false)
+                        {
+                            // another thread already filled the cache while we
+                            // were acquiring the
+                            // write lock, retry read
+                            return;
+                        }
+
+                        write_lock.insert(
+                            combined_key.clone(),
+                            db_value.map(|x| {
+                                Box::new(x) as Box<dyn Any + Send + Sync>
+                            }),
+                            0,
+                        );
+                    },
                 )
-                .await
-            else {
-                // this thread were instructed to wait, retry read
-                continue;
-            };
-
-            let mut write_lock = self.shards.write_shard(shard_index);
-
-            if let Retrieve::Hit(_) = write_lock.get(&combined_key, false) {
-                // another thread already filled the cache while we were
-                // acquiring the write lock, retry read
-                continue;
-            }
-
-            write_lock.insert(
-                combined_key.clone(),
-                db_value.map(|x| Box::new(x) as Box<dyn Any + Send + Sync>),
-                0,
-            );
+                .await;
         }
     }
 }
@@ -769,63 +774,62 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                 return guard;
             }
 
-            let Some(mut db_value) = self
-                .single_flight
+            self.single_flight
                 .work_or_wait(key.clone(), || {
-                    self.backing_db
+                    let mut db_value = self
+                        .backing_db
                         .scan_members::<C>(key)
-                        .collect::<C::Container>()
+                        .collect::<C::Container>();
+
+                    let mut write_lock = self.shards.write_shard(shard_index);
+
+                    // the deltas that have to be applied to the full set
+                    let entry = write_lock.get_mut(key, false);
+
+                    let partial = if let RetrieveMut::Hit(en) = &entry {
+                        match &en.value {
+                            KeyOfSetEntry::Full(_) => {
+                                // another thread already filled the cache while
+                                // we were
+                                // acquiring the write lock, retry read
+                                return;
+                            }
+
+                            KeyOfSetEntry::Partial(hash_map) => Some(hash_map),
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(partial_ops) = partial {
+                        for (element, operation) in partial_ops {
+                            match operation {
+                                Operation::Insert => {
+                                    db_value.extend(std::iter::once(
+                                        element.clone(),
+                                    ));
+                                }
+                                Operation::Delete => {
+                                    db_value.remove_element(element);
+                                }
+                            }
+                        }
+                    }
+
+                    match entry {
+                        RetrieveMut::Hit(node) => {
+                            node.value = KeyOfSetEntry::Full(db_value);
+                        }
+                        RetrieveMut::Miss => {
+                            write_lock.insert(
+                                key.clone(),
+                                KeyOfSetEntry::Full(db_value),
+                                0,
+                            );
+                        }
+                    }
                 })
-                .await
-            else {
-                // this thread were instructed to wait, retry read
-                continue;
-            };
-
-            let mut write_lock = self.shards.write_shard(shard_index);
-
-            // the deltas that have to be applied to the full set
-            let entry = write_lock.get_mut(key, false);
-
-            let partial = if let RetrieveMut::Hit(en) = &entry {
-                match &en.value {
-                    KeyOfSetEntry::Full(_) => {
-                        // another thread already filled the cache while we were
-                        // acquiring the write lock, retry read
-                        continue;
-                    }
-
-                    KeyOfSetEntry::Partial(hash_map) => Some(hash_map),
-                }
-            } else {
-                None
-            };
-
-            if let Some(partial_ops) = partial {
-                for (element, operation) in partial_ops {
-                    match operation {
-                        Operation::Insert => {
-                            db_value.extend(std::iter::once(element.clone()));
-                        }
-                        Operation::Delete => {
-                            db_value.remove_element(element);
-                        }
-                    }
-                }
-            }
-
-            match entry {
-                RetrieveMut::Hit(node) => {
-                    node.value = KeyOfSetEntry::Full(db_value);
-                }
-                RetrieveMut::Miss => {
-                    write_lock.insert(
-                        key.clone(),
-                        KeyOfSetEntry::Full(db_value),
-                        0,
-                    );
-                }
-            }
+                .await;
         }
     }
 }
