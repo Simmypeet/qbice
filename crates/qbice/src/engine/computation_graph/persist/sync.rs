@@ -89,7 +89,7 @@ impl<C: Config> Sync<C> {
                 TimestampColumn,
                 C::Database,
                 C::BuildHasher,
-            >::new(1, 1, db, C::BuildHasher::default()));
+            >::new(2, 2, db, C::BuildHasher::default()));
 
         let timestamp =
             timestamp_sieve.get_normal::<Timestamp>(()).map_or_else(

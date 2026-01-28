@@ -19,20 +19,20 @@ impl<T> Sharded<T> {
         shard_amount: usize,
         mut make_shard: impl FnMut(usize) -> T,
     ) -> Self {
+        assert!(shard_amount > 1, "shard_amount must be greater than 1");
         assert!(
             shard_amount.is_power_of_two(),
             "shard_amount must be a power of two"
         );
+
+        let shift = ptr_size_bits() - ncb(shard_amount);
 
         let mut shards = Vec::with_capacity(shard_amount);
         for i in 0..shard_amount {
             shards.push(CachePadded::new(RwLock::new(make_shard(i))));
         }
 
-        Self {
-            shards: shards.into_boxed_slice(),
-            shift: ptr_size_bits() - ncb(shard_amount),
-        }
+        Self { shards: shards.into_boxed_slice(), shift }
     }
 
     pub fn shard_amount(&self) -> usize { self.shards.len() }
@@ -41,7 +41,7 @@ impl<T> Sharded<T> {
         &self,
         shard_index: usize,
     ) -> parking_lot::RwLockReadGuard<'_, T> {
-        self.shards[shard_index].read_recursive()
+        self.shards[shard_index].read()
     }
 
     pub fn write_shard(

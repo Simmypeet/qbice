@@ -35,11 +35,7 @@ pub struct SingleFlight<K> {
 }
 
 impl<K: Eq + Hash> SingleFlight<K> {
-    pub fn new(mut shard_amount: usize) -> Self {
-        if shard_amount == 1 {
-            shard_amount = 2;
-        }
-
+    pub fn new(shard_amount: usize) -> Self {
         Self { in_flight: DashMap::with_shard_amount(shard_amount) }
     }
 
