@@ -15,11 +15,14 @@ use tokio::sync::{Notify, futures::OwnedNotified};
 use crate::{
     Engine, ExecutionStyle, Query,
     config::Config,
-    engine::computation_graph::{
-        CallerInformation, QueryKind, QueryWithID,
-        persist::{NodeInfo, Observation, WriterBufferWithLock},
-        slow_path::SlowPath,
-        tfc_achetype::TransitiveFirewallCallees,
+    engine::{
+        computation_graph::{
+            CallerInformation, QueryKind, QueryWithID,
+            persist::{NodeInfo, Observation, WriterBufferWithLock},
+            slow_path::SlowPath,
+            tfc_achetype::TransitiveFirewallCallees,
+        },
+        default_shard_amount,
     },
     executor::CyclicError,
     query::QueryID,
@@ -216,8 +219,14 @@ pub struct Lock<C: Config> {
 impl<C: Config> Lock<C> {
     pub fn new() -> Self {
         Self {
-            lock: DashMap::default(),
-            backward_projection_lock: DashMap::default(),
+            lock: DashMap::with_hasher_and_shard_amount(
+                C::BuildHasher::default(),
+                default_shard_amount(),
+            ),
+            backward_projection_lock: DashMap::with_hasher_and_shard_amount(
+                C::BuildHasher::default(),
+                default_shard_amount(),
+            ),
         }
     }
 }
