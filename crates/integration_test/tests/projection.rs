@@ -260,18 +260,18 @@ async fn double_square_summing() {
 
     // initialze variables
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         let mut target_vars = Vec::new();
 
         for i in 0..8 {
-            input_session.set_input(Variable(i), i.cast_signed() + 1);
+            input_session.set_input(Variable(i), i.cast_signed() + 1).await;
             target_vars.push(Variable(i));
         }
 
-        input_session.set_input(VariableTarget, Arc::from(target_vars));
+        input_session.set_input(VariableTarget, Arc::from(target_vars)).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // 1^2 = 1
     // 2^2 = 4
@@ -296,11 +296,11 @@ async fn double_square_summing() {
 
     // Change the `Variable(0)` to 10
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 10);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // there shouldd be only two dirtied edges:
     // CollectDoubledSquareVariables -> SlowSquare -> Variable(0)
@@ -317,7 +317,8 @@ async fn double_square_summing() {
     // 7^2 = 49
     // 8^2 = 64
     // total * 2 = 408 - 2 + 200 = 606
-    let sum_result = engine.clone().tracked().query(&SumAllDoubleSquares).await;
+    let sum_result =
+        engine.clone().tracked().await.query(&SumAllDoubleSquares).await;
 
     assert_eq!(sum_result, 606);
 
@@ -325,7 +326,7 @@ async fn double_square_summing() {
     // 2 from the previous assertion +
     // each of the 8 DoubleSquare -> CollectDoubledSquareVariables +
     // DoubleSquare(Variable(0)) -> SumAllDoubleSquares
-    assert_eq!(engine.tracked().get_dirtied_edges_count(), 11);
+    assert_eq!(engine.tracked().await.get_dirtied_edges_count(), 11);
 }
 
 // ============================================================================
@@ -364,20 +365,20 @@ async fn multiple_projections_single_firewall() {
 
     // Initialize 4 variables
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         let mut target_vars = Vec::new();
 
         for i in 0..4 {
-            input_session.set_input(Variable(i), i.cast_signed() + 1);
+            input_session.set_input(Variable(i), i.cast_signed() + 1).await;
             target_vars.push(Variable(i));
         }
 
-        input_session.set_input(VariableTarget, Arc::from(target_vars));
+        input_session.set_input(VariableTarget, Arc::from(target_vars)).await;
     }
 
     // Query all three projections
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let v0 = tracked.query(&DoubleSquare(Variable(0))).await;
         let v1 = tracked.query(&DoubleSquare(Variable(1))).await;
         let v2 = tracked.query(&DoubleSquare(Variable(2))).await;
@@ -395,13 +396,13 @@ async fn multiple_projections_single_firewall() {
 
     // Change Variable(0) only
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 10);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10).await;
     }
 
     // Check dirtied edges - should only be 2:
     // CollectDoubledSquareVariables -> SlowSquare(0) -> Variable(0)
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 2);
     drop(tracked);
 
@@ -409,7 +410,7 @@ async fn multiple_projections_single_firewall() {
     // since the firewall is dirty (due to SlowSquare(0) -> Variable(0) being
     // dirty)
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let v1 = tracked.query(&DoubleSquare(Variable(1))).await;
         assert_eq!(v1, Some(8));
     }
@@ -426,13 +427,13 @@ async fn multiple_projections_single_firewall() {
     // in total there should be 5 dirtied edges now:
     // - Original 2 from previous assertion
     // - Each of the 3 DoubleSquare -> CollectDoubledSquareVariables edges
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 5);
     drop(tracked);
 
     // Query the changed projection
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let v0 = tracked.query(&DoubleSquare(Variable(0))).await;
         // 10^2 * 2 = 200
         assert_eq!(v0, Some(200));
@@ -623,15 +624,15 @@ async fn diamond_projection_pattern() {
 
     // Initialize variables
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         for i in 0..4 {
-            input_session.set_input(Variable(i), i.cast_signed() + 1);
+            input_session.set_input(Variable(i), i.cast_signed() + 1).await;
         }
     }
 
     // Query the combiner
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         // Variable(0)=1 -> proj1=2, Variable(1)=2 -> proj1=4, combiner=6
         let result = tracked.query(&DiamondCombiner).await;
         assert_eq!(result, 6);
@@ -644,18 +645,18 @@ async fn diamond_projection_pattern() {
     // Change Variable(2) - neither projection depends on this directly
     // but firewall does
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(2), 100);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(2), 100).await;
     }
 
     // Only 1 dirtied edge: Firewall -> Variable(2)
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 1);
     drop(tracked);
 
     // Re-query combiner
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&DiamondCombiner).await;
         // Same result since proj1(0) and proj1(1) didn't change
         assert_eq!(result, 6);
@@ -674,24 +675,24 @@ async fn diamond_projection_pattern() {
     // - Original 1 from previous assertion
     // - ProjectionLevel1(0) -> SimpleFirewall
     // - ProjectionLevel1(1) -> SimpleFirewall
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 3);
     drop(tracked);
 
     // Now change Variable(0) which DOES affect proj1(0)
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 50);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 50).await;
     }
 
     // Only 1 dirtied edge: Firewall -> Variable(0)
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 1);
     drop(tracked);
 
     // Re-query combiner
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         // Variable(0)=50 -> proj1=100, Variable(1)=2 -> proj1=4, combiner=104
         let result = tracked.query(&DiamondCombiner).await;
         assert_eq!(result, 104);
@@ -706,7 +707,7 @@ async fn diamond_projection_pattern() {
     // - ProjectionLevel1(0) -> SimpleFirewall
     // - ProjectionLevel1(1) -> SimpleFirewall
     // - DiamondCombiner -> ProjectionLevel1(0)
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 4);
     drop(tracked);
 }
@@ -852,14 +853,14 @@ async fn firewall_same_output_no_propagation() {
 
     // Initialize: Variable(0)=5, Variable(1)=5, sum=10
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 5_i64);
-        input_session.set_input(Variable(1), 5_i64);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5_i64).await;
+        input_session.set_input(Variable(1), 5_i64).await;
     }
 
     // Initial query
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&SumConsumer).await;
         assert_eq!(result, 100); // sum=10, consumer=100
     }
@@ -870,19 +871,19 @@ async fn firewall_same_output_no_propagation() {
 
     // Change Variable(0)=3, Variable(1)=7 - sum still equals 10!
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 3_i64);
-        input_session.set_input(Variable(1), 7_i64);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 3_i64).await;
+        input_session.set_input(Variable(1), 7_i64).await;
     }
 
     // 2 dirtied edges: Firewall -> Variable(0), Firewall -> Variable(1)
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 2);
     drop(tracked);
 
     // Re-query
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&SumConsumer).await;
         assert_eq!(result, 100); // Still 100
     }
@@ -900,7 +901,7 @@ async fn firewall_same_output_no_propagation() {
 
     // After query, check dirtied edges - should include backward prop edges
     // but be minimal
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     let dirtied = tracked.get_dirtied_edges_count();
     // Should be: 2 original + Projection -> Firewall from backward prop
     assert!(
@@ -931,9 +932,9 @@ async fn concurrent_projection_access() {
 
     // Initialize variables
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         for i in 0..4 {
-            input_session.set_input(Variable(i), i.cast_signed() + 1);
+            input_session.set_input(Variable(i), i.cast_signed() + 1).await;
         }
     }
 
@@ -942,7 +943,7 @@ async fn concurrent_projection_access() {
     for i in 0..4 {
         let engine = engine.clone();
         handles.push(tokio::spawn(async move {
-            let tracked = engine.tracked();
+            let tracked = engine.tracked().await;
             tracked.query(&ProjectionLevel1(i)).await
         }));
     }
@@ -1153,14 +1154,14 @@ async fn nested_firewall_with_projection() {
 
     // Initialize
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 5_i64);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5_i64).await;
     }
 
     // Initial query
     // Variable(0)=5 -> Outer=10 -> Inner=20 -> Proj=60 -> Consumer=1060
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&NestedConsumer).await;
         assert_eq!(result, 1060);
     }
@@ -1172,20 +1173,20 @@ async fn nested_firewall_with_projection() {
 
     // Change input
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 10_i64);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await;
     }
 
     // Only 1 dirtied edge: OuterFirewall -> Variable(0)
     // InnerFirewall and beyond are NOT dirtied due to firewall boundary
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 1);
     drop(tracked);
 
     // Re-query
     // Variable(0)=10 -> Outer=20 -> Inner=30 -> Proj=90 -> Consumer=1090
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&NestedConsumer).await;
         assert_eq!(result, 1090);
     }
@@ -1197,7 +1198,7 @@ async fn nested_firewall_with_projection() {
     assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
 
     // Final dirtied edge count check
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     let dirtied = tracked.get_dirtied_edges_count();
     // Should include edges from backward propagation through firewalls
     // but be controlled by projection boundaries
@@ -1413,16 +1414,16 @@ async fn projection_with_two_firewalls() {
 
     // Initialize: Variable(0)=5, Variable(1)=10
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 5_i64);
-        input_session.set_input(Variable(1), 10_i64);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5_i64).await;
+        input_session.set_input(Variable(1), 10_i64).await;
     }
 
     // Initial query
     // FirewallA: 5*2=10, FirewallB: 10*3=30, Proj: 10+30=40, Consumer:
     // 40*10=400
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 400);
     }
@@ -1436,12 +1437,12 @@ async fn projection_with_two_firewalls() {
     // Test Case 1: Change only Variable(0) - only FirewallA should recompute
     // =========================================================================
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 10_i64);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await;
     }
 
     // Only 1 dirtied edge: FirewallA -> Variable(0)
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 1);
     drop(tracked);
 
@@ -1449,7 +1450,7 @@ async fn projection_with_two_firewalls() {
     // FirewallA: 10*2=20, FirewallB: 10*3=30 (unchanged), Proj: 20+30=50,
     // Consumer: 50*10=500
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 500);
     }
@@ -1466,12 +1467,12 @@ async fn projection_with_two_firewalls() {
     // Test Case 2: Change only Variable(1) - only FirewallB should recompute
     // =========================================================================
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(1), 20_i64);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(1), 20_i64).await;
     }
 
     // Only 1 dirtied edge: FirewallB -> Variable(1)
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 1);
     drop(tracked);
 
@@ -1479,7 +1480,7 @@ async fn projection_with_two_firewalls() {
     // FirewallA: 10*2=20 (unchanged), FirewallB: 20*3=60, Proj: 20+60=80,
     // Consumer: 80*10=800
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 800);
     }
@@ -1497,13 +1498,13 @@ async fn projection_with_two_firewalls() {
     // Test Case 3: Change BOTH Variable(0) and Variable(1)
     // =========================================================================
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 15_i64);
-        input_session.set_input(Variable(1), 25_i64);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 15_i64).await;
+        input_session.set_input(Variable(1), 25_i64).await;
     }
 
     // 2 dirtied edges: FirewallA -> Variable(0), FirewallB -> Variable(1)
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 2);
     drop(tracked);
 
@@ -1511,7 +1512,7 @@ async fn projection_with_two_firewalls() {
     // FirewallA: 15*2=30, FirewallB: 25*3=75, Proj: 30+75=105,
     // Consumer: 105*10=1050
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 1050);
     }
@@ -1534,19 +1535,19 @@ async fn projection_with_two_firewalls() {
     // recomputation
     // =========================================================================
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         // Set to same value - should not trigger any recomputation
-        input_session.set_input(Variable(0), 15_i64);
+        input_session.set_input(Variable(0), 15_i64).await;
     }
 
     // 0 dirtied edges since value didn't change
-    let tracked = engine.clone().tracked();
+    let tracked = engine.clone().tracked().await;
     assert_eq!(tracked.get_dirtied_edges_count(), 0);
     drop(tracked);
 
     // Re-query - everything should be cached
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&DualFirewallConsumer).await;
         assert_eq!(result, 1050); // Same as before
     }

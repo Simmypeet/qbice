@@ -440,10 +440,11 @@ type ObtainSccValueFn = for<'a> fn(buffer: &'a mut dyn Any);
 
 type ObtainExecutionStyleFn = fn() -> ExecutionStyle;
 
-type DebugQueryFn<C> = for<'a> fn(
-    engine: &'a Engine<C>,
-    query_input_hash_128: Compact128,
-) -> Option<QueryDebug>;
+type DebugQueryFn<C> =
+    for<'a> fn(
+        engine: &'a Engine<C>,
+        query_input_hash_128: Compact128,
+    ) -> Pin<Box<dyn Future<Output = Option<QueryDebug>> + 'a>>;
 
 fn obtain_scc_value<
     C: Config,
@@ -485,7 +486,7 @@ impl<C: Config> Entry<C> {
         Self {
             executor,
             invoke_executor: invoke_executor::<C, E, Q>,
-            query_debug: Engine::<C>::get_query_debug::<Q>,
+            query_debug: Engine::<C>::get_query_debug_future::<Q>,
             repair_query: Engine::<C>::repair_query_from_query_id::<Q>,
             obtain_scc_value: obtain_scc_value::<C, E, Q>,
             obtain_execution_style: obtain_execution_style::<C, E, Q>,
@@ -532,12 +533,12 @@ impl<C: Config> Entry<C> {
         (self.obtain_execution_style)()
     }
 
-    pub fn get_query_debug(
+    pub async fn get_query_debug(
         &self,
         engine: &Engine<C>,
         query_input_hash_128: Compact128,
     ) -> Option<QueryDebug> {
-        (self.query_debug)(engine, query_input_hash_128)
+        (self.query_debug)(engine, query_input_hash_128).await
     }
 }
 

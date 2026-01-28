@@ -338,15 +338,15 @@ async fn run(firewall: bool) {
     // first session: run as normal
     let engine = Arc::new(engine);
 
-    let mut input_session = engine.input_session();
+    let mut input_session = engine.input_session().await;
     let var_count = 5_000u64;
-    input_session.set_input(VariableRange, 0..var_count);
+    input_session.set_input(VariableRange, 0..var_count).await;
     for i in 0..var_count {
-        input_session.set_input(Variable(i), (i + 1) as i64);
+        input_session.set_input(Variable(i), (i + 1) as i64).await;
     }
     drop(input_session);
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     tracked_engine.query(&Variance).await;
 
@@ -355,14 +355,14 @@ async fn run(firewall: bool) {
     // second session: switch 2 variables value (mean should remain the same)
     // avoid dirtying the `Diff` and `DiffSquared` nodes
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
 
-        input_session.set_input(Variable(0), var_count as i64);
-        input_session.set_input(Variable(var_count - 1), 1);
+        input_session.set_input(Variable(0), var_count as i64).await;
+        input_session.set_input(Variable(var_count - 1), 1).await;
         drop(input_session);
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     tracked_engine.query(&Variance).await;
 
@@ -370,13 +370,13 @@ async fn run(firewall: bool) {
 
     // final session: change one variable to dirty the mean
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
 
-        input_session.set_input(Variable(var_count / 2), 1);
+        input_session.set_input(Variable(var_count / 2), 1).await;
         drop(input_session);
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     tracked_engine.query(&Variance).await;
 }

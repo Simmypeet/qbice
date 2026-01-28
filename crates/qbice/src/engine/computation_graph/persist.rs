@@ -26,7 +26,7 @@
 
 use std::{
     borrow::Borrow, collections::HashMap, hash::Hash, marker::PhantomData,
-    sync::Arc,
+    pin::Pin, sync::Arc,
 };
 
 use dashmap::{DashMap, DashSet, setref::multiple::RefMulti};
@@ -550,6 +550,7 @@ pub struct Persist<C: Config> {
 impl<C: Config> Persist<C> {
     pub fn new(db: Arc<C::Database>, shard_amount: usize) -> Self {
         Self {
+            sync: sync::Sync::new(&db),
             query_node: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount * 2 * 2,
@@ -577,10 +578,9 @@ impl<C: Config> Persist<C> {
             external_input_queries: Arc::new(Sieve::<_, C>::new(
                 C::cache_entry_capacity(),
                 shard_amount,
-                db.clone(),
+                db,
                 C::BuildHasher::default(),
             )),
-            sync: sync::Sync::new(db),
         }
     }
 }
@@ -608,7 +608,8 @@ impl<C: Config> Engine<C> {
         tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
-        mut tx: WriterBufferWithLock<C>,
+        existing_forward_edges: Option<&[QueryID]>,
+        mut tx: WriterBufferWithLock<'_, C>,
     ) {
         let query_value_fingerprint =
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
@@ -624,16 +625,13 @@ impl<C: Config> Engine<C> {
             tfc_achetype,
         );
 
-        let existing_forward_edges =
-            unsafe { self.get_forward_edges_order_unchecked(query_id.id) };
-
         let query_input = QueryInput::<Q>(query_id.query.clone());
         let query_result = QueryResult::<Q>(query_value);
 
         {
             // remove prior backward edges
-            if let Some(forward_edges) = &existing_forward_edges {
-                for edge in forward_edges.iter() {
+            if let Some(forward_edges) = existing_forward_edges {
+                for edge in forward_edges {
                     self.computation_graph
                         .persist
                         .backward_edges
@@ -722,13 +720,13 @@ impl<C: Config> Engine<C> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn set_computed_input<Q: Query>(
+    pub(super) async fn set_computed_input<Q: Query>(
         &self,
         query: Q,
         query_hash_128: Compact128,
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
-        tx: &mut WriterBufferWithLock<C>,
+        tx: &mut WriterBufferWithLock<'_, C>,
         set_input: bool,
         timestamp: Timestamp,
     ) {
@@ -736,7 +734,7 @@ impl<C: Config> Engine<C> {
 
         // if have an existing forward edges, unwire the backward edges
         let existing_forward_edges =
-            unsafe { self.get_forward_edges_order_unchecked(query_id) };
+            unsafe { self.get_forward_edges_order_unchecked(query_id).await };
 
         let empty_forward_edges = ForwardEdgeOrder(Arc::from([]));
         let empty_forward_edge_observations = ForwardEdgeObservation::<C>(
@@ -755,6 +753,8 @@ impl<C: Config> Engine<C> {
 
         let query_input = QueryInput::<Q>(query);
         let query_result = QueryResult::<Q>(query_value);
+
+        // NOTE: No more async points below here, to ensure atomicity
 
         {
             if let Some(forward_edges) = existing_forward_edges {
@@ -881,11 +881,16 @@ impl<C: Config> Engine<C> {
         }
     }
 
-    pub(super) fn is_edge_dirty(&self, from: QueryID, to: QueryID) -> bool {
+    pub(super) async fn is_edge_dirty(
+        &self,
+        from: QueryID,
+        to: QueryID,
+    ) -> bool {
         self.computation_graph
             .persist
             .dirty_edge_set
             .get_normal::<Unit>(Edge { from, to })
+            .await
             .is_some()
     }
 
@@ -919,7 +924,7 @@ pub(crate) struct QueryDebug {
 }
 
 impl<C: Config> Engine<C> {
-    pub(crate) fn get_query_debug<Q: Query>(
+    pub(crate) async fn get_query_debug<Q: Query>(
         &self,
         query_id: Compact128,
     ) -> Option<QueryDebug> {
@@ -927,11 +932,13 @@ impl<C: Config> Engine<C> {
             self.computation_graph
                 .persist
                 .query_store
-                .get_normal::<QueryInput<Q>>(query_id),
+                .get_normal::<QueryInput<Q>>(query_id)
+                .await,
             self.computation_graph
                 .persist
                 .query_store
-                .get_normal::<QueryResult<Q>>(query_id),
+                .get_normal::<QueryResult<Q>>(query_id)
+                .await,
         ) else {
             return None;
         };
@@ -941,5 +948,13 @@ impl<C: Config> Engine<C> {
             input: format!("{query_input:?}"),
             output: format!("{query_value:?}"),
         })
+    }
+
+    pub(crate) fn get_query_debug_future<'s, Q: Query>(
+        &'s self,
+        query_id: Compact128,
+    ) -> Pin<Box<dyn std::future::Future<Output = Option<QueryDebug>> + 's>>
+    {
+        Box::pin(async move { self.get_query_debug::<Q>(query_id).await })
     }
 }

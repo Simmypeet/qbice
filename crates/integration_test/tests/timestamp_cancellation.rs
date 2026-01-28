@@ -91,8 +91,8 @@ async fn basic_timestamp_cancellation() {
 
     // start with zero
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 0);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 0).await;
     }
 
     let new_session_handle = {
@@ -105,8 +105,8 @@ async fn basic_timestamp_cancellation() {
 
             // start new timestamp
             {
-                let mut input_session = engine.input_session();
-                input_session.set_input(Variable(0), 2);
+                let mut input_session = engine.input_session().await;
+                input_session.set_input(Variable(0), 2).await;
                 drop(input_session);
             }
 
@@ -122,14 +122,14 @@ async fn basic_timestamp_cancellation() {
                 }
             });
 
-            let tracked_engine = engine.tracked();
+            let tracked_engine = engine.tracked().await;
             let result = tracked_engine.query(&HangingQuery(Variable(0))).await;
 
             assert_eq!(result, 4);
         })
     };
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
     let result = tokio::select! {
         () = cancellation_token.cancelled() => {
             // cancelled
@@ -153,11 +153,11 @@ async fn basic_timestamp_cancellation() {
 
     // query again to ensure engine is still functional
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 3).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     assert_eq!(tracked_engine.query(&HangingQuery(Variable(0))).await, 6);
 }
@@ -189,10 +189,10 @@ async fn multiple_concurrent_queries_cancelled() {
 
     // start with zero
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 0);
-        input_session.set_input(Variable(1), 0);
-        input_session.set_input(Variable(2), 0);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 0).await;
+        input_session.set_input(Variable(1), 0).await;
+        input_session.set_input(Variable(2), 0).await;
     }
 
     let new_session_handle = {
@@ -207,8 +207,8 @@ async fn multiple_concurrent_queries_cancelled() {
 
             // increment timestamp
             {
-                let mut input_session = engine.input_session();
-                input_session.set_input(Variable(0), 2);
+                let mut input_session = engine.input_session().await;
+                input_session.set_input(Variable(0), 2).await;
                 drop(input_session);
             }
 
@@ -228,14 +228,14 @@ async fn multiple_concurrent_queries_cancelled() {
                 cancellation_token.cancel();
             });
 
-            let tracked_engine = engine.tracked();
+            let tracked_engine = engine.tracked().await;
             let result = tracked_engine.query(&HangingQuery(Variable(0))).await;
 
             assert_eq!(result, 4);
         })
     };
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // start multiple concurrent queries
     let handles: Vec<_> = (0..3)
@@ -265,11 +265,11 @@ async fn multiple_concurrent_queries_cancelled() {
 
     // verify engine is still functional
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 5);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
     assert_eq!(tracked_engine.query(&HangingQuery(Variable(0))).await, 10);
 }
 
@@ -300,8 +300,8 @@ async fn rapid_timestamp_increments() {
 
     // start with zero
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 0);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 0).await;
     }
 
     let increment_handle = {
@@ -315,8 +315,8 @@ async fn rapid_timestamp_increments() {
             // rapidly increment timestamp multiple times
             for i in 1..=5 {
                 {
-                    let mut input_session = engine.input_session();
-                    input_session.set_input(Variable(0), i * 2);
+                    let mut input_session = engine.input_session().await;
+                    input_session.set_input(Variable(0), i * 2).await;
                     drop(input_session);
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -331,14 +331,14 @@ async fn rapid_timestamp_increments() {
             }
 
             // query with latest timestamp should succeed
-            let tracked_engine = engine.tracked();
+            let tracked_engine = engine.tracked().await;
             let result = tracked_engine.query(&HangingQuery(Variable(0))).await;
 
             assert_eq!(result, 20); // 10 * 2
         })
     };
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
     let result = tokio::select! {
         () = cancellation_token.cancelled() => None,
         res = tracked_engine.query(&HangingQuery(Variable(0))) => Some(res),
@@ -375,12 +375,12 @@ async fn stale_tracked_engine_queries_timeout() {
 
     // start with zero
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 0);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 0).await;
     }
 
     // create tracked engine before timestamp increment
-    let stale_tracked_engine = engine.clone().tracked();
+    let stale_tracked_engine = engine.clone().tracked().await;
 
     let _stale_query_handle = tokio::spawn({
         let stale_tracked_engine = stale_tracked_engine.clone();
@@ -392,8 +392,8 @@ async fn stale_tracked_engine_queries_timeout() {
 
     // increment timestamp - this makes stale_tracked_engine stale
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 5);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5).await;
         drop(input_session);
     }
 

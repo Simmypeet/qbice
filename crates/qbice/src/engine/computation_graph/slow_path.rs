@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
-use parking_lot::RwLock;
 
 use crate::{
     Engine, Query, TrackedEngine,
@@ -110,6 +109,8 @@ impl<C: Config> Engine<C> {
         };
 
         let old_kind = self.get_query_kind(query.id, caller_information).await;
+        let existing_forward_edges =
+            unsafe { self.get_forward_edges_order_unchecked(query.id).await };
 
         // if the old node info is a firewall or projection node, we compare
         // the old and new value fingerprints to determine if we need to
@@ -130,15 +131,21 @@ impl<C: Config> Engine<C> {
 
             let fingerprint = self.hash(&value);
             let updated = old_node_info.value_fingerprint() != fingerprint;
+
             let mut writer_buffer_with_lock =
                 self.new_write_buffer(caller_information).await;
 
-            let write_buffer_rwlock =
-                RwLock::new(writer_buffer_with_lock.writer_buffer());
-
             // if fingerprint has changed, we do dirty propagation
             if updated {
-                self.dirty_propagate(query.id, &write_buffer_rwlock);
+                let list = self.get_dirty_propagate_list(query.id).await;
+
+                for edge in list {
+                    self.mark_dirty_forward_edge(
+                        edge.caller,
+                        edge.callee,
+                        writer_buffer_with_lock.writer_buffer(),
+                    );
+                }
             }
 
             (
@@ -160,6 +167,7 @@ impl<C: Config> Engine<C> {
             lock_guard,
             need_backward_projection_propagation,
             caller_information,
+            existing_forward_edges.as_ref().map(std::convert::AsRef::as_ref),
             continuing_tx,
         );
 

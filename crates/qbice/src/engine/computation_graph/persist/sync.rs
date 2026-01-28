@@ -1,11 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{
-    kv_database::{DiscriminantEncoding, WideColumn, WideColumnValue},
-    sieve::{BackgroundWriter, WideColumnSieve, WriteBuffer},
+    kv_database::{
+        DiscriminantEncoding, KvDatabase, WideColumn, WideColumnValue,
+    },
+    sieve::{BackgroundWriter, WriteBuffer},
 };
 
 use crate::{
@@ -41,19 +42,14 @@ impl WideColumnValue<TimestampColumn> for Timestamp {
 }
 
 pub struct Sync<C: Config> {
-    timestamp_lock: RwLock<Timestamp>,
-
-    // need to be declared because of the the write buffer interface, we'll
-    // fix this later
-    timestamp_sieve:
-        Arc<WideColumnSieve<TimestampColumn, C::Database, C::BuildHasher>>,
+    timestamp_lock: Arc<tokio::sync::RwLock<Timestamp>>,
 
     background: BackgroundWriter<C::Database, C::BuildHasher>,
 }
 
 pub enum Guard<'x> {
-    Read(RwLockReadGuard<'x, Timestamp>),
-    Write(RwLockWriteGuard<'x, Timestamp>),
+    Read(tokio::sync::RwLockReadGuard<'x, Timestamp>),
+    Write(tokio::sync::OwnedRwLockWriteGuard<Timestamp>),
 }
 
 pub struct WriterBufferWithLock<'x, C: Config> {
@@ -77,35 +73,25 @@ impl<C: Config> WriterBufferWithLock<'_, C> {
 }
 
 impl<C: Config> Sync<C> {
-    pub fn new(db: Arc<C::Database>) -> Self {
+    pub fn new(db: &Arc<C::Database>) -> Self {
         let background_writer =
             BackgroundWriter::<C::Database, C::BuildHasher>::new(
                 C::background_writer_thread_count(),
                 db.clone(),
             );
 
-        let timestamp_sieve =
-            Arc::new(WideColumnSieve::<
-                TimestampColumn,
-                C::Database,
-                C::BuildHasher,
-            >::new(2, 2, db, C::BuildHasher::default()));
+        let timestamp = db
+            .get_wide_column::<TimestampColumn, Timestamp>(&())
+            .unwrap_or_else(|| {
+                let tx = background_writer.new_write_buffer();
+                tx.put::<TimestampColumn, Timestamp>(&(), &Timestamp(0));
+                background_writer.submit_write_buffer(tx);
 
-        let timestamp =
-            timestamp_sieve.get_normal::<Timestamp>(()).map_or_else(
-                || {
-                    let mut tx = background_writer.new_write_buffer();
-                    timestamp_sieve.put((), Some(Timestamp(0)), &mut tx);
-                    background_writer.submit_write_buffer(tx);
-
-                    Timestamp(0)
-                },
-                |timestamp| *timestamp,
-            );
+                Timestamp(0)
+            });
 
         Self {
-            timestamp_lock: RwLock::new(timestamp),
-            timestamp_sieve,
+            timestamp_lock: Arc::new(tokio::sync::RwLock::new(timestamp)),
             background: background_writer,
         }
     }
@@ -119,7 +105,7 @@ impl<C: Config> Engine<C> {
         // the guard must be dropped here to make the future Send
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return WriterBufferWithLock {
@@ -137,14 +123,20 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    pub(in crate::engine::computation_graph) fn new_write_buffer_with_write_lock(
+    pub(in crate::engine::computation_graph) async fn new_write_buffer_with_write_lock(
         &'_ self,
-    ) -> WriterBufferWithLock<'_, C> {
+    ) -> WriterBufferWithLock<'static, C> {
         let writer_buffer =
             self.computation_graph.persist.sync.background.new_write_buffer();
 
         let guard = Guard::Write(
-            self.computation_graph.persist.sync.timestamp_lock.write(),
+            self.computation_graph
+                .persist
+                .sync
+                .timestamp_lock
+                .clone()
+                .write_owned()
+                .await,
         );
 
         WriterBufferWithLock { guard, writer_buffer }
@@ -161,14 +153,13 @@ impl<C: Config> Engine<C> {
             .submit_write_buffer(write_buffer.writer_buffer);
     }
 
-    pub(in crate::engine::computation_graph) unsafe fn get_current_timestamp_unchecked(
+    pub(in crate::engine::computation_graph) async unsafe fn get_current_timestamp_unchecked(
         &self,
     ) -> Timestamp {
-        *self.computation_graph.persist.sync.timestamp_lock.read()
+        *self.computation_graph.persist.sync.timestamp_lock.read().await
     }
 
     pub(in crate::engine::computation_graph) unsafe fn increment_timestamp(
-        &self,
         tx: &mut WriterBufferWithLock<C>,
     ) -> Timestamp {
         let guard = match &mut tx.guard {
@@ -181,11 +172,8 @@ impl<C: Config> Engine<C> {
         let current_timestamp = Timestamp(guard.0 + 1);
         **guard = current_timestamp;
 
-        self.computation_graph.persist.sync.timestamp_sieve.put(
-            (),
-            Some(current_timestamp),
-            tx.writer_buffer(),
-        );
+        tx.writer_buffer
+            .put::<TimestampColumn, Timestamp>(&(), &current_timestamp);
 
         current_timestamp
     }
@@ -199,7 +187,7 @@ impl<C: Config> Engine<C> {
     ) -> Option<Arc<[QueryID]>> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -207,6 +195,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_node
                     .get_normal::<ForwardEdgeOrder>(query_id)
+                    .await
                     .map(|x| x.0.clone());
             }
         }
@@ -221,7 +210,7 @@ impl<C: Config> Engine<C> {
     ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -229,6 +218,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_node
                     .get_normal::<ForwardEdgeObservation<C>>(query_id)
+                    .await
                     .map(|x| x.0.clone());
             }
         }
@@ -243,7 +233,7 @@ impl<C: Config> Engine<C> {
     ) -> Option<NodeInfo> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -251,6 +241,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_node
                     .get_normal::<NodeInfo>(query_id)
+                    .await
                     .map(|x| x.clone());
             }
         }
@@ -265,7 +256,7 @@ impl<C: Config> Engine<C> {
     ) -> Option<QueryKind> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -273,6 +264,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_node
                     .get_normal::<QueryKind>(query_id)
+                    .await
                     .map(|x| *x);
             }
         }
@@ -287,7 +279,7 @@ impl<C: Config> Engine<C> {
     ) -> Option<Timestamp> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -295,6 +287,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_node
                     .get_normal::<LastVerified>(query_id)
+                    .await
                     .map(|x| x.0);
             }
         }
@@ -309,7 +302,7 @@ impl<C: Config> Engine<C> {
     ) -> BackwardEdge<C> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -317,6 +310,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .backward_edges
                     .get_set(&query_id)
+                    .await
                     .clone();
             }
         }
@@ -333,7 +327,7 @@ impl<C: Config> Engine<C> {
     ) -> Option<Q::Value> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -341,6 +335,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_store
                     .get_normal::<QueryResult<Q>>(query_input_hash_128)
+                    .await
                     .map(|x| x.0.clone());
             }
         }
@@ -355,7 +350,7 @@ impl<C: Config> Engine<C> {
     ) -> Option<Timestamp> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -363,6 +358,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_node
                     .get_normal::<PendingBackwardProjection>(query_id)
+                    .await
                     .map(|x| x.0);
             }
         }
@@ -379,7 +375,7 @@ impl<C: Config> Engine<C> {
     ) -> Option<Q> {
         {
             let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read();
+                self.computation_graph.persist.sync.timestamp_lock.read().await;
 
             if *guard == caller_information.timestamp() {
                 return self
@@ -387,6 +383,7 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_store
                     .get_normal::<QueryInput<Q>>(query_id)
+                    .await
                     .map(|x| x.0.clone());
             }
         }
@@ -394,7 +391,7 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    pub(in crate::engine::computation_graph) unsafe fn get_forward_edges_order_unchecked(
+    pub(in crate::engine::computation_graph) async unsafe fn get_forward_edges_order_unchecked(
         &self,
         query_id: QueryID,
     ) -> Option<Arc<[QueryID]>> {
@@ -402,17 +399,23 @@ impl<C: Config> Engine<C> {
             .persist
             .query_node
             .get_normal::<ForwardEdgeOrder>(query_id)
+            .await
             .map(|x| x.0.clone())
     }
 
-    pub(in crate::engine::computation_graph) unsafe fn get_backward_edges_unchecked(
+    pub(in crate::engine::computation_graph) async unsafe fn get_backward_edges_unchecked(
         &self,
         query_id: QueryID,
     ) -> BackwardEdge<C> {
-        self.computation_graph.persist.backward_edges.get_set(&query_id).clone()
+        self.computation_graph
+            .persist
+            .backward_edges
+            .get_set(&query_id)
+            .await
+            .clone()
     }
 
-    pub(in crate::engine::computation_graph) unsafe fn get_query_kind_unchecked(
+    pub(in crate::engine::computation_graph) async unsafe fn get_query_kind_unchecked(
         &self,
         query_id: QueryID,
     ) -> Option<QueryKind> {
@@ -420,10 +423,11 @@ impl<C: Config> Engine<C> {
             .persist
             .query_node
             .get_normal::<QueryKind>(query_id)
+            .await
             .map(|x| *x)
     }
 
-    pub(in crate::engine::computation_graph) unsafe fn get_node_info_unchecked(
+    pub(in crate::engine::computation_graph) async unsafe fn get_node_info_unchecked(
         &self,
         query_id: QueryID,
     ) -> Option<NodeInfo> {
@@ -431,10 +435,11 @@ impl<C: Config> Engine<C> {
             .persist
             .query_node
             .get_normal::<NodeInfo>(query_id)
+            .await
             .map(|x| x.clone())
     }
 
-    pub(in crate::engine::computation_graph) unsafe fn get_query_input_unchecked<
+    pub(in crate::engine::computation_graph) async unsafe fn get_query_input_unchecked<
         Q: Query,
     >(
         &self,
@@ -444,10 +449,11 @@ impl<C: Config> Engine<C> {
             .persist
             .query_store
             .get_normal::<QueryInput<Q>>(query_id)
+            .await
             .map(|x| x.0.clone())
     }
 
-    pub(in crate::engine::computation_graph) fn get_external_input_queries(
+    pub(in crate::engine::computation_graph) async fn get_external_input_queries(
         &self,
         type_id: &StableTypeID,
     ) -> ExternalInputSet<C> {
@@ -455,6 +461,7 @@ impl<C: Config> Engine<C> {
             .persist
             .external_input_queries
             .get_set(type_id)
+            .await
             .clone()
     }
 }

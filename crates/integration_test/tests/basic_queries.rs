@@ -23,13 +23,13 @@ async fn safe_division_basic() {
     let engine = Arc::new(engine);
 
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
 
-        input_session.set_input(Variable(0), 42);
-        input_session.set_input(Variable(1), 2);
+        input_session.set_input(Variable(0), 42).await;
+        input_session.set_input(Variable(1), 2).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     assert_eq!(
         tracked_engine

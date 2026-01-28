@@ -43,7 +43,7 @@ impl<C: Config> Engine<C> {
 
         for callee in forward_edges.iter() {
             // skip if not dirty
-            if !self.is_edge_dirty(query.id, *callee) {
+            if !self.is_edge_dirty(query.id, *callee).await {
                 continue;
             }
 

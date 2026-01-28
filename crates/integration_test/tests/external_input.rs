@@ -205,7 +205,7 @@ async fn external_input_basic_execution() {
     engine.register_executor(file_executor.clone());
 
     let engine = Arc::new(engine);
-    let tracked = engine.tracked();
+    let tracked = engine.tracked().await;
 
     // First execution
     let result = tracked.query(&FileRead(1)).await;
@@ -232,7 +232,7 @@ async fn refresh_re_executes_external_input() {
 
     // First execution
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&FileRead(1)).await;
         assert_eq!(result, "initial content");
         assert_eq!(file_executor.get_call_count(), 1);
@@ -243,7 +243,7 @@ async fn refresh_re_executes_external_input() {
 
     // Refresh the query - should re-execute
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
 
@@ -251,7 +251,7 @@ async fn refresh_re_executes_external_input() {
 
     // Query again - should get new content
     {
-        let tracked = engine.tracked();
+        let tracked = engine.tracked().await;
         let result = tracked.query(&FileRead(1)).await;
         assert_eq!(result, "updated content");
         // Should not execute again, using cached result from refresh
@@ -276,7 +276,7 @@ async fn refresh_only_dirties_if_result_changed() {
 
     // First execution
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&UpperCase(FileRead(1))).await;
         assert_eq!(result, "HELLO");
         assert_eq!(file_executor.get_call_count(), 1);
@@ -285,7 +285,7 @@ async fn refresh_only_dirties_if_result_changed() {
 
     // Refresh but content hasn't actually changed
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
 
@@ -295,7 +295,7 @@ async fn refresh_only_dirties_if_result_changed() {
     // Query UpperCase - should NOT re-execute since FileRead result didn't
     // change
     {
-        let tracked = engine.tracked();
+        let tracked = engine.tracked().await;
         let result = tracked.query(&UpperCase(FileRead(1))).await;
         assert_eq!(result, "HELLO");
         assert_eq!(upper_executor.call_count.load(Ordering::SeqCst), 1);
@@ -319,7 +319,7 @@ async fn refresh_propagates_when_result_changes() {
 
     // First execution
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&UpperCase(FileRead(1))).await;
         assert_eq!(result, "HELLO");
         assert_eq!(file_executor.get_call_count(), 1);
@@ -331,7 +331,7 @@ async fn refresh_propagates_when_result_changes() {
 
     // Refresh
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
 
@@ -340,7 +340,7 @@ async fn refresh_propagates_when_result_changes() {
 
     // Query UpperCase - should re-execute since FileRead result changed
     {
-        let tracked = engine.tracked();
+        let tracked = engine.tracked().await;
         let result = tracked.query(&UpperCase(FileRead(1))).await;
         assert_eq!(result, "GOODBYE");
         assert_eq!(upper_executor.call_count.load(Ordering::SeqCst), 2);
@@ -364,7 +364,7 @@ async fn refresh_multiple_queries_of_same_type() {
 
     // Execute multiple FileRead queries
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         assert_eq!(tracked.query(&FileRead(1)).await, "file1");
         assert_eq!(tracked.query(&FileRead(2)).await, "file2");
         assert_eq!(tracked.query(&FileRead(3)).await, "file3");
@@ -376,7 +376,7 @@ async fn refresh_multiple_queries_of_same_type() {
 
     // Refresh all FileRead queries
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
 
@@ -385,7 +385,7 @@ async fn refresh_multiple_queries_of_same_type() {
 
     // Query all again - file 2 should have new content
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         assert_eq!(tracked.query(&FileRead(1)).await, "file1");
         assert_eq!(tracked.query(&FileRead(2)).await, "file2-updated");
         assert_eq!(tracked.query(&FileRead(3)).await, "file3");
@@ -412,7 +412,7 @@ async fn refresh_different_query_types_independent() {
 
     // Execute both types
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         assert_eq!(tracked.query(&FileRead(1)).await, "file");
         assert_eq!(tracked.query(&NetworkRequest(1)).await, 100);
         assert_eq!(file_executor.get_call_count(), 1);
@@ -421,7 +421,7 @@ async fn refresh_different_query_types_independent() {
 
     // Refresh only FileRead
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
 
@@ -431,7 +431,7 @@ async fn refresh_different_query_types_independent() {
 
     // Refresh only NetworkRequest
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<NetworkRequest>().await;
     }
 
@@ -452,7 +452,7 @@ async fn refresh_with_no_previous_queries() {
 
     // Refresh without ever executing any FileRead queries
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
 
@@ -477,7 +477,7 @@ async fn external_input_not_affected_by_normal_refresh() {
 
     // First execution
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         let result = tracked.query(&UpperCase(FileRead(1))).await;
         assert_eq!(result, "TEST");
         assert_eq!(file_executor.get_call_count(), 1);
@@ -486,13 +486,13 @@ async fn external_input_not_affected_by_normal_refresh() {
 
     // Create a new input session but don't refresh
     {
-        let _input_session = engine.input_session();
+        let _input_session = engine.input_session().await;
         // Just drop it without calling refresh
     }
 
     // Query again - ExternalInput should still be cached
     {
-        let tracked = engine.tracked();
+        let tracked = engine.tracked().await;
         let result = tracked.query(&FileRead(1)).await;
         assert_eq!(result, "test");
         assert_eq!(file_executor.get_call_count(), 1);
@@ -513,7 +513,7 @@ async fn refresh_multiple_times() {
 
     // First execution
     {
-        let tracked = engine.clone().tracked();
+        let tracked = engine.clone().tracked().await;
         assert_eq!(tracked.query(&FileRead(1)).await, "v1");
         assert_eq!(file_executor.get_call_count(), 1);
     }
@@ -521,7 +521,7 @@ async fn refresh_multiple_times() {
     // Refresh 1
     file_executor.set_file_content(1, "v2".to_string());
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
     assert_eq!(file_executor.get_call_count(), 2);
@@ -529,7 +529,7 @@ async fn refresh_multiple_times() {
     // Refresh 2
     file_executor.set_file_content(1, "v3".to_string());
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
     assert_eq!(file_executor.get_call_count(), 3);
@@ -537,14 +537,14 @@ async fn refresh_multiple_times() {
     // Refresh 3
     file_executor.set_file_content(1, "v4".to_string());
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
     }
     assert_eq!(file_executor.get_call_count(), 4);
 
     // Query - should get latest
     {
-        let tracked = engine.tracked();
+        let tracked = engine.tracked().await;
         assert_eq!(tracked.query(&FileRead(1)).await, "v4");
         assert_eq!(file_executor.get_call_count(), 4);
     }
@@ -564,15 +564,15 @@ async fn refresh_in_same_session_as_other_inputs() {
 
     // Set a regular input and refresh external input in same session
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 42);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 42).await;
         input_session.refresh::<FileRead>().await;
-        input_session.set_input(Variable(1), 100);
+        input_session.set_input(Variable(1), 100).await;
     }
 
     // Both should work
     {
-        let tracked = engine.tracked();
+        let tracked = engine.tracked().await;
         assert_eq!(tracked.query(&Variable(0)).await, 42);
         assert_eq!(tracked.query(&Variable(1)).await, 100);
     }

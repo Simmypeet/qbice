@@ -34,12 +34,12 @@ async fn cancellation_safety() {
     let engine = Arc::new(engine);
 
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
 
-        input_session.set_input(Variable(0), 123);
+        input_session.set_input(Variable(0), 123).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     // Now, set the executor to make it stuck
     slow_executor.make_it_stuck.store(true, Ordering::Relaxed);
@@ -170,11 +170,11 @@ async fn cancellation_with_dependency_chain() {
     let engine = Arc::new(engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 50);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 50).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     // Set executor A to get stuck after querying B
     executor_a.should_cancel.store(true, Ordering::Relaxed);
@@ -277,15 +277,15 @@ async fn parallel_queries_with_cancellation() {
     let engine = Arc::new(engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 100);
-        input_session.set_input(Variable(1), 200);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 100).await;
+        input_session.set_input(Variable(1), 200).await;
     }
 
     // Spawn multiple queries in parallel, but cancel some of them
-    let tracked_engine_1 = engine.clone().tracked();
-    let tracked_engine_2 = engine.clone().tracked();
-    let tracked_engine_3 = engine.clone().tracked();
+    let tracked_engine_1 = engine.clone().tracked().await;
+    let tracked_engine_2 = engine.clone().tracked().await;
+    let tracked_engine_3 = engine.clone().tracked().await;
 
     let handle1 = tokio::spawn(async move {
         tokio::select! {
@@ -327,7 +327,7 @@ async fn parallel_queries_with_cancellation() {
     // Now query again with no delay - should use cached values
     executor.delay_ms.store(0, Ordering::Relaxed);
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
     let result = tracked_engine.query(&ParallelCancellableQuery(0)).await;
     assert_eq!(result, 100);
 
@@ -406,13 +406,13 @@ async fn cancellation_with_partial_dependencies() {
     let engine = Arc::new(engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 10);
-        input_session.set_input(Variable(1), 20);
-        input_session.set_input(Variable(2), 30);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10).await;
+        input_session.set_input(Variable(1), 20).await;
+        input_session.set_input(Variable(2), 30).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Cancel after querying 2 dependencies
     executor.cancel_after_deps.store(2, Ordering::Relaxed);
@@ -434,11 +434,11 @@ async fn cancellation_with_partial_dependencies() {
 
     // change the Variable(0) which should have been queried
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 15);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 15).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Now allow full execution
     executor.cancel_after_deps.store(0, Ordering::Relaxed);
@@ -514,11 +514,11 @@ async fn cancellation_during_repair() {
     let engine = Arc::new(engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 100);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 100).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // First, compute the query successfully
     let result =
@@ -531,11 +531,11 @@ async fn cancellation_during_repair() {
 
     // Change the input to trigger repair
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 200);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 200).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Set executor to hang during repair
     executor.should_hang.store(true, Ordering::Relaxed);
@@ -679,13 +679,13 @@ async fn cancellation_at_different_nesting_levels() {
     let engine = Arc::new(engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 50);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 50).await;
     }
 
     // Test 1: Cancel before inner query
     {
-        let tracked_engine = engine.clone().tracked();
+        let tracked_engine = engine.clone().tracked().await;
         outer_executor.hang_before_inner.store(true, Ordering::Relaxed);
 
         let tracked_engine_clone = tracked_engine.clone();
@@ -705,7 +705,7 @@ async fn cancellation_at_different_nesting_levels() {
 
     // Test 2: Cancel after inner query
     {
-        let tracked_engine = engine.clone().tracked();
+        let tracked_engine = engine.clone().tracked().await;
         outer_executor.hang_after_inner.store(true, Ordering::Relaxed);
 
         let tracked_engine_clone = tracked_engine.clone();
@@ -725,7 +725,7 @@ async fn cancellation_at_different_nesting_levels() {
 
     // Test 3: Complete successfully
     {
-        let tracked_engine = engine.clone().tracked();
+        let tracked_engine = engine.clone().tracked().await;
         let inner_calls_before =
             inner_executor.call_count.load(Ordering::SeqCst);
 

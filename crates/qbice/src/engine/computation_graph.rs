@@ -393,10 +393,10 @@ impl<C: Config> Engine<C> {
     /// drop(session);
     /// ```
     #[must_use]
-    pub fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
+    pub async fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
         TrackedEngine {
             caller: CallerInformation::new(CallerKind::User, unsafe {
-                self.get_current_timestamp_unchecked()
+                self.get_current_timestamp_unchecked().await
             }),
             cache: Arc::new(DashSet::new()),
             engine: self,

@@ -145,11 +145,11 @@ async fn firewall() {
 
     // Step 1: initial to 3
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 3).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine.query(&NegativeSquareToString(Variable(0))).await,
@@ -165,12 +165,12 @@ async fn firewall() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
 
-        input_session.set_input(Variable(0), -3);
+        input_session.set_input(Variable(0), -3).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // only Square -> Variable is dirtied
     assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
@@ -192,12 +192,12 @@ async fn firewall() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
 
-        input_session.set_input(Variable(0), 4);
+        input_session.set_input(Variable(0), 4).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     // for now dirty edge only reach to firewall, but will pass through all
     // the rest queries later
@@ -360,11 +360,11 @@ async fn chained_firewalls() {
 
     // Step 1: initial value 50
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 50);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 50).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
@@ -379,11 +379,11 @@ async fn chained_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), -50);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -50).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Only edge to first firewall should be dirty
     assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
@@ -406,11 +406,11 @@ async fn chained_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 80);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 80).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Only edge to first firewall should be dirty
     assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
@@ -435,11 +435,11 @@ async fn chained_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 150);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 150).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Only edge to first firewall should be dirty
     assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
@@ -461,11 +461,11 @@ async fn chained_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 200);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 200).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     // Only edge to first firewall should be dirty
     assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
@@ -555,12 +555,12 @@ async fn diamond_dependency_with_firewalls() {
 
     // Initial: Variable(0) = 3, Variable(1) = 4
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 3);
-        input_session.set_input(Variable(1), 4);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 3).await;
+        input_session.set_input(Variable(1), 4).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine
@@ -576,11 +576,11 @@ async fn diamond_dependency_with_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), -3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -3).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine
@@ -597,11 +597,11 @@ async fn diamond_dependency_with_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(1), -4);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(1), -4).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine
@@ -618,11 +618,11 @@ async fn diamond_dependency_with_firewalls() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 5);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     assert_eq!(
         tracked_engine
@@ -742,11 +742,11 @@ async fn firewall_multiple_callers() {
 
     // Initial: Variable(0) = 3
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 3).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Query both consumers
     assert_eq!(
@@ -766,11 +766,11 @@ async fn firewall_multiple_callers() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), -3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -3).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Both queries should return same values without re-executing
     assert_eq!(tracked_engine.query(&SquareTimesTwo(Variable(0))).await, 18);
@@ -785,11 +785,11 @@ async fn firewall_multiple_callers() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 5);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     assert_eq!(
         tracked_engine.query(&SquareTimesTwo(Variable(0))).await,
@@ -874,12 +874,12 @@ async fn firewall_conditional_dependency() {
 
     // Initial: condition = 1 (true), value = 3
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 1); // condition
-        input_session.set_input(Variable(1), 3); // value
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 1).await; // condition
+        input_session.set_input(Variable(1), 3).await; // value
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine
@@ -898,11 +898,11 @@ async fn firewall_conditional_dependency() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(1), -3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(1), -3).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine
@@ -922,12 +922,12 @@ async fn firewall_conditional_dependency() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 0);
-        input_session.set_input(Variable(1), 4);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 0).await;
+        input_session.set_input(Variable(1), 4).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // total of 2 edges are dirtied: condition and value
     assert_eq!(tracked_engine.get_dirtied_edges_count(), 2);
@@ -955,11 +955,11 @@ async fn firewall_conditional_dependency() {
     drop(tracked_engine);
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(1), 100);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(1), 100).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     // only edge Square -> Variable(1) is dirtied
     assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
@@ -1001,11 +1001,11 @@ async fn firewall_dirty_propagation_on_change() {
 
     // Initial: 2
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 2);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 2).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine.query(&NegativeSquare(Variable(0))).await,
@@ -1022,11 +1022,11 @@ async fn firewall_dirty_propagation_on_change() {
 
     // Change to 3 - firewall output changes
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), 3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 3).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Before querying, only edge to firewall is dirty
     assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
@@ -1046,11 +1046,11 @@ async fn firewall_dirty_propagation_on_change() {
 
     // Change to -3 - firewall output unchanged
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable(0), -3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -3).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     assert_eq!(
         tracked_engine.query(&NegativeSquare(Variable(0))).await,

@@ -436,7 +436,8 @@ impl<C: Config> Engine<C> {
         lock_guard: ComputingLockGuard<'_, C>,
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
-        continuing_tx: WriterBufferWithLock<C>,
+        existing_forward_edges: Option<&[QueryID]>,
+        continuing_tx: WriterBufferWithLock<'_, C>,
     ) {
         let dashmap::Entry::Occupied(mut entry_lock) =
             self.computation_graph.lock.lock.entry(query_id.id)
@@ -471,6 +472,7 @@ impl<C: Config> Engine<C> {
             tfc_archetype,
             has_pending_backward_projection,
             caller_information,
+            existing_forward_edges,
             continuing_tx,
         );
 

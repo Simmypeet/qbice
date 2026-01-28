@@ -498,7 +498,7 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
     /// }
     /// ```
     #[allow(clippy::cast_possible_truncation)] // from u64 to usize
-    pub fn get_normal<W: WideColumnValue<C> + Send + Sync + 'static>(
+    pub async fn get_normal<W: WideColumnValue<C> + Send + Sync + 'static>(
         &self,
         key: C::Key,
     ) -> Option<MappedRwLockReadGuard<'_, W>> {
@@ -523,10 +523,14 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                 .ok();
             }
 
-            let Some(db_value) = self.single_flight.work_or_wait(
-                (combined_key.0.clone(), std::any::TypeId::of::<W>()),
-                || self.backing_db.get_wide_column::<C, W>(&combined_key.0),
-            ) else {
+            let Some(db_value) = self
+                .single_flight
+                .work_or_wait(
+                    (combined_key.0.clone(), std::any::TypeId::of::<W>()),
+                    || self.backing_db.get_wide_column::<C, W>(&combined_key.0),
+                )
+                .await
+            else {
                 // this thread were instructed to wait, retry read
                 continue;
             };
@@ -748,7 +752,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
     /// println!("Total tags: {}", tags.len());
     /// ```
     #[allow(clippy::unused_async)]
-    pub fn get_set(
+    pub async fn get_set(
         &self,
         key: &C::Key,
     ) -> MappedRwLockReadGuard<'_, C::Container> {
@@ -765,12 +769,14 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                 return guard;
             }
 
-            let Some(mut db_value) =
-                self.single_flight.work_or_wait(key.clone(), || {
+            let Some(mut db_value) = self
+                .single_flight
+                .work_or_wait(key.clone(), || {
                     self.backing_db
                         .scan_members::<C>(key)
                         .collect::<C::Container>()
                 })
+                .await
             else {
                 // this thread were instructed to wait, retry read
                 continue;

@@ -340,6 +340,7 @@ impl<Db: KvDatabase, S: BuildHasher> KeyOfSetWrites<Db, S> {
 pub struct WriteBuffer<Db: KvDatabase, S: BuildHasher> {
     pub(super) wide_column_writes: WideColumnWrites<Db, S>,
     pub(super) key_of_set_writes: KeyOfSetWrites<Db, S>,
+    write_batch: Option<Db::WriteBatch>,
     epoch: usize,
     active: bool,
 }
@@ -369,13 +370,25 @@ impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
 }
 
 impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
-    fn new(epoch: usize, active: bool) -> Self {
+    fn new(epoch: usize, active: bool, write_batch: Db::WriteBatch) -> Self {
         Self {
             wide_column_writes: WideColumnWrites::new(),
             key_of_set_writes: KeyOfSetWrites::new(),
+            write_batch: Some(write_batch),
             active,
             epoch,
         }
+    }
+}
+
+impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
+    /// Inserts or updates a value in a wide column.
+    pub fn put<W: WideColumn, C: WideColumnValue<W>>(
+        &self,
+        key: &W::Key,
+        value: &C,
+    ) {
+        self.write_batch.as_ref().unwrap().put::<W, C>(key, value);
     }
 }
 
@@ -459,8 +472,6 @@ pub struct BackgroundWriter<Db: KvDatabase, S: BuildHasher> {
     write_handles: Vec<thread::JoinHandle<()>>,
     commit_handle: Option<thread::JoinHandle<()>>,
     pool: Arc<WriteBufferPool<Db, S>>,
-
-    db: Arc<Db>,
 }
 
 impl<Db: KvDatabase, S: BuildHasher> std::fmt::Debug
@@ -554,7 +565,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
             })
             .collect();
 
-        let pool = Arc::new(WriteBufferPool::new());
+        let pool = Arc::new(WriteBufferPool::new(db));
 
         Self {
             registry,
@@ -571,7 +582,6 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
                     .unwrap()
             }),
             pool,
-            db,
         }
     }
 
@@ -583,7 +593,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
 
     /// Submits a write buffer to be processed by the background writer.
     pub fn submit_write_buffer(&self, write_buffer: WriteBuffer<Db, S>) {
-        let write_task = WriteTask { write_buffer, db: self.db.clone() };
+        let write_task = WriteTask { write_buffer };
 
         // Push to global queue
         self.registry.injector.push(write_task);
@@ -665,7 +675,6 @@ impl<Db: KvDatabase, S: BuildHasher> Drop for BackgroundWriter<Db, S> {
 
 struct WriteTask<Db: KvDatabase, S: BuildHasher> {
     write_buffer: WriteBuffer<Db, S>,
-    db: Arc<Db>,
 }
 
 struct CommitTask<Db: KvDatabase, S: BuildHasher> {
@@ -758,8 +767,12 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
         }
     }
 
-    fn process_task(&self, task: WriteTask<Db, S>) {
-        let write_batch = task.db.write_batch();
+    fn process_task(&self, mut task: WriteTask<Db, S>) {
+        let write_batch =
+            task.write_buffer.write_batch.take().expect(
+                "Write batch should've been set when retrieved from pool",
+            );
+
         task.write_buffer.write_to_db(&write_batch);
 
         // send to commit thread
@@ -827,13 +840,14 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
 
 struct WriteBufferPool<Db: KvDatabase, S: BuildHasher> {
     pool: ThreadLocal<RefCell<Vec<WriteBuffer<Db, S>>>>,
+    db: Arc<Db>,
     epoch: AtomicUsize,
 }
 
 impl<Db: KvDatabase, S: BuildHasher> WriteBufferPool<Db, S> {
     #[must_use]
-    pub const fn new() -> Self {
-        Self { pool: ThreadLocal::new(), epoch: AtomicUsize::new(0) }
+    pub const fn new(db: Arc<Db>) -> Self {
+        Self { pool: ThreadLocal::new(), db, epoch: AtomicUsize::new(0) }
     }
 
     pub fn get_buffer(&self) -> WriteBuffer<Db, S> {
@@ -843,10 +857,11 @@ impl<Db: KvDatabase, S: BuildHasher> WriteBufferPool<Db, S> {
         let mut pool = curr_pool.borrow_mut();
 
         pool.pop().map_or_else(
-            || WriteBuffer::new(curr_epoch, true),
+            || WriteBuffer::new(curr_epoch, true, self.db.write_batch()),
             |mut buffer| {
                 buffer.epoch = curr_epoch;
                 buffer.active = true;
+                buffer.write_batch = Some(self.db.write_batch());
 
                 buffer
             },
@@ -855,6 +870,7 @@ impl<Db: KvDatabase, S: BuildHasher> WriteBufferPool<Db, S> {
 
     pub fn return_buffer(&self, mut buffer: WriteBuffer<Db, S>) {
         buffer.active = false;
+
         self.pool.get_or(|| RefCell::new(Vec::new())).borrow_mut().push(buffer);
     }
 }

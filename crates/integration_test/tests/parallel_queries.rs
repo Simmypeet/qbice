@@ -137,14 +137,14 @@ async fn parallel_read_variable_map() {
     let engine = Arc::new(engine);
 
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
 
-        input_session.set_input(Variable(0), 10);
-        input_session.set_input(Variable(1), 20);
-        input_session.set_input(Variable(2), 30);
+        input_session.set_input(Variable(0), 10).await;
+        input_session.set_input(Variable(1), 20).await;
+        input_session.set_input(Variable(2), 30).await;
     }
 
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     let handles: Vec<_> = (0..3)
         .map(|i| {

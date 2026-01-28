@@ -130,6 +130,7 @@ pub struct Engine<C: Config> {
     interner: Interner,
     computation_graph: ComputationGraph<C>,
     executor_registry: Registry<C>,
+    #[allow(unused)]
     rayon_thread_pool: rayon::ThreadPool,
     build_stable_hasher: C::BuildStableHasher,
 }

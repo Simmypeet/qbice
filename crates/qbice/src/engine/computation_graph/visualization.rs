@@ -200,7 +200,7 @@ impl<C: Config> Engine<C> {
     #[must_use]
     async fn snapshot_graph_from<Q: Query>(&self, query: &Q) -> GraphSnapshot {
         let caller = CallerInformation::new(CallerKind::Tracing, unsafe {
-            self.get_current_timestamp_unchecked()
+            self.get_current_timestamp_unchecked().await
         });
 
         let mut nodes = Vec::new();
@@ -227,12 +227,16 @@ impl<C: Config> Engine<C> {
                 continue;
             };
 
-            let dbg = self
+            let dbg = if let Some(executor) = self
                 .executor_registry
                 .try_get_executor_entry_by_type_id(&current_id.stable_type_id())
-                .and_then(|x| {
-                    x.get_query_debug(self, current_id.compact_hash_128())
-                });
+            {
+                executor
+                    .get_query_debug(self, current_id.compact_hash_128())
+                    .await
+            } else {
+                None
+            };
 
             let (type_name, label, result) = if let Some(dbg) = dbg {
                 (dbg.type_name.to_string(), dbg.input, dbg.output)
@@ -262,7 +266,7 @@ impl<C: Config> Engine<C> {
                 edges.push(EdgeInfo {
                     source: current_id,
                     target: *edge,
-                    is_dirty: Some(self.is_edge_dirty(current_id, *edge)),
+                    is_dirty: Some(self.is_edge_dirty(current_id, *edge).await),
                 });
 
                 if !visited.contains(edge) {

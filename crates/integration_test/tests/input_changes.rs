@@ -23,13 +23,13 @@ async fn division_input_change() {
         let engine = Arc::new(engine);
 
         {
-            let mut input_session = engine.input_session();
+            let mut input_session = engine.input_session().await;
 
-            input_session.set_input(Variable(0), 40);
-            input_session.set_input(Variable(1), 4);
+            input_session.set_input(Variable(0), 40).await;
+            input_session.set_input(Variable(1), 4).await;
         }
 
-        let tracked_engine = engine.clone().tracked();
+        let tracked_engine = engine.clone().tracked().await;
 
         assert_eq!(
             tracked_engine
@@ -50,11 +50,11 @@ async fn division_input_change() {
         let engine = Arc::new(engine);
 
         {
-            let mut input_session = engine.input_session();
-            input_session.set_input(Variable(1), 2);
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(1), 2).await;
         }
 
-        let tracked_engine = engine.tracked();
+        let tracked_engine = engine.tracked().await;
 
         assert_eq!(
             tracked_engine
@@ -84,13 +84,13 @@ async fn safe_division_input_changes() {
         let engine = Arc::new(engine);
 
         {
-            let mut input_session = engine.input_session();
+            let mut input_session = engine.input_session().await;
 
-            input_session.set_input(Variable(0), 42);
-            input_session.set_input(Variable(1), 2);
+            input_session.set_input(Variable(0), 42).await;
+            input_session.set_input(Variable(1), 2).await;
         }
 
-        let tracked_engine = engine.clone().tracked();
+        let tracked_engine = engine.clone().tracked().await;
 
         assert_eq!(
             tracked_engine
@@ -116,11 +116,11 @@ async fn safe_division_input_changes() {
         let engine = Arc::new(engine);
 
         {
-            let mut input_session = engine.input_session();
-            input_session.set_input(Variable(1), 0);
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(1), 0).await;
         }
 
-        let tracked_engine = engine.tracked();
+        let tracked_engine = engine.tracked().await;
 
         assert_eq!(
             tracked_engine
@@ -148,11 +148,11 @@ async fn safe_division_input_changes() {
         let engine = Arc::new(engine);
 
         {
-            let mut input_session = engine.input_session();
-            input_session.set_input(Variable(1), 2);
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(1), 2).await;
         }
 
-        let tracked_engine = engine.tracked();
+        let tracked_engine = engine.tracked().await;
 
         assert_eq!(
             tracked_engine
@@ -188,13 +188,13 @@ async fn add_two_absolutes_sign_change() {
         let engine = Arc::new(engine);
 
         {
-            let mut input_session = engine.input_session();
+            let mut input_session = engine.input_session().await;
 
-            input_session.set_input(Variable(0), 200);
-            input_session.set_input(Variable(1), 150);
+            input_session.set_input(Variable(0), 200).await;
+            input_session.set_input(Variable(1), 150).await;
         }
 
-        let tracked_engine = engine.clone().tracked();
+        let tracked_engine = engine.clone().tracked().await;
 
         // Initial query: abs(200) + abs(150) = 350
         assert_eq!(
@@ -223,11 +223,11 @@ async fn add_two_absolutes_sign_change() {
 
         // Change Variable(0) from 200 to -200
         {
-            let mut input_session = engine.input_session();
-            input_session.set_input(Variable(0), -200);
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(0), -200).await;
         }
 
-        let tracked_engine = engine.tracked();
+        let tracked_engine = engine.tracked().await;
 
         // Result should still be 350: abs(-200) + abs(150) = 200 + 150 = 350
         assert_eq!(
@@ -258,11 +258,11 @@ async fn add_two_absolutes_sign_change() {
 
         // Change Variable(1) from 150 to -150
         {
-            let mut input_session = engine.input_session();
-            input_session.set_input(Variable(1), -150);
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(1), -150).await;
         }
 
-        let tracked_engine = engine.tracked();
+        let tracked_engine = engine.tracked().await;
 
         // Result should still be 350: abs(-200) + abs(-150) = 200 + 150 = 350
         assert_eq!(

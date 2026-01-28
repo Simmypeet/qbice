@@ -2,9 +2,7 @@ use std::{collections::VecDeque, sync::Arc};
 
 use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
-use parking_lot::RwLock;
 use qbice_stable_hash::{Compact128, StableHash};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tokio::task::JoinSet;
 
 use crate::{
@@ -76,34 +74,73 @@ use crate::{
 ///     session.set_input(UserName, "Alice Smith"); // Only this query marked dirty
 /// } // Dirty propagation recomputes affected queries
 /// ```
-pub struct InputSession<'x, C: Config> {
-    engine: &'x Arc<Engine<C>>,
+pub struct InputSession<C: Config> {
+    engine: Arc<Engine<C>>,
     dirty_batch: VecDeque<QueryID>,
-    transaction: Option<WriterBufferWithLock<'x, C>>,
+    transaction: Option<WriterBufferWithLock<'static, C>>,
 }
 
-impl<C: Config> Drop for InputSession<'_, C> {
+impl<C: Config> Drop for InputSession<C> {
+    // NOTE: the commit needs to always happen, even if the user forgets to call
+    // `commit()`. Thus, we perform the commit in the `Drop` impl.
     fn drop(&mut self) {
-        self.engine.computation_graph.reset_statistic();
-        self.engine.clear_dirtied_queries();
+        let Some(transaction) = self.transaction.take() else {
+            // the transaction has already been committed
+            return;
+        };
 
-        let mut tx = self.transaction.take().unwrap();
-        let tx_rwlock = RwLock::new(tx.writer_buffer());
+        let engine = self.engine.clone();
+        let dirty_batch = std::mem::take(&mut self.dirty_batch);
 
-        self.engine.rayon_thread_pool.install(|| {
-            self.dirty_batch.par_iter().for_each(|x| {
-                self.engine.dirty_propagate(*x, &tx_rwlock);
-            });
+        tokio::spawn(async move {
+            Self::commit_internal(engine, dirty_batch, transaction).await;
         });
-
-        self.engine.submit_write_buffer(tx);
     }
 }
 
-impl<C: Config> std::fmt::Debug for InputSession<'_, C> {
+impl<C: Config> InputSession<C> {
+    /// Commits the input session, performing dirty propagation and submitting
+    /// the write buffer.
+    pub async fn commit(mut self) {
+        let engine = self.engine.clone();
+        let dirty_batch = std::mem::take(&mut self.dirty_batch);
+        let transaction = self.transaction.take().unwrap();
+
+        tokio::spawn(async move {
+            Self::commit_internal(engine, dirty_batch, transaction).await;
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn commit_internal(
+        engine: Arc<Engine<C>>,
+        dirty_batch: VecDeque<QueryID>,
+        mut transaction: WriterBufferWithLock<'static, C>,
+    ) {
+        engine.computation_graph.reset_statistic();
+        engine.clear_dirtied_queries();
+
+        let dirty_list = engine
+            .get_dirty_propagate_list_from_batch(dirty_batch.into_iter())
+            .await;
+
+        for query_id in dirty_list {
+            engine.mark_dirty_forward_edge(
+                query_id.caller,
+                query_id.callee,
+                transaction.writer_buffer(),
+            );
+        }
+
+        engine.submit_write_buffer(transaction);
+    }
+}
+
+impl<C: Config> std::fmt::Debug for InputSession<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InputSession")
-            .field("engine", self.engine)
+            .field("engine", &self.engine)
             .field("dirty_batch", &self.dirty_batch)
             .finish_non_exhaustive()
     }
@@ -162,19 +199,19 @@ impl<C: Config> Engine<C> {
     /// create a new session while another is active will result in a
     /// deadlock.
     #[must_use]
-    pub fn input_session(self: &Arc<Self>) -> InputSession<'_, C> {
+    pub async fn input_session(self: &Arc<Self>) -> InputSession<C> {
         // acquire a write lock on the write buffer and increment timestamp
         let mut write_buffer_with_lock =
-            self.new_write_buffer_with_write_lock();
+            self.new_write_buffer_with_write_lock().await;
 
         unsafe {
-            self.increment_timestamp(&mut write_buffer_with_lock);
+            Self::increment_timestamp(&mut write_buffer_with_lock);
         }
 
         InputSession {
             dirty_batch: VecDeque::new(),
             transaction: Some(write_buffer_with_lock),
-            engine: self,
+            engine: self.clone(),
         }
     }
 }
@@ -213,7 +250,7 @@ pub enum SetInputResult {
     Unchanged,
 }
 
-impl<C: Config> InputSession<'_, C> {
+impl<C: Config> InputSession<C> {
     /// Sets the value for an input query.
     ///
     /// This method updates the value associated with the given query. If the
@@ -241,7 +278,7 @@ impl<C: Config> InputSession<'_, C> {
     ///
     /// - `query`: The input query key
     /// - `new_value`: The new value to associate with this query
-    pub fn set_input<Q: Query>(
+    pub async fn set_input<Q: Query>(
         &mut self,
         query: Q,
         new_value: Q::Value,
@@ -254,7 +291,7 @@ impl<C: Config> InputSession<'_, C> {
         // has prior node infos, check for fingerprint diff
         // also, unwire the backward edges (if any)
         let set_input_result = if let Some(node_info) =
-            unsafe { self.engine.get_node_info_unchecked(query_id) }
+            unsafe { self.engine.get_node_info_unchecked(query_id).await }
         {
             let fingerprint_diff =
                 node_info.value_fingerprint() != query_value_fingerprint;
@@ -272,15 +309,17 @@ impl<C: Config> InputSession<'_, C> {
 
         let ts = self.transaction.as_ref().unwrap().timestamp();
 
-        self.engine.set_computed_input(
-            query,
-            query_hash,
-            new_value,
-            query_value_fingerprint,
-            self.transaction.as_mut().unwrap(),
-            true,
-            ts,
-        );
+        self.engine
+            .set_computed_input(
+                query,
+                query_hash,
+                new_value,
+                query_value_fingerprint,
+                self.transaction.as_mut().unwrap(),
+                true,
+                ts,
+            )
+            .await;
 
         set_input_result
     }
@@ -317,12 +356,20 @@ impl<C: Config> InputSession<'_, C> {
     /// # Type Parameters
     ///
     /// - `Q`: The query type to refresh. Must implement [`Query`].
+    ///
+    /// # Cancellation
+    ///
+    /// This method can be cancelled. However, if cancelled midway, not all
+    /// queries of type `Q` may be refreshed, potentially leaving some stale
+    /// data in the computation graph. Nevertheless, it's guaranteed that the
+    /// engine's internal state will remain consistent.
     #[allow(clippy::too_many_lines)]
     pub async fn refresh<Q: Query>(&mut self) {
-        struct RefreshResult<V> {
+        struct RefreshResult<K, V> {
             query_input_hash: Compact128,
             query_result_hash: Compact128,
             old_node_info: NodeInfo,
+            query_input: K,
             new_value: V,
         }
 
@@ -331,7 +378,7 @@ impl<C: Config> InputSession<'_, C> {
         // Get all query hashes for this type that were computed as
         // ExternalInput
         let external_input_set =
-            self.engine.get_external_input_queries(&type_id);
+            self.engine.get_external_input_queries(&type_id).await;
 
         let timestamp = self.transaction.as_ref().unwrap().timestamp();
         let hashes = external_input_set.iter().map(|x| *x).collect::<Vec<_>>();
@@ -358,8 +405,12 @@ impl<C: Config> InputSession<'_, C> {
                         (
                             engine
                                 .get_query_input_unchecked::<Q>(query_hash)
+                                .await
                                 .unwrap(),
-                            engine.get_node_info_unchecked(query_id).unwrap(),
+                            engine
+                                .get_node_info_unchecked(query_id)
+                                .await
+                                .unwrap(),
                         )
                     };
 
@@ -399,6 +450,7 @@ impl<C: Config> InputSession<'_, C> {
                     let new_fingerprint = engine.hash(&new_value);
 
                     results.push(RefreshResult {
+                        query_input: query,
                         query_input_hash: query_hash,
                         query_result_hash: new_fingerprint,
                         old_node_info,
@@ -426,21 +478,17 @@ impl<C: Config> InputSession<'_, C> {
                             self.dirty_batch.push_back(query_id);
                         }
 
-                        self.engine.set_computed_input(
-                            unsafe {
-                                self.engine
-                                    .get_query_input_unchecked::<Q>(
-                                        refresh_result.query_input_hash,
-                                    )
-                                    .unwrap()
-                            },
-                            refresh_result.query_input_hash,
-                            refresh_result.new_value,
-                            refresh_result.query_result_hash,
-                            self.transaction.as_mut().unwrap(),
-                            false,
-                            timestamp,
-                        );
+                        self.engine
+                            .set_computed_input(
+                                refresh_result.query_input,
+                                refresh_result.query_input_hash,
+                                refresh_result.new_value,
+                                refresh_result.query_result_hash,
+                                self.transaction.as_mut().unwrap(),
+                                false,
+                                timestamp,
+                            )
+                            .await;
                     }
                 }
 

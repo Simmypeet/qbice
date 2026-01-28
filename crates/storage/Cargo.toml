@@ -25,6 +25,7 @@ enum-as-inner.workspace = true
 fjall = { workspace = true, optional = true }
 rust-rocksdb = { workspace = true, optional = true }
 thread_local.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

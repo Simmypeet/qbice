@@ -175,7 +175,7 @@ async fn cyclic_dependency_returns_default_values() {
     engine.register_executor(executor_b.clone());
 
     let engine = Arc::new(engine);
-    let tracked_engine = engine.tracked();
+    let tracked_engine = engine.tracked().await;
 
     // When we query CyclicQueryA, it should detect the cycle A -> B -> A
     // and return default values (0 for i32) without calling the executors
@@ -212,7 +212,7 @@ async fn dependent_query_uses_cyclic_default_values() {
     engine.register_executor(executor_dependent.clone());
 
     // Query the dependent query, which depends on the cyclic queries
-    let engine = Arc::new(engine).tracked();
+    let engine = Arc::new(engine).tracked().await;
 
     let result = engine.query(&DependentQuery).await;
 
@@ -437,11 +437,11 @@ async fn conditional_cyclic_dependency() {
 
     // Phase 1: Set control value to create NO cycle (control_value != 1)
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(CycleControlVariable, 5);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(CycleControlVariable, 5).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Query both A and B - they should compute normal values without cycles
     let result_a = tracked_engine.query(&ConditionalCyclicQueryA).await;
@@ -459,15 +459,15 @@ async fn conditional_cyclic_dependency() {
 
     // Phase 2: Change control value to CREATE a cycle (control_value == 1)
     {
-        let mut input_session = engine.input_session();
+        let mut input_session = engine.input_session().await;
 
-        input_session.set_input(CycleControlVariable, 1);
+        input_session.set_input(CycleControlVariable, 1).await;
     }
 
     executor_a.reset_call_count();
     executor_b.reset_call_count();
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Query A - this should trigger cycle detection and return default values
     let result_a_cyclic = tracked_engine.query(&ConditionalCyclicQueryA).await;
@@ -486,14 +486,14 @@ async fn conditional_cyclic_dependency() {
     // Phase 3: Change control value back to break the cycle (control_value !=
     // 1)
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(CycleControlVariable, 3);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(CycleControlVariable, 3).await;
     }
 
     executor_a.reset_call_count();
     executor_b.reset_call_count();
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Query both A and B - they should recompute and return normal values again
     let result_a_normal = tracked_engine.query(&ConditionalCyclicQueryA).await;
@@ -513,14 +513,14 @@ async fn conditional_cyclic_dependency() {
     // (control_value == 1)
 
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(CycleControlVariable, 1);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(CycleControlVariable, 1).await;
     }
 
     executor_a.reset_call_count();
     executor_b.reset_call_count();
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     // Query A - cycle should be detected again and default values returned
     let result_a_cyclic2 = tracked_engine.query(&ConditionalCyclicQueryA).await;
@@ -553,11 +553,11 @@ async fn conditional_cyclic_with_dependent_query() {
 
     // Phase 1: No cycle - dependent query should use computed values
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(CycleControlVariable, 2);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(CycleControlVariable, 2).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     let result_dependent = tracked_engine.query(&DependentQuery).await;
 
@@ -574,11 +574,11 @@ async fn conditional_cyclic_with_dependent_query() {
 
     // Phase 2: Create cycle - dependent query should use default values
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(CycleControlVariable, 1);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(CycleControlVariable, 1).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     executor_a.reset_call_count();
     executor_b.reset_call_count();
@@ -601,11 +601,11 @@ async fn conditional_cyclic_with_dependent_query() {
 
     // Phase 3: Break cycle again - dependent query should use computed values
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(CycleControlVariable, 4);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(CycleControlVariable, 4).await;
     }
 
-    let tracked_engine = engine.clone().tracked();
+    let tracked_engine = engine.clone().tracked().await;
 
     executor_a.reset_call_count();
     executor_b.reset_call_count();
