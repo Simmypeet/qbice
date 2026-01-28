@@ -70,7 +70,7 @@
 
 use core::fmt;
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     borrow::Borrow,
     collections::{HashMap, HashSet},
     fmt::Debug,
@@ -90,8 +90,10 @@ use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 use crate::{
     kv_database::{KeyOfSetColumn, KvDatabase, WideColumn, WideColumnValue},
     sharded::Sharded,
+    sieve::single_flight::SingleFlight,
 };
 
+mod single_flight;
 mod write_behind;
 
 pub use write_behind::{BackgroundWriter, WriteBuffer};
@@ -104,6 +106,9 @@ pub trait BackingStorage {
 
     /// The type of values stored in the backing storage.
     type Value;
+
+    /// The type used for single-flight deduplication of concurrent fetches.
+    type SingleFlightKey: Eq + Hash;
 }
 
 /// An adaptor for using wide columns as backing storage in the SIEVE cache.
@@ -115,6 +120,9 @@ pub struct WideColumnAdaptor<C>(pub PhantomData<C>);
 impl<C: WideColumn> BackingStorage for WideColumnAdaptor<C> {
     type Key = (C::Key, C::Discriminant);
     type Value = Option<Box<dyn Any + Send + Sync>>;
+
+    // a tuple of key and stable type id of the wide column ty
+    type SingleFlightKey = (C::Key, TypeId);
 }
 
 /// An adaptor for using key-of-set columns as backing storage in the SIEVE
@@ -149,6 +157,9 @@ pub enum KeyOfSetEntry<C: KeyOfSetContainer> {
 impl<C: KeyOfSetContainer> BackingStorage for KeyOfSetAdaptor<C> {
     type Key = C::Key;
     type Value = KeyOfSetEntry<C>;
+
+    // simply the key type
+    type SingleFlightKey = C::Key;
 }
 
 /// A sharded sieve cache operating on wide columns data schema.
@@ -304,6 +315,7 @@ pub struct Sieve<
 > {
     shards: Sharded<SieveShard<B, S>>,
     hasher_builder: S,
+    single_flight: SingleFlight<B::SingleFlightKey>,
 
     backing_db: Arc<DB>,
 }
@@ -386,6 +398,7 @@ impl<B: BackingStorage, DB, S: Clone> Sieve<B, DB, S> {
             shards: Sharded::new(shard_amount, |_| {
                 SieveShard::new(per_shard, hasher_builder.clone())
             }),
+            single_flight: SingleFlight::new(shard_amount),
             hasher_builder,
             backing_db,
         }
@@ -510,8 +523,13 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                 .ok();
             }
 
-            let db_value =
-                self.backing_db.get_wide_column::<C, W>(&combined_key.0);
+            let Some(db_value) = self.single_flight.work_or_wait(
+                (combined_key.0.clone(), std::any::TypeId::of::<W>()),
+                || self.backing_db.get_wide_column::<C, W>(&combined_key.0),
+            ) else {
+                // this thread were instructed to wait, retry read
+                continue;
+            };
 
             let mut write_lock = self.shards.write_shard(shard_index);
 
@@ -729,6 +747,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
     ///
     /// println!("Total tags: {}", tags.len());
     /// ```
+    #[allow(clippy::unused_async)]
     pub fn get_set(
         &self,
         key: &C::Key,
@@ -746,8 +765,16 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                 return guard;
             }
 
-            let mut db_value: C::Container =
-                self.backing_db.scan_members::<C>(key).collect();
+            let Some(mut db_value) =
+                self.single_flight.work_or_wait(key.clone(), || {
+                    self.backing_db
+                        .scan_members::<C>(key)
+                        .collect::<C::Container>()
+                })
+            else {
+                // this thread were instructed to wait, retry read
+                continue;
+            };
 
             let mut write_lock = self.shards.write_shard(shard_index);
 
