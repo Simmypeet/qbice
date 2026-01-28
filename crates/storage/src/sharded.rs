@@ -3,10 +3,16 @@ use parking_lot::RwLock;
 
 pub(crate) struct Sharded<T> {
     shards: Box<[CachePadded<RwLock<T>>]>,
-    mask: usize,
+    shift: usize,
 }
 
 impl<T> Sharded<T> {}
+
+const fn ptr_size_bits() -> usize { std::mem::size_of::<usize>() * 8 }
+
+const fn ncb(shard_amount: usize) -> usize {
+    shard_amount.trailing_zeros() as usize
+}
 
 impl<T> Sharded<T> {
     pub fn new(
@@ -23,7 +29,10 @@ impl<T> Sharded<T> {
             shards.push(CachePadded::new(RwLock::new(make_shard(i))));
         }
 
-        Self { shards: shards.into_boxed_slice(), mask: shard_amount - 1 }
+        Self {
+            shards: shards.into_boxed_slice(),
+            shift: ptr_size_bits() - ncb(shard_amount),
+        }
     }
 
     pub fn shard_amount(&self) -> usize { self.shards.len() }
@@ -32,7 +41,7 @@ impl<T> Sharded<T> {
         &self,
         shard_index: usize,
     ) -> parking_lot::RwLockReadGuard<'_, T> {
-        self.shards[shard_index].read()
+        self.shards[shard_index].read_recursive()
     }
 
     pub fn write_shard(
@@ -56,6 +65,9 @@ impl<T> Sharded<T> {
 
     #[allow(clippy::cast_possible_truncation)]
     pub const fn shard_index(&self, hash: u64) -> usize {
-        (hash as usize) & self.mask
+        let hash = hash as usize;
+
+        // Leave the high 7 bits for the HashBrown SIMD tag.
+        (hash << 7) >> self.shift
     }
 }
