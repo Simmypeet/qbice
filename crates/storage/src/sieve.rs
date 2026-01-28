@@ -510,6 +510,9 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                 .ok();
             }
 
+            let db_value =
+                self.backing_db.get_wide_column::<C, W>(&combined_key.0);
+
             let mut write_lock = self.shards.write_shard(shard_index);
 
             if let Retrieve::Hit(_) = write_lock.get(&combined_key, false) {
@@ -517,9 +520,6 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                 // acquiring the write lock, retry read
                 continue;
             }
-
-            let db_value =
-                self.backing_db.get_wide_column::<C, W>(&combined_key.0);
 
             write_lock.insert(
                 combined_key.clone(),
@@ -746,6 +746,9 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                 return guard;
             }
 
+            let mut db_value: C::Container =
+                self.backing_db.scan_members::<C>(key).collect();
+
             let mut write_lock = self.shards.write_shard(shard_index);
 
             // the deltas that have to be applied to the full set
@@ -764,9 +767,6 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
             } else {
                 None
             };
-
-            let mut db_value: C::Container =
-                self.backing_db.scan_members::<C>(key).collect();
 
             if let Some(partial_ops) = partial {
                 for (element, operation) in partial_ops {
