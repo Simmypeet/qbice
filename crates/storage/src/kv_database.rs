@@ -9,6 +9,9 @@ use std::hash::Hash;
 use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
 
+mod buffer_pool;
+mod default_shard_amount;
+
 #[cfg(feature = "fjall")]
 pub mod fjall;
 

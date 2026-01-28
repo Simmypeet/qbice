@@ -20,28 +20,9 @@ use rust_rocksdb::{
 
 use crate::kv_database::{
     DiscriminantEncoding, KeyOfSetColumn, KvDatabase, KvDatabaseFactory,
-    WideColumn, WideColumnValue, WriteBatch,
+    WideColumn, WideColumnValue, WriteBatch, buffer_pool::BufferPool,
+    default_shard_amount::default_shard_amount,
 };
-
-#[derive(Debug)]
-struct BufferPool {
-    pool: Mutex<Vec<Vec<u8>>>,
-}
-
-impl BufferPool {
-    const fn new() -> Self { Self { pool: Mutex::new(Vec::new()) } }
-
-    fn get_buffer(&self) -> Vec<u8> {
-        self.pool.lock().pop().unwrap_or_else(|| Vec::with_capacity(1024))
-    }
-
-    fn return_buffer(&self, mut buffer: Vec<u8>) {
-        // clear the buffer content but keep the allocated capacity
-        buffer.clear();
-
-        self.pool.lock().push(buffer);
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ColumnKind {
@@ -168,7 +149,7 @@ impl RocksDB {
         Ok(Self(Arc::new(Impl {
             db,
             plugin,
-            column_families: DashMap::new(),
+            column_families: DashMap::with_shard_amount(default_shard_amount()),
             buffer_pool: BufferPool::new(),
         })))
     }

@@ -15,28 +15,8 @@ use qbice_stable_type_id::{Identifiable, StableTypeID};
 
 use crate::kv_database::{
     DiscriminantEncoding, KeyOfSetColumn, KvDatabase, KvDatabaseFactory,
-    WideColumn, WideColumnValue, WriteBatch,
+    WideColumn, WideColumnValue, WriteBatch, buffer_pool::BufferPool,
 };
-
-#[derive(Debug)]
-struct BufferPool {
-    pool: Mutex<Vec<Vec<u8>>>,
-}
-
-impl BufferPool {
-    const fn new() -> Self { Self { pool: Mutex::new(Vec::new()) } }
-
-    fn get_buffer(&self) -> Vec<u8> {
-        self.pool.lock().pop().unwrap_or_else(|| Vec::with_capacity(1024))
-    }
-
-    fn return_buffer(&self, mut buffer: Vec<u8>) {
-        // clear the buffer content but keep the allocated capacity
-        buffer.clear();
-
-        self.pool.lock().push(buffer);
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ColumnKind {
