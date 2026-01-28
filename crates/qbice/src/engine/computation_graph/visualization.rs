@@ -200,7 +200,7 @@ impl<C: Config> Engine<C> {
     #[must_use]
     async fn snapshot_graph_from<Q: Query>(&self, query: &Q) -> GraphSnapshot {
         let caller = CallerInformation::new(CallerKind::Tracing, unsafe {
-            self.get_current_timestamp_unchecked().await
+            self.get_current_timestamp_from_engine().await
         });
 
         let mut nodes = Vec::new();

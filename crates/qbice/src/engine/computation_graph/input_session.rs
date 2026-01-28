@@ -77,7 +77,7 @@ use crate::{
 pub struct InputSession<C: Config> {
     engine: Arc<Engine<C>>,
     dirty_batch: VecDeque<QueryID>,
-    transaction: Option<WriterBufferWithLock<'static, C>>,
+    transaction: Option<WriterBufferWithLock<C>>,
 }
 
 impl<C: Config> Drop for InputSession<C> {
@@ -116,7 +116,7 @@ impl<C: Config> InputSession<C> {
     async fn commit_internal(
         engine: Arc<Engine<C>>,
         dirty_batch: VecDeque<QueryID>,
-        mut transaction: WriterBufferWithLock<'static, C>,
+        mut transaction: WriterBufferWithLock<C>,
     ) {
         engine.computation_graph.reset_statistic();
         engine.clear_dirtied_queries();
@@ -205,7 +205,7 @@ impl<C: Config> Engine<C> {
             self.new_write_buffer_with_write_lock().await;
 
         unsafe {
-            Self::increment_timestamp(&mut write_buffer_with_lock);
+            self.increment_timestamp(&mut write_buffer_with_lock);
         }
 
         InputSession {
@@ -307,7 +307,8 @@ impl<C: Config> InputSession<C> {
             SetInputResult::Fresh
         };
 
-        let ts = self.transaction.as_ref().unwrap().timestamp();
+        // should be safe since we're holding input session phase guard
+        let ts = unsafe { self.engine.get_current_timestamp_unchecked() };
 
         self.engine
             .set_computed_input(
@@ -380,7 +381,10 @@ impl<C: Config> InputSession<C> {
         let external_input_set =
             self.engine.get_external_input_queries(&type_id).await;
 
-        let timestamp = self.transaction.as_ref().unwrap().timestamp();
+        // should be safe since we're holding input session phase guard
+        let timestamp =
+            unsafe { self.engine.get_current_timestamp_unchecked() };
+
         let hashes = external_input_set.iter().map(|x| *x).collect::<Vec<_>>();
 
         let expected_parallelism = std::thread::available_parallelism()

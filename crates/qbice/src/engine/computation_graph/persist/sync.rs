@@ -1,4 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::{Identifiable, StableTypeID};
@@ -22,6 +28,130 @@ use crate::{
     query::QueryID,
 };
 
+pub struct PhaseMutex {
+    /// The current phase of the mutex.
+    ///
+    /// [1 bit: InputSessionActive | 31 bits: WaitingInputSessions | 32 bits:
+    /// ActiveComputations]
+    state: AtomicU64,
+
+    notify: Arc<tokio::sync::Notify>,
+}
+
+const INPUT_SESSION_ACTIVE_BIT: u64 = 1 << (u64::BITS - 1);
+const ACTIVE_COMPUTATION_BITS: u64 = (u64::BITS as u64) / 2;
+
+const ACTIVE_COMPUTATION_MASK: u64 = (1 << ACTIVE_COMPUTATION_BITS) - 1;
+const INPUT_SESSION_WAITING_MASK: u64 =
+    !ACTIVE_COMPUTATION_MASK & !INPUT_SESSION_ACTIVE_BIT;
+const INPUT_SESSION_WAITING_ONE: u64 = 1 << ACTIVE_COMPUTATION_BITS;
+
+impl PhaseMutex {
+    pub async fn active_computation_phase_guard(
+        self: &Arc<Self>,
+    ) -> ActiveComputationPhaseGuard {
+        loop {
+            let state = self.state.load(Ordering::SeqCst);
+
+            if (state & INPUT_SESSION_ACTIVE_BIT != 0)
+                || (state & INPUT_SESSION_WAITING_MASK != 0)
+            {
+                self.wait_for_state_change().await;
+                continue;
+            }
+
+            // Try to acquire Read lock
+            // We only succeed if state hasn't changed (no new writers arrived)
+            if self
+                .state
+                .compare_exchange_weak(
+                    state,
+                    state + 1, // Increment reader count
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                return ActiveComputationPhaseGuard {
+                    phase_mutex: self.clone(),
+                };
+            }
+        }
+    }
+
+    pub async fn input_session_pphase_guard(
+        self: &Arc<Self>,
+    ) -> InputSessionPhaseGuard {
+        // Indicate that an input session is waiting
+        self.state.fetch_add(INPUT_SESSION_WAITING_ONE, Ordering::SeqCst);
+
+        loop {
+            let state = self.state.load(Ordering::SeqCst);
+
+            let active_input_session = state & INPUT_SESSION_ACTIVE_BIT != 0;
+            let active_computations = state & ACTIVE_COMPUTATION_MASK != 0;
+
+            if active_input_session || active_computations {
+                self.wait_for_state_change().await;
+                continue;
+            }
+
+            let next_state =
+                (state - INPUT_SESSION_WAITING_ONE) | INPUT_SESSION_ACTIVE_BIT;
+
+            // Try to acquire Write lock
+            // We only succeed if state hasn't changed (no new readers/writers
+            // arrived)
+            if self
+                .state
+                .compare_exchange_weak(
+                    state,
+                    next_state,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                return InputSessionPhaseGuard { phase_mutex: self.clone() };
+            }
+        }
+    }
+
+    async fn wait_for_state_change(&self) {
+        let notified = self.notify.notified();
+        notified.await;
+    }
+}
+
+pub struct ActiveComputationPhaseGuard {
+    phase_mutex: Arc<PhaseMutex>,
+}
+
+impl Drop for ActiveComputationPhaseGuard {
+    fn drop(&mut self) {
+        let prev_state = self.phase_mutex.state.fetch_sub(1, Ordering::SeqCst);
+
+        // If there are no more active computations, notify waiters
+        if (prev_state & ACTIVE_COMPUTATION_MASK) == 1 {
+            self.phase_mutex.notify.notify_waiters();
+        }
+    }
+}
+
+pub struct InputSessionPhaseGuard {
+    phase_mutex: Arc<PhaseMutex>,
+}
+
+impl Drop for InputSessionPhaseGuard {
+    fn drop(&mut self) {
+        self.phase_mutex
+            .state
+            .fetch_and(!INPUT_SESSION_ACTIVE_BIT, Ordering::SeqCst);
+
+        self.phase_mutex.notify.notify_waiters();
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
 )]
@@ -42,33 +172,27 @@ impl WideColumnValue<TimestampColumn> for Timestamp {
 }
 
 pub struct Sync<C: Config> {
-    timestamp_lock: Arc<tokio::sync::RwLock<Timestamp>>,
+    timestamp: AtomicU64,
+    phase_mutex: Arc<PhaseMutex>,
 
     background: BackgroundWriter<C::Database, C::BuildHasher>,
 }
 
-pub enum Guard<'x> {
-    Read(tokio::sync::RwLockReadGuard<'x, Timestamp>),
-    Write(tokio::sync::OwnedRwLockWriteGuard<Timestamp>),
+pub enum Guard {
+    ActiveComputation(#[allow(unused)] ActiveComputationPhaseGuard),
+    InputSession(#[allow(unused)] InputSessionPhaseGuard),
 }
 
-pub struct WriterBufferWithLock<'x, C: Config> {
-    guard: Guard<'x>,
+pub struct WriterBufferWithLock<C: Config> {
+    guard: Guard,
     writer_buffer: WriteBuffer<C::Database, C::BuildHasher>,
 }
 
-impl<C: Config> WriterBufferWithLock<'_, C> {
+impl<C: Config> WriterBufferWithLock<C> {
     pub const fn writer_buffer(
         &mut self,
     ) -> &mut WriteBuffer<C::Database, C::BuildHasher> {
         &mut self.writer_buffer
-    }
-
-    pub fn timestamp(&self) -> Timestamp {
-        match &self.guard {
-            Guard::Read(guard) => **guard,
-            Guard::Write(guard) => **guard,
-        }
     }
 }
 
@@ -91,7 +215,11 @@ impl<C: Config> Sync<C> {
             });
 
         Self {
-            timestamp_lock: Arc::new(tokio::sync::RwLock::new(timestamp)),
+            timestamp: AtomicU64::new(timestamp.0),
+            phase_mutex: Arc::new(PhaseMutex {
+                state: AtomicU64::new(0),
+                notify: Arc::new(tokio::sync::Notify::new()),
+            }),
             background: background_writer,
         }
     }
@@ -101,15 +229,27 @@ impl<C: Config> Engine<C> {
     pub(in crate::engine::computation_graph) async fn new_write_buffer(
         &'_ self,
         caller_information: &CallerInformation,
-    ) -> WriterBufferWithLock<'_, C> {
+    ) -> WriterBufferWithLock<C> {
         // the guard must be dropped here to make the future Send
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return WriterBufferWithLock {
-                    guard: Guard::Read(guard),
+                    guard: Guard::ActiveComputation(guard),
                     writer_buffer: self
                         .computation_graph
                         .persist
@@ -124,18 +264,17 @@ impl<C: Config> Engine<C> {
     }
 
     pub(in crate::engine::computation_graph) async fn new_write_buffer_with_write_lock(
-        &'_ self,
-    ) -> WriterBufferWithLock<'static, C> {
+        &self,
+    ) -> WriterBufferWithLock<C> {
         let writer_buffer =
             self.computation_graph.persist.sync.background.new_write_buffer();
 
-        let guard = Guard::Write(
+        let guard = Guard::InputSession(
             self.computation_graph
                 .persist
                 .sync
-                .timestamp_lock
-                .clone()
-                .write_owned()
+                .phase_mutex
+                .input_session_pphase_guard()
                 .await,
         );
 
@@ -144,7 +283,7 @@ impl<C: Config> Engine<C> {
 
     pub(in crate::engine::computation_graph) fn submit_write_buffer(
         &self,
-        write_buffer: WriterBufferWithLock<'_, C>,
+        write_buffer: WriterBufferWithLock<C>,
     ) {
         self.computation_graph
             .persist
@@ -153,29 +292,58 @@ impl<C: Config> Engine<C> {
             .submit_write_buffer(write_buffer.writer_buffer);
     }
 
-    pub(in crate::engine::computation_graph) async unsafe fn get_current_timestamp_unchecked(
+    pub(in crate::engine::computation_graph) unsafe fn get_current_timestamp_unchecked(
         &self,
     ) -> Timestamp {
-        *self.computation_graph.persist.sync.timestamp_lock.read().await
+        Timestamp(
+            self.computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst),
+        )
+    }
+
+    pub(in crate::engine::computation_graph) async unsafe fn get_current_timestamp_from_engine(
+        &self,
+    ) -> Timestamp {
+        let _active_computation_phase_guard = self
+            .computation_graph
+            .persist
+            .sync
+            .phase_mutex
+            .active_computation_phase_guard()
+            .await;
+
+        Timestamp(
+            self.computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst),
+        )
     }
 
     pub(in crate::engine::computation_graph) unsafe fn increment_timestamp(
+        &self,
         tx: &mut WriterBufferWithLock<C>,
     ) -> Timestamp {
-        let guard = match &mut tx.guard {
-            Guard::Read(_) => {
-                panic!("Cannot increment timestamp with a read guard");
-            }
-            Guard::Write(guard) => guard,
-        };
+        assert!(
+            matches!(tx.guard, Guard::InputSession(_)),
+            "Timestamp can only be incremented under input session phase"
+        );
 
-        let current_timestamp = Timestamp(guard.0 + 1);
-        **guard = current_timestamp;
+        let prev = self
+            .computation_graph
+            .persist
+            .sync
+            .timestamp
+            .fetch_add(1, Ordering::SeqCst);
 
         tx.writer_buffer
-            .put::<TimestampColumn, Timestamp>(&(), &current_timestamp);
+            .put::<TimestampColumn, Timestamp>(&(), &Timestamp(prev + 1));
 
-        current_timestamp
+        Timestamp(prev + 1)
     }
 }
 
@@ -186,10 +354,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Arc<[QueryID]>> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist
@@ -209,10 +389,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist
@@ -232,10 +424,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<NodeInfo> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist
@@ -255,10 +459,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<QueryKind> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist
@@ -278,10 +494,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Timestamp> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist
@@ -301,10 +529,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> BackwardEdge<C> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist
@@ -326,10 +566,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Q::Value> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist
@@ -349,10 +601,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Timestamp> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist
@@ -374,10 +638,22 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Q> {
         {
-            let guard =
-                self.computation_graph.persist.sync.timestamp_lock.read().await;
+            let _guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard()
+                .await;
 
-            if *guard == caller_information.timestamp() {
+            if self
+                .computation_graph
+                .persist
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst)
+                == caller_information.timestamp().0
+            {
                 return self
                     .computation_graph
                     .persist

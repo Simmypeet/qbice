@@ -609,7 +609,7 @@ impl<C: Config> Engine<C> {
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
         existing_forward_edges: Option<&[QueryID]>,
-        mut tx: WriterBufferWithLock<'_, C>,
+        mut tx: WriterBufferWithLock<C>,
     ) {
         let query_value_fingerprint =
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
@@ -726,7 +726,7 @@ impl<C: Config> Engine<C> {
         query_hash_128: Compact128,
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
-        tx: &mut WriterBufferWithLock<'_, C>,
+        tx: &mut WriterBufferWithLock<C>,
         set_input: bool,
         timestamp: Timestamp,
     ) {
