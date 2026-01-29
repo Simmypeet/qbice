@@ -535,13 +535,20 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                             return;
                         }
 
-                        write_lock.insert(
+                        let old_info = write_lock.insert(
                             combined_key.clone(),
                             db_value.map(|x| {
                                 Box::new(x) as Box<dyn Any + Send + Sync>
                             }),
                             0,
                         );
+
+                        drop(write_lock);
+
+                        // NOTE: sometimes the value maybe very large, so
+                        // dropping them outside the lock scope to reduce the
+                        // time we hold the lock
+                        drop(old_info);
                     },
                 )
                 .await;
@@ -628,15 +635,28 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
 
         if let RetrieveMut::Hit(node) = write_lock.get_mut(&combined_key, true)
         {
-            node.value = boxed;
+            let old_node = std::mem::replace(&mut node.value, boxed);
+
             // Relaxed is fine since we've already acquired the write lock
             *node.visited.get_mut() = true;
 
             if updated {
                 *node.pending_writes.get_mut() += 1;
             }
+
+            drop(write_lock);
+
+            // NOTE: sometimes the value maybe very large, so dropping them
+            // outside the lock scope to reduce the time we hold the lock
+            drop(old_node);
         } else {
-            write_lock.insert(combined_key, boxed, usize::from(updated));
+            let old_info =
+                write_lock.insert(combined_key, boxed, usize::from(updated));
+
+            drop(write_lock);
+            // NOTE: sometimes the value maybe very large, so dropping them
+            // outside the lock scope to reduce the time we hold the lock
+            drop(old_info);
         }
     }
 }
@@ -807,11 +827,18 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                             node.value = KeyOfSetEntry::Full(db_value);
                         }
                         RetrieveMut::Miss => {
-                            write_lock.insert(
+                            let old_result = write_lock.insert(
                                 key.clone(),
                                 KeyOfSetEntry::Full(db_value),
                                 0,
                             );
+
+                            drop(write_lock);
+
+                            // NOTE: sometimes the value maybe very large, so
+                            // dropping them outside the lock scope to reduce
+                            // the time we hold the lock
+                            drop(old_result);
                         }
                     }
                 })
@@ -940,11 +967,17 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                 let partial = DashMap::new();
                 partial.insert(element, Operation::Insert);
 
-                write_lock.insert(
+                let old_info = write_lock.insert(
                     key.clone(),
                     KeyOfSetEntry::Partial(partial),
                     usize::from(updated),
                 );
+
+                drop(write_lock);
+
+                // NOTE: sometimes the value maybe very large, so dropping them
+                // outside the lock scope to reduce the time we hold the lock
+                drop(old_info);
             }
         }
     }
@@ -1045,11 +1078,17 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                 let partial = DashMap::new();
                 partial.insert(element.clone(), Operation::Delete);
 
-                write_lock.insert(
+                let old_info = write_lock.insert(
                     key.clone(),
                     KeyOfSetEntry::Partial(partial),
                     usize::from(updated),
                 );
+
+                drop(write_lock);
+
+                // NOTE: sometimes the value maybe very large, so dropping them
+                // outside the lock scope to reduce the time we hold the lock
+                drop(old_info);
             }
         }
     }
@@ -1096,7 +1135,12 @@ enum RetrieveMut<'x, B: BackingStorage> {
 }
 
 impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
-    fn insert(&mut self, key: B::Key, value: B::Value, pending_writes: usize) {
+    fn insert(
+        &mut self,
+        key: B::Key,
+        value: B::Value,
+        pending_writes: usize,
+    ) -> Option<(B::Key, B::Value)> {
         // If we haven't reached capacity yet, just push to the vector
         if self.nodes.len() < self.capacity {
             let index = self.nodes.len();
@@ -1108,7 +1152,8 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
             }));
             self.map.insert(key, index);
             self.active += 1;
-            return;
+
+            return None;
         }
 
         // Cache is at capacity, scan for an eviction candidate
@@ -1141,14 +1186,16 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
 
                 // evict this node
                 self.map.remove(&node.key);
-                *node = Node {
-                    key: key.clone(),
-                    value,
-                    pending_writes: AtomicUsize::new(pending_writes),
-                    visited: AtomicBool::new(true),
-                };
+
+                let old_key = std::mem::replace(&mut node.key, key.clone());
+                let old_value = std::mem::replace(&mut node.value, value);
+
+                node.pending_writes = AtomicUsize::new(pending_writes);
+                node.visited = AtomicBool::new(true);
+
                 self.map.insert(key, index);
-                return;
+
+                return Some((old_key, old_value));
             }
 
             // empty slot found (shouldn't happen if capacity is reached, but
@@ -1161,7 +1208,8 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
             });
             self.map.insert(key, index);
             self.active += 1;
-            return;
+
+            return None;
         }
 
         // Fallback: grow beyond capacity
@@ -1174,6 +1222,8 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
         self.map.insert(key, self.nodes.len() - 1);
         self.active += 1;
         self.hand = 0; // reset hand to start scanning from beginning next time
+
+        None
     }
 
     fn get(&self, key: &B::Key, visit: bool) -> Retrieve<'_, B> {
