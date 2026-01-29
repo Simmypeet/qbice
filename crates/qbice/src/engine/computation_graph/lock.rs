@@ -1,6 +1,6 @@
 use std::{
+    self,
     borrow::Cow,
-    collections::{HashMap, hash_map::Entry},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -8,7 +8,6 @@ use dashmap::{
     DashMap,
     mapref::one::{Ref, RefMut},
 };
-use parking_lot::RwLock;
 use qbice_stable_hash::Compact128;
 use qbice_storage::intern::Interned;
 use tokio::sync::{Notify, futures::OwnedNotified};
@@ -31,16 +30,16 @@ use crate::{
 
 #[derive(Debug, Default)]
 pub struct ComputingForwardEdges {
-    pub callee_queries: Arc<RwLock<HashMap<QueryID, Option<Observation>>>>,
+    pub callee_queries: Arc<DashMap<QueryID, Option<Observation>>>,
     pub callee_order: Vec<QueryID>,
 }
 
 impl Computing {
     pub fn register_calee(&mut self, callee: QueryID) {
-        match self.callee_info.callee_queries.write().entry(callee) {
-            Entry::Occupied(_) => {}
+        match self.callee_info.callee_queries.entry(callee) {
+            dashmap::Entry::Occupied(_) => {}
 
-            Entry::Vacant(vacant_entry) => {
+            dashmap::Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(None);
 
                 // if haven't inserted, add to dependency order
@@ -50,9 +49,7 @@ impl Computing {
     }
 
     pub fn abort_callee(&mut self, callee: &QueryID) {
-        assert!(
-            self.callee_info.callee_queries.write().remove(callee).is_some()
-        );
+        assert!(self.callee_info.callee_queries.remove(callee).is_some());
 
         if let Some(pos) =
             self.callee_info.callee_order.iter().position(|&id| id == *callee)
@@ -70,13 +67,14 @@ impl Computing {
     }
 
     pub fn observe_callee(
-        &mut self,
+        &self,
         callee_target_id: QueryID,
         seen_value_fingerprint: Compact128,
         seen_transitive_firewall_callees_fingerprint: Compact128,
     ) {
-        let mut callee_queries = self.callee_info.callee_queries.write();
-        let callee_observation = callee_queries
+        let mut callee_observation = self
+            .callee_info
+            .callee_queries
             .get_mut(&callee_target_id)
             .expect("callee should have been registered");
 
@@ -331,7 +329,7 @@ impl<C: Config> Engine<C> {
                 vacant_entry.insert(Computing {
                     notify: Arc::new(Notify::new()),
                     callee_info: ComputingForwardEdges {
-                        callee_queries: Arc::new(RwLock::new(HashMap::new())),
+                        callee_queries: Arc::new(DashMap::new()),
                         callee_order: Vec::new(),
                     },
 
@@ -429,11 +427,11 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::needless_pass_by_value)]
     fn check_cyclic_internal(
         &self,
-        caller_queries: Arc<RwLock<HashMap<QueryID, Option<Observation>>>>,
+        caller_queries: Arc<DashMap<QueryID, Option<Observation>>>,
         is_in_scc: Arc<AtomicBool>,
         target: QueryID,
     ) -> bool {
-        if caller_queries.read_recursive().contains_key(&target) {
+        if caller_queries.contains_key(&target) {
             is_in_scc.store(true, std::sync::atomic::Ordering::SeqCst);
 
             return true;
@@ -442,7 +440,7 @@ impl<C: Config> Engine<C> {
         let mut found = false;
 
         // OPTIMIZE: this can be parallelized
-        for dep in caller_queries.read_recursive().keys().copied() {
+        for dep in caller_queries.iter().map(|x| *x.key()).collect::<Vec<_>>() {
             let Some(state) = self.computation_graph.lock.try_get_lock(dep)
             else {
                 continue;
@@ -516,11 +514,10 @@ impl<C: Config> Engine<C> {
             callee_info.callee_order.into(),
             callee_info
                 .callee_queries
-                .read_recursive()
                 .iter()
                 // in case of cyclic dependencies, some callees may have
                 // been aborted
-                .filter_map(|(k, v)| v.map(|v| (*k, v)))
+                .filter_map(|x| x.value().map(|v| (*x.key(), v)))
                 .collect(),
             tfc_archetype,
             has_pending_backward_projection,
