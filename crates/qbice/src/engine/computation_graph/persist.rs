@@ -552,7 +552,7 @@ impl<C: Config> Persist<C> {
         Self {
             sync: sync::Sync::new(&db),
             query_node: Arc::new(Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
+                C::cache_entry_capacity() * 2 * 2 * 2,
                 shard_amount * 2 * 2,
                 db.clone(),
                 C::BuildHasher::default(),
