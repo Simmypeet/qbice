@@ -540,6 +540,7 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                             db_value.map(|x| {
                                 Box::new(x) as Box<dyn Any + Send + Sync>
                             }),
+                            true,
                             0,
                         );
 
@@ -633,12 +634,9 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
 
         let mut write_lock = self.shards.write_shard(shard_index);
 
-        if let RetrieveMut::Hit(node) = write_lock.get_mut(&combined_key, true)
+        if let RetrieveMut::Hit(node) = write_lock.get_mut(&combined_key, false)
         {
             let old_node = std::mem::replace(&mut node.value, boxed);
-
-            // Relaxed is fine since we've already acquired the write lock
-            *node.visited.get_mut() = true;
 
             if updated {
                 *node.pending_writes.get_mut() += 1;
@@ -650,8 +648,12 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
             // outside the lock scope to reduce the time we hold the lock
             drop(old_node);
         } else {
-            let old_info =
-                write_lock.insert(combined_key, boxed, usize::from(updated));
+            let old_info = write_lock.insert(
+                combined_key,
+                boxed,
+                false,
+                usize::from(updated),
+            );
 
             drop(write_lock);
             // NOTE: sometimes the value maybe very large, so dropping them
@@ -830,6 +832,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                             let old_result = write_lock.insert(
                                 key.clone(),
                                 KeyOfSetEntry::Full(db_value),
+                                true,
                                 0,
                             );
 
@@ -915,7 +918,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
 
         let read_shard = self.shards.read_shard(shard_index);
 
-        match read_shard.get(key, true) {
+        match read_shard.get(key, false) {
             Retrieve::Hit(entry) => {
                 match &entry.value {
                     KeyOfSetEntry::Full(container) => {
@@ -945,8 +948,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
 
         let mut write_lock = self.shards.write_shard(shard_index);
 
-        match write_lock.get_mut(key, true) {
-            RetrieveMut::Hit(entry) => {
+        match write_lock.get_mut(key, false) { RetrieveMut::Hit(entry) => {
                 match &mut entry.value {
                     KeyOfSetEntry::Full(container) => {
                         container.insert_element(element);
@@ -970,6 +972,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                 let old_info = write_lock.insert(
                     key.clone(),
                     KeyOfSetEntry::Partial(partial),
+                    false,
                     usize::from(updated),
                 );
 
@@ -1056,7 +1059,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
             self,
         );
 
-        match write_lock.get_mut(key, true) {
+        match write_lock.get_mut(key, false) {
             RetrieveMut::Hit(entry) => {
                 match &mut entry.value {
                     KeyOfSetEntry::Full(container) => {
@@ -1081,6 +1084,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                 let old_info = write_lock.insert(
                     key.clone(),
                     KeyOfSetEntry::Partial(partial),
+                    false,
                     usize::from(updated),
                 );
 
@@ -1139,6 +1143,7 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
         &mut self,
         key: B::Key,
         value: B::Value,
+        visited: bool,
         pending_writes: usize,
     ) -> Option<(B::Key, B::Value)> {
         // If we haven't reached capacity yet, just push to the vector
@@ -1148,7 +1153,7 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
                 key: key.clone(),
                 value,
                 pending_writes: AtomicUsize::new(pending_writes),
-                visited: AtomicBool::new(true),
+                visited: AtomicBool::new(visited),
             }));
             self.map.insert(key, index);
             self.active += 1;
@@ -1191,7 +1196,7 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
                 let old_value = std::mem::replace(&mut node.value, value);
 
                 node.pending_writes = AtomicUsize::new(pending_writes);
-                node.visited = AtomicBool::new(true);
+                node.visited = AtomicBool::new(visited);
 
                 self.map.insert(key, index);
 
@@ -1204,7 +1209,7 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
                 key: key.clone(),
                 value,
                 pending_writes: AtomicUsize::new(pending_writes),
-                visited: AtomicBool::new(true),
+                visited: AtomicBool::new(visited),
             });
             self.map.insert(key, index);
             self.active += 1;
@@ -1217,7 +1222,7 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
             key: key.clone(),
             value,
             pending_writes: AtomicUsize::new(pending_writes),
-            visited: AtomicBool::new(true),
+            visited: AtomicBool::new(visited),
         }));
         self.map.insert(key, self.nodes.len() - 1);
         self.active += 1;
