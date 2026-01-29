@@ -625,18 +625,18 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
         let combined_key = (key, W::discriminant());
         let shard_index = self.shard_index(&combined_key);
 
-        let mut write_lock = self.shards.write_shard(shard_index);
-
         let updated = write_buffer.wide_column_writes.put(
             combined_key.0.clone(),
             value.clone(),
             self,
         );
+        let boxed = value.map(|v| Box::new(v) as Box<dyn Any + Send + Sync>);
+
+        let mut write_lock = self.shards.write_shard(shard_index);
 
         if let RetrieveMut::Hit(node) = write_lock.get_mut(&combined_key, true)
         {
-            node.value =
-                value.map(|v| Box::new(v) as Box<dyn Any + Send + Sync>);
+            node.value = boxed;
             // Relaxed is fine since we've already acquired the write lock
             *node.visited.get_mut() = true;
 
@@ -644,11 +644,7 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
                 *node.pending_writes.get_mut() += 1;
             }
         } else {
-            write_lock.insert(
-                combined_key,
-                value.map(|v| Box::new(v) as Box<dyn Any + Send + Sync>),
-                usize::from(updated),
-            );
+            write_lock.insert(combined_key, boxed, usize::from(updated));
         }
     }
 }
@@ -1052,16 +1048,20 @@ struct SieveShard<B: BackingStorage, S = BuildHasherDefault<fxhash::FxHasher>> {
     map: HashMap<B::Key, Index, S>,
     nodes: Vec<Option<Node<B>>>,
     hand: Index,
+    capacity: usize,
 
     active: usize,
 }
 
 impl<B: BackingStorage, S> SieveShard<B, S> {
-    fn new(capacity: usize, hasher: S) -> Self {
-        let mut nodes = Vec::with_capacity(capacity);
-        nodes.resize_with(capacity, || None);
-
-        Self { nodes, hand: 0, active: 0, map: HashMap::with_hasher(hasher) }
+    const fn new(capacity: usize, hasher: S) -> Self {
+        Self {
+            nodes: Vec::new(),
+            hand: 0,
+            capacity,
+            active: 0,
+            map: HashMap::with_hasher(hasher),
+        }
     }
 }
 
@@ -1077,13 +1077,28 @@ enum RetrieveMut<'x, B: BackingStorage> {
 
 impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
     fn insert(&mut self, key: B::Key, value: B::Value, pending_writes: usize) {
-        // scan for an empty slot
+        // If we haven't reached capacity yet, just push to the vector
+        if self.nodes.len() < self.capacity {
+            let index = self.nodes.len();
+            self.nodes.push(Some(Node {
+                key: key.clone(),
+                value,
+                pending_writes: AtomicUsize::new(pending_writes),
+                visited: AtomicBool::new(true),
+            }));
+            self.map.insert(key, index);
+            self.active += 1;
+            return;
+        }
+
+        // Cache is at capacity, scan for an eviction candidate
         let mut scanned = 0;
-        let max_scan = self.nodes.len() * 2;
+        let max_scan = self.capacity * 2;
 
         loop {
             if scanned > max_scan {
-                // cache is full break from the loop to evict
+                // All entries have pending writes or were recently visited
+                // Unconditionally grow beyond capacity as a fallback
                 break;
             }
 
@@ -1116,7 +1131,8 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
                 return;
             }
 
-            // empty slot found
+            // empty slot found (shouldn't happen if capacity is reached, but
+            // handle it)
             self.nodes[index] = Some(Node {
                 key: key.clone(),
                 value,
@@ -1128,7 +1144,7 @@ impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
             return;
         }
 
-        // unconditionally increases the size by appending to the end
+        // Fallback: grow beyond capacity
         self.nodes.push(Some(Node {
             key: key.clone(),
             value,
