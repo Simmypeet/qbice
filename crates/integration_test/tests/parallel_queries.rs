@@ -143,16 +143,14 @@ async fn parallel_read_variable_map() {
 
         let tracked_engine = engine.tracked().await;
 
-        let handles: Vec<_> = (0..100)
-            .map(|i| {
-                let tracked_engine = tracked_engine.clone();
-                tokio::spawn(async move {
-                    tracked_engine
-                        .query(&ReadVariableMap::new(Variable(i)))
-                        .await
-                })
-            })
-            .collect();
+        let mut handles = Vec::new();
+        for var in 0..100 {
+            let tracked_engine = tracked_engine.clone_async().await;
+
+            handles.push(tokio::spawn(async move {
+                tracked_engine.query(&ReadVariableMap::new(Variable(var))).await
+            }));
+        }
 
         for (i, handle) in handles.into_iter().enumerate() {
             let result = handle.await.unwrap();

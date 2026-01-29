@@ -1,5 +1,6 @@
-use std::{borrow::Cow, ops::Not, pin::Pin, sync::Arc};
+use std::{ops::Not, pin::Pin, sync::Arc};
 
+use fxhash::FxHashSet;
 use qbice_stable_hash::Compact128;
 
 use crate::{
@@ -137,12 +138,7 @@ impl<C: Config> Engine<C> {
             .is_projection();
 
         let tfcs = node_info.transitive_firewall_callees();
-
-        let tfcs = tfcs
-            .into_iter()
-            .flat_map(|x| x.iter())
-            .copied()
-            .collect::<Vec<_>>();
+        let tfcs = tfcs.iter().copied().collect::<Vec<_>>();
 
         let chunk_size = std::cmp::max(
             tfcs.len()
@@ -276,27 +272,30 @@ impl<C: Config> Engine<C> {
                     .await;
             }
 
-            let mut unioning_tfcs = Vec::new();
+            let mut new_tfcs = FxHashSet::default();
 
             for x in forward_edges.iter() {
                 let kind =
                     self.get_query_kind(*x, caller_information).await.unwrap();
 
                 if kind.is_firewall() {
-                    unioning_tfcs.push(Cow::Owned(self.new_singleton_tfc(*x)));
+                    new_tfcs.insert(*x);
                 } else {
                     let callee_info = self
                         .get_node_info(*x, caller_information)
                         .await
                         .unwrap();
-                    if let Some(tfc) = callee_info.transitive_firewall_callees()
-                    {
-                        unioning_tfcs.push(Cow::Owned(tfc.clone()));
-                    }
+
+                    new_tfcs.extend(
+                        callee_info
+                            .transitive_firewall_callees()
+                            .iter()
+                            .copied(),
+                    );
                 }
             }
 
-            let new_tfc = self.union_tfcs(unioning_tfcs);
+            let new_tfc = self.create_tfc(new_tfcs);
 
             self.computing_lock_to_clean_query(
                 query.id,

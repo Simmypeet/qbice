@@ -116,7 +116,7 @@ impl<C: Config> Executor<CollectDoubledSquareVariables, C>
 
         let mut join_handles = Vec::new();
         for var in target_vars.iter().copied() {
-            let engine = engine.clone();
+            let engine = engine.clone_async().await;
 
             join_handles.push(tokio::spawn(async move {
                 let square = engine.query(&SlowSquare(var)).await;
@@ -223,7 +223,7 @@ impl<C: Config> Executor<SumAllDoubleSquares, C>
         let mut handles = Vec::new();
 
         for var in target_vars.iter().copied() {
-            let engine = engine.clone();
+            let engine = engine.clone_async().await;
 
             handles.push(tokio::spawn(async move {
                 let double_square = engine.query(&DoubleSquare(var)).await;
@@ -920,7 +920,7 @@ async fn firewall_same_output_no_propagation() {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::cast_possible_wrap)]
 async fn concurrent_projection_access() {
-    for _ in 0..100 {
+    for _ in 0..500 {
         let tempdir = tempdir().unwrap();
         let mut engine = create_test_engine(&tempdir);
 

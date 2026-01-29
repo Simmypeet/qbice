@@ -205,9 +205,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Arc<[QueryID]>> {
         {
-            let _active_computation_phase_guard =
-                self.computation_graph.persist.sync.phase_mutex.read().await;
-
             if self
                 .computation_graph
                 .persist
@@ -235,9 +232,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
         {
-            let _active_computation_phase_guard =
-                self.computation_graph.persist.sync.phase_mutex.read().await;
-
             if self
                 .computation_graph
                 .persist

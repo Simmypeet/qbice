@@ -1,14 +1,10 @@
 use std::{
     self,
-    borrow::Cow,
-    collections::{HashMap, hash_map::Entry},
     sync::{Arc, atomic::AtomicBool},
 };
 
-use dashmap::{
-    DashMap,
-    mapref::one::{Ref, RefMut},
-};
+use dashmap::{DashMap, DashSet, Entry, mapref::one::Ref};
+use parking_lot::RwLock;
 use qbice_stable_hash::Compact128;
 use qbice_storage::{intern::Interned, sieve::WriteBuffer};
 use tokio::sync::{Notify, futures::OwnedNotified};
@@ -31,12 +27,12 @@ use crate::{
 
 #[derive(Debug, Default)]
 pub struct ComputingForwardEdges {
-    pub callee_queries: HashMap<QueryID, Option<Observation>>,
-    pub callee_order: Vec<QueryID>,
+    pub callee_queries: DashMap<QueryID, Option<Observation>>,
+    pub callee_order: RwLock<Vec<QueryID>>,
 }
 
 impl Computing {
-    pub fn register_calee(&mut self, callee: QueryID) {
+    pub fn register_calee(&self, callee: QueryID) {
         match self.callee_info.callee_queries.entry(callee) {
             Entry::Occupied(_) => {}
 
@@ -44,18 +40,17 @@ impl Computing {
                 vacant_entry.insert(None);
 
                 // if haven't inserted, add to dependency order
-                self.callee_info.callee_order.push(callee);
+                self.callee_info.callee_order.write().push(callee);
             }
         }
     }
 
-    pub fn abort_callee(&mut self, callee: &QueryID) {
+    pub fn abort_callee(&self, callee: &QueryID) {
         assert!(self.callee_info.callee_queries.remove(callee).is_some());
+        let mut callee_order = self.callee_info.callee_order.write();
 
-        if let Some(pos) =
-            self.callee_info.callee_order.iter().position(|&id| id == *callee)
-        {
-            self.callee_info.callee_order.remove(pos);
+        if let Some(pos) = callee_order.iter().position(|&id| id == *callee) {
+            callee_order.remove(pos);
         }
     }
 
@@ -68,12 +63,12 @@ impl Computing {
     }
 
     pub fn observe_callee(
-        &mut self,
+        &self,
         callee_target_id: QueryID,
         seen_value_fingerprint: Compact128,
         seen_transitive_firewall_callees_fingerprint: Compact128,
     ) {
-        let callee_observation = self
+        let mut callee_observation = self
             .callee_info
             .callee_queries
             .get_mut(&callee_target_id)
@@ -90,8 +85,7 @@ impl Computing {
 
 impl<C: Config> Engine<C> {
     pub(super) fn caller_observe_tfc_callees(
-        &self,
-        computing_caller: &mut Computing,
+        computing_caller: &Computing,
         callee_info: &NodeInfo,
         kind: QueryKind,
         callee_id: QueryID,
@@ -105,26 +99,14 @@ impl<C: Config> Engine<C> {
             QueryKind::Executable(
                 ExecutionStyle::Normal | ExecutionStyle::Projection,
             ) => {
-                computing_caller.tfc_archetype = self.union_tfcs(
-                    computing_caller
-                        .tfc_archetype
-                        .as_ref()
-                        .into_iter()
-                        .chain(callee_info.transitive_firewall_callees())
-                        .map(Cow::Borrowed),
-                );
+                for q in
+                    callee_info.transitive_firewall_callees().iter().copied()
+                {
+                    computing_caller.tfc.insert(q);
+                }
             }
             QueryKind::Executable(ExecutionStyle::Firewall) => {
-                let singleton_tfc = self.new_singleton_tfc(callee_id);
-
-                computing_caller.tfc_archetype = self.union_tfcs(
-                    computing_caller
-                        .tfc_archetype
-                        .as_ref()
-                        .into_iter()
-                        .chain(std::iter::once(&singleton_tfc))
-                        .map(Cow::Borrowed),
-                );
+                computing_caller.tfc.insert(callee_id);
             }
         }
     }
@@ -140,7 +122,7 @@ pub struct Computing {
     notify: Arc<Notify>,
     callee_info: ComputingForwardEdges,
     is_in_scc: Arc<AtomicBool>,
-    tfc_archetype: Option<Interned<TransitiveFirewallCallees>>,
+    tfc: DashSet<QueryID>,
     query_kind: QueryKind,
 }
 
@@ -205,7 +187,7 @@ impl<C: Config> Drop for BackwardProjectionLockGuard<'_, C> {
 }
 
 pub struct Lock<C: Config> {
-    normal_lock: DashMap<QueryID, Computing, C::BuildHasher>,
+    normal_lock: DashMap<QueryID, Arc<Computing>, C::BuildHasher>,
     backward_projection_lock:
         DashMap<QueryID, PendingBackwardProjection, C::BuildHasher>,
 }
@@ -257,11 +239,19 @@ impl<C: Config> Drop for ComputingLockGuard<'_, C> {
 }
 
 impl<C: Config> Lock<C> {
-    pub fn try_get_lock(
+    pub fn try_get_lock_for_fast_path(
         &self,
         query_id: QueryID,
-    ) -> Option<Ref<'_, QueryID, Computing>> {
-        self.normal_lock.get(&query_id)
+    ) -> Option<(OwnedNotified, Arc<Computing>)> {
+        let guard = self.normal_lock.get(&query_id)?;
+        let notified_owned = guard.notified_owned();
+
+        Some((notified_owned, guard.clone()))
+    }
+
+    pub fn try_get_lock(&self, query_id: QueryID) -> Option<Arc<Computing>> {
+        let guard = self.normal_lock.get(&query_id)?;
+        Some(guard.clone())
     }
 
     pub fn try_get_pending_backward_projection_lock(
@@ -271,15 +261,11 @@ impl<C: Config> Lock<C> {
         self.backward_projection_lock.get(&query_id)
     }
 
-    pub fn get_lock_mut(
-        &self,
-        query_id: QueryID,
-    ) -> RefMut<'_, QueryID, Computing> {
-        self.normal_lock.get_mut(&query_id).unwrap()
-    }
-
-    pub fn get_lock(&self, query_id: QueryID) -> Ref<'_, QueryID, Computing> {
-        self.normal_lock.get(&query_id).unwrap()
+    pub fn get_lock(&self, query_id: QueryID) -> Arc<Computing> {
+        self.normal_lock
+            .get(&query_id)
+            .expect("computing lock should exist")
+            .clone()
     }
 }
 pub enum LockGuard<'x, C: Config> {
@@ -327,17 +313,17 @@ impl<C: Config> Engine<C> {
             }
 
             dashmap::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(Computing {
+                vacant_entry.insert(Arc::new(Computing {
                     notify: Arc::new(Notify::new()),
                     callee_info: ComputingForwardEdges {
-                        callee_queries: HashMap::new(),
-                        callee_order: Vec::new(),
+                        callee_queries: DashMap::new(),
+                        callee_order: RwLock::new(Vec::new()),
                     },
 
                     query_kind,
                     is_in_scc: Arc::new(AtomicBool::new(false)),
-                    tfc_archetype: None,
-                });
+                    tfc: DashSet::new(),
+                }));
 
                 Some(ComputingLockGuard {
                     computing_lock: &self.computation_graph.lock,
@@ -402,7 +388,7 @@ impl<C: Config> Engine<C> {
         &self,
         query_id: QueryID,
         clean_edges: &[QueryID],
-        new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
+        new_tfc: Option<Interned<TransitiveFirewallCallees>>,
         caller_information: &CallerInformation,
         lock_guard: ComputingLockGuard<'_, C>,
     ) {
@@ -442,7 +428,8 @@ impl<C: Config> Engine<C> {
         let mut found = false;
 
         // OPTIMIZE: this can be parallelized
-        for dep in computing.callee_info.callee_queries.keys().copied() {
+        for dep in computing.callee_info.callee_queries.iter().map(|x| *x.key())
+        {
             let Some(state) = self.computation_graph.lock.try_get_lock(dep)
             else {
                 continue;
@@ -464,10 +451,10 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::needless_pass_by_value)]
     pub(super) fn check_cyclic(
         &self,
-        running_state: Ref<'_, QueryID, Computing>,
+        running_state: &Computing,
         target: QueryID,
     ) -> bool {
-        self.check_cyclic_internal(&running_state, target)
+        self.check_cyclic_internal(running_state, target)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -482,19 +469,32 @@ impl<C: Config> Engine<C> {
         existing_forward_edges: Option<&[QueryID]>,
         continuing_tx: WriteBuffer<C::Database, C::BuildHasher>,
     ) {
-        let (notify, query_kind, callee_info, tfc_archetype) = {
-            let mut computing = self
-                .computation_graph
-                .lock
-                .normal_lock
-                .get_mut(&query_id.id)
-                .expect("computing lock should exist");
+        let (
+            notify,
+            query_kind,
+            forward_edge_order,
+            forward_edges,
+            tfc_archetype,
+        ) = {
+            let computing = self.computation_graph.lock.get_lock(query_id.id);
 
             (
                 computing.notify.clone(),
                 computing.query_kind,
-                std::mem::take(&mut computing.callee_info),
-                computing.tfc_archetype.take(),
+                std::mem::take(
+                    &mut *computing.callee_info.callee_order.write(),
+                ),
+                computing
+                    .callee_info
+                    .callee_queries
+                    .iter()
+                    // in case of cyclic dependencies, some callees may have
+                    // been aborted
+                    .filter_map(|x| x.value().map(|v| (*x.key(), v)))
+                    .collect(),
+                self.create_tfc_from_iter(
+                    computing.tfc.iter().map(|x| *x.key()),
+                ),
             )
         };
 
@@ -503,14 +503,8 @@ impl<C: Config> Engine<C> {
             value,
             query_value_fingerprint,
             query_kind,
-            callee_info.callee_order.into(),
-            callee_info
-                .callee_queries
-                .into_iter()
-                // in case of cyclic dependencies, some callees may have
-                // been aborted
-                .filter_map(|(k, v)| v.map(|v| (k, v)))
-                .collect(),
+            forward_edge_order.into(),
+            forward_edges,
             tfc_archetype,
             has_pending_backward_projection,
             caller_information,

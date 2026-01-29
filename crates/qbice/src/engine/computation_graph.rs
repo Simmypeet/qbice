@@ -336,7 +336,27 @@ impl<C: Config> TrackedEngine<C> {
     }
 }
 
+static_assertions::assert_impl_all!(TrackedEngine<DefaultConfig>: Send, Sync);
 static_assertions::assert_impl_all!(&TrackedEngine<DefaultConfig>: Send, Sync);
+
+impl<C: Config> Clone for TrackedEngine<C> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            cache: self.cache.clone(),
+            caller: self.caller.clone(),
+            active_computation_guard: if self.active_computation_guard.is_some()
+            {
+                panic!(
+                    "cannot clone TrackedEngine synchronously when active \
+                     computation guard is held"
+                );
+            } else {
+                None
+            },
+        }
+    }
+}
 
 impl<C: Config> std::fmt::Debug for TrackedEngine<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

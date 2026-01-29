@@ -351,16 +351,14 @@ impl WideColumnValue<DirtySetColumn> for Unit {
 pub struct NodeInfo {
     fingerprint: Compact128,
     transitive_firewall_callees_fingerprint: Compact128,
-    transitive_firewall_callees: Option<Interned<TransitiveFirewallCallees>>,
+    transitive_firewall_callees: Interned<TransitiveFirewallCallees>,
 }
 
 impl NodeInfo {
     pub const fn new(
         fingerprint: Compact128,
         transitive_firewall_callees_fingerprint: Compact128,
-        transitive_firewall_callees: Option<
-            Interned<TransitiveFirewallCallees>,
-        >,
+        transitive_firewall_callees: Interned<TransitiveFirewallCallees>,
     ) -> Self {
         Self {
             fingerprint,
@@ -377,8 +375,8 @@ impl NodeInfo {
 
     pub const fn transitive_firewall_callees(
         &self,
-    ) -> Option<&Interned<TransitiveFirewallCallees>> {
-        self.transitive_firewall_callees.as_ref()
+    ) -> &Interned<TransitiveFirewallCallees> {
+        &self.transitive_firewall_callees
     }
 }
 
@@ -610,7 +608,7 @@ impl<C: Config> Engine<C> {
             Observation,
             C::BuildHasher,
         >,
-        tfc_achetype: Option<Interned<TransitiveFirewallCallees>>,
+        tfc_achetype: Interned<TransitiveFirewallCallees>,
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
         existing_forward_edges: Option<&[QueryID]>,
@@ -742,7 +740,8 @@ impl<C: Config> Engine<C> {
             Arc::new(HashMap::with_hasher(C::BuildHasher::default())),
         );
 
-        let transitive_firewall_callees = None;
+        let transitive_firewall_callees =
+            self.create_tfc_from_iter(std::iter::empty());
         let transitive_firewall_callees_fingerprint =
             self.hash(&transitive_firewall_callees);
 
@@ -831,7 +830,7 @@ impl<C: Config> Engine<C> {
         &self,
         query_id: QueryID,
         clean_edges: &[QueryID],
-        new_tfc: Option<Option<Interned<TransitiveFirewallCallees>>>,
+        new_tfc: Option<Interned<TransitiveFirewallCallees>>,
         caller_information: &CallerInformation,
     ) {
         let new_node_info = if let Some(x) = new_tfc {

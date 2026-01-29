@@ -1,7 +1,4 @@
-use std::{
-    borrow::Cow,
-    ops::{Deref, DerefMut},
-};
+use std::ops::{Deref, DerefMut};
 
 use fxhash::FxHashSet;
 use qbice_serialize::{Decode, Encode};
@@ -27,79 +24,21 @@ impl DerefMut for TransitiveFirewallCallees {
 }
 
 impl<C: Config> Engine<C> {
-    pub(super) fn new_singleton_tfc(
+    pub(super) fn create_tfc(
         &self,
-        query_id: QueryID,
+        hash_set: FxHashSet<QueryID>,
     ) -> Interned<TransitiveFirewallCallees> {
-        let mut set = FxHashSet::default();
-        set.insert(query_id);
-
-        let tfc = TransitiveFirewallCallees(set);
+        let tfc = TransitiveFirewallCallees(hash_set);
         self.interner.intern(tfc)
     }
 
-    pub(super) fn union_tfcs<'a>(
+    pub(super) fn create_tfc_from_iter(
         &self,
-        others: impl IntoIterator<
-            Item = Cow<'a, Interned<TransitiveFirewallCallees>>,
-        >,
-    ) -> Option<Interned<TransitiveFirewallCallees>> {
-        let mut current_tfc: Option<Interned<TransitiveFirewallCallees>> = None;
-        let mut new_archetype: Option<FxHashSet<QueryID>> = None;
+        query_ids: impl IntoIterator<Item = QueryID>,
+    ) -> Interned<TransitiveFirewallCallees> {
+        let set: FxHashSet<QueryID> = query_ids.into_iter().collect();
 
-        for other in others {
-            match (&mut current_tfc, &mut new_archetype) {
-                // extract new tfc
-                (None, None) => {
-                    current_tfc = Some(match other {
-                        Cow::Borrowed(x) => x.clone(),
-                        Cow::Owned(x) => x,
-                    });
-                }
-
-                (None, Some(_)) => {
-                    unreachable!("should've extracted current tfc first")
-                }
-
-                (Some(current), None) => {
-                    // if one of these two is a superset of the other, we can
-                    // skip creating a new archetype
-                    if other.0.is_superset(&current.0) {
-                        *current = match other {
-                            Cow::Borrowed(x) => x.clone(),
-                            Cow::Owned(x) => x,
-                        };
-                    } else if current.0.is_superset(&other.0) {
-                    } else {
-                        // create a new archetype set that is the union of both
-                        let mut union_set = current.clone_inner();
-                        union_set.0.extend(other.0.iter().copied());
-
-                        new_archetype = Some(union_set.0);
-                    }
-                }
-                (Some(_), Some(existing_set)) => {
-                    // has already created a new archetype set, just extend it
-                    existing_set.extend(other.0.iter().copied());
-                }
-            }
-        }
-
-        match (current_tfc, new_archetype) {
-            (None, Some(_)) => {
-                unreachable!("should've extracted current tfc")
-            }
-
-            (Some(current_tfc), None) => Some(current_tfc),
-
-            (Some(_), Some(set)) => {
-                let new_tfc =
-                    TransitiveFirewallCallees(set.into_iter().collect());
-
-                Some(self.interner.intern(new_tfc))
-            }
-
-            (None, None) => None,
-        }
+        let tfc = TransitiveFirewallCallees(set);
+        self.interner.intern(tfc)
     }
 }

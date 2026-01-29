@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use dashmap::mapref::one::Ref;
-
 use crate::{
     Engine, Query,
     config::Config,
@@ -33,8 +31,8 @@ impl<C: Config> Engine<C> {
         caller_source: QueryID,
     ) {
         // add dependency for the caller
-        let mut caller_computing =
-            self.computation_graph.lock.get_lock_mut(caller_source);
+        let caller_computing =
+            self.computation_graph.lock.get_lock(caller_source);
 
         caller_computing.observe_callee(
             callee_target,
@@ -42,8 +40,8 @@ impl<C: Config> Engine<C> {
             callee_info.transitive_firewall_callees_fingerprint(),
         );
 
-        self.caller_observe_tfc_callees(
-            &mut caller_computing,
+        Self::caller_observe_tfc_callees(
+            &caller_computing,
             callee_info,
             callee_kind,
             callee_target,
@@ -54,7 +52,7 @@ impl<C: Config> Engine<C> {
     fn exit_scc(
         &self,
         called_from: Option<QueryID>,
-        running_state: Ref<'_, QueryID, Computing>,
+        running_state: &Computing,
     ) -> Result<(), CyclicError> {
         // if there is no caller, we are at the root.
         let Some(called_from) = called_from else {
@@ -80,12 +78,11 @@ impl<C: Config> Engine<C> {
         query_id: QueryID,
         caller: &CallerInformation,
     ) -> Result<FastPathResult<Q::Value>, CyclicError> {
-        if let Some(computing) =
-            self.computation_graph.lock.try_get_lock(query_id)
+        if let Some((notified_owned, computing)) =
+            self.computation_graph.lock.try_get_lock_for_fast_path(query_id)
         {
             // exit out of the scc query to avoid circular waits
-            let notified_owned = computing.notified_owned();
-            self.exit_scc(caller.get_caller(), computing)?;
+            self.exit_scc(caller.get_caller(), &computing)?;
 
             notified_owned.await;
 

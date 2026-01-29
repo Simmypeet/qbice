@@ -44,7 +44,7 @@ async fn cancellation_safety() {
     // Now, set the executor to make it stuck
     slow_executor.make_it_stuck.store(true, Ordering::Relaxed);
 
-    let tracked_engine_clone = tracked_engine.clone();
+    let tracked_engine_clone = tracked_engine.clone_async().await;
 
     // Spawn a task to run the slow query
     tokio::select! {
@@ -179,7 +179,7 @@ async fn cancellation_with_dependency_chain() {
     // Set executor A to get stuck after querying B
     executor_a.should_cancel.store(true, Ordering::Relaxed);
 
-    let tracked_engine_clone = tracked_engine.clone();
+    let tracked_engine_clone = tracked_engine.clone_async().await;
 
     // Try to query A, which will query B first, then get stuck
     tokio::select! {
@@ -540,7 +540,7 @@ async fn cancellation_during_repair() {
     // Set executor to hang during repair
     executor.should_hang.store(true, Ordering::Relaxed);
 
-    let tracked_engine_clone = tracked_engine.clone();
+    let tracked_engine_clone = tracked_engine.clone_async().await;
 
     // Try to query, which will trigger repair, but cancel it
     tokio::select! {
@@ -688,7 +688,7 @@ async fn cancellation_at_different_nesting_levels() {
         let tracked_engine = engine.clone().tracked().await;
         outer_executor.hang_before_inner.store(true, Ordering::Relaxed);
 
-        let tracked_engine_clone = tracked_engine.clone();
+        let tracked_engine_clone = tracked_engine.clone_async().await;
 
         tokio::select! {
             () = tokio::time::sleep(Duration::from_millis(100)) => {}
@@ -708,7 +708,7 @@ async fn cancellation_at_different_nesting_levels() {
         let tracked_engine = engine.clone().tracked().await;
         outer_executor.hang_after_inner.store(true, Ordering::Relaxed);
 
-        let tracked_engine_clone = tracked_engine.clone();
+        let tracked_engine_clone = tracked_engine.clone_async().await;
 
         tokio::select! {
             () = tokio::time::sleep(Duration::from_millis(100)) => {}

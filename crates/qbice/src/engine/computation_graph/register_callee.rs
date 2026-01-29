@@ -35,7 +35,7 @@ impl<C: Config> Drop for UndoRegisterCallee<'_, C> {
         }
 
         if let Some(caller) = self.caller_source {
-            let mut caller_meta = self.graph.lock.get_lock_mut(caller);
+            let caller_meta = self.graph.lock.get_lock(caller);
 
             caller_meta.abort_callee(&self.callee_target);
         }
@@ -52,8 +52,7 @@ impl<C: Config> Engine<C> {
         caller_source.map_or_else(
             || None,
             |caller| {
-                let mut computing =
-                    self.computation_graph.lock.get_lock_mut(caller);
+                let computing = self.computation_graph.lock.get_lock(caller);
 
                 assert!(
                     !computing.query_kind().is_external_input(),
