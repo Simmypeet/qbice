@@ -482,14 +482,13 @@ impl<C: Config> Engine<C> {
         existing_forward_edges: Option<&[QueryID]>,
         continuing_tx: WriterBufferWithLock<C>,
     ) {
-        let dashmap::Entry::Occupied(mut entry_lock) =
-            self.computation_graph.lock.normal_lock.entry(query_id.id)
-        else {
-            panic!("computing lock should exist when transferring to computed");
-        };
-
         let (notify, query_kind, callee_info, tfc_archetype) = {
-            let computing = entry_lock.get_mut();
+            let mut computing = self
+                .computation_graph
+                .lock
+                .normal_lock
+                .get_mut(&query_id.id)
+                .expect("computing lock should exist");
 
             (
                 computing.notify.clone(),
@@ -521,7 +520,8 @@ impl<C: Config> Engine<C> {
 
         lock_guard.defuse();
 
-        entry_lock.remove();
+        // done, remove the computing lock
+        self.computation_graph.lock.normal_lock.remove(&query_id.id);
 
         notify.notify_waiters();
     }
