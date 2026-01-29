@@ -72,7 +72,7 @@ use core::fmt;
 use std::{
     any::{Any, TypeId},
     borrow::Borrow,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt::Debug,
     hash::{BuildHasher, BuildHasherDefault, Hash},
     marker::PhantomData,
@@ -83,7 +83,7 @@ use std::{
     },
 };
 
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use enum_as_inner::EnumAsInner;
 use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 
@@ -151,7 +151,7 @@ pub enum KeyOfSetEntry<C: KeyOfSetContainer> {
 
     /// The complete set is not stored; instead, a list of operations to apply
     /// is kept.
-    Partial(HashMap<C::Element, Operation>),
+    Partial(DashMap<C::Element, Operation>),
 }
 
 impl<C: KeyOfSetContainer> BackingStorage for KeyOfSetAdaptor<C> {
@@ -200,9 +200,12 @@ pub type KeyOfSetSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
 /// let removed = set.remove_element("key");
 /// assert!(removed);
 /// ```
-pub trait RemoveElementFromSet {
+pub trait ConcurrentSet {
     /// The type of elements stored in the set.
     type Element;
+
+    /// Inserts an element into the set.
+    fn insert_element(&self, element: Self::Element);
 
     /// Removes an element from the set.
     ///
@@ -210,28 +213,17 @@ pub trait RemoveElementFromSet {
     ///
     /// - `true` if the element was present and removed
     /// - `false` if the element was not found in the set
-    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
+    fn remove_element<Q: Hash + Eq + ?Sized>(&self, element: &Q) -> bool
     where
         Self::Element: Borrow<Q>;
 }
 
-impl<T: Eq + Hash, S: BuildHasher> RemoveElementFromSet for HashSet<T, S> {
+impl<T: Eq + Hash, S: BuildHasher + Clone> ConcurrentSet for DashSet<T, S> {
     type Element = T;
 
-    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
-    where
-        Self::Element: Borrow<Q>,
-    {
-        self.remove(element)
-    }
-}
+    fn insert_element(&self, element: Self::Element) { self.insert(element); }
 
-impl<T: Eq + Hash, S: BuildHasher + Clone> RemoveElementFromSet
-    for DashSet<T, S>
-{
-    type Element = T;
-
-    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
+    fn remove_element<Q: Hash + Eq + ?Sized>(&self, element: &Q) -> bool
     where
         Self::Element: Borrow<Q>,
     {
@@ -682,8 +674,7 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
 pub trait KeyOfSetContainer: KeyOfSetColumn {
     /// The in-memory container type used to represent the set.
     type Container: FromIterator<Self::Element>
-        + RemoveElementFromSet<Element = Self::Element>
-        + Extend<Self::Element>
+        + ConcurrentSet<Element = Self::Element>
         + Send
         + Sync
         + 'static;
@@ -772,7 +763,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
 
             self.single_flight
                 .work_or_wait(key.clone(), || {
-                    let mut db_value = self
+                    let db_value = self
                         .backing_db
                         .scan_members::<C>(key)
                         .collect::<C::Container>();
@@ -798,15 +789,14 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                     };
 
                     if let Some(partial_ops) = partial {
-                        for (element, operation) in partial_ops {
-                            match operation {
+                        for entry in partial_ops {
+                            match entry.value() {
                                 Operation::Insert => {
-                                    db_value.extend(std::iter::once(
-                                        element.clone(),
-                                    ));
+                                    db_value
+                                        .insert_element(entry.key().clone());
                                 }
                                 Operation::Delete => {
-                                    db_value.remove_element(element);
+                                    db_value.remove_element(entry.key());
                                 }
                             }
                         }
@@ -889,8 +879,6 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
     ) {
         let shard_index = self.shard_index(key);
 
-        let mut write_lock = self.shards.write_shard(shard_index);
-
         let updated = write_buffer.key_of_set_writes.put(
             key.clone(),
             element.clone(),
@@ -898,11 +886,43 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
             self,
         );
 
+        let read_shard = self.shards.read_shard(shard_index);
+
+        match read_shard.get(key, true) {
+            Retrieve::Hit(entry) => {
+                match &entry.value {
+                    KeyOfSetEntry::Full(container) => {
+                        container.insert_element(element);
+                    }
+                    KeyOfSetEntry::Partial(partial) => {
+                        partial.insert(element, Operation::Insert);
+                    }
+                }
+
+                if updated {
+                    entry
+                        .pending_writes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+
+                return;
+            }
+
+            Retrieve::Miss => {
+                // has to acquire write lock
+            }
+        }
+
+        // drop read lock before acquiring write lock
+        drop(read_shard);
+
+        let mut write_lock = self.shards.write_shard(shard_index);
+
         match write_lock.get_mut(key, true) {
             RetrieveMut::Hit(entry) => {
                 match &mut entry.value {
                     KeyOfSetEntry::Full(container) => {
-                        container.extend(std::iter::once(element));
+                        container.insert_element(element);
                     }
                     KeyOfSetEntry::Partial(partial) => {
                         partial.insert(element, Operation::Insert);
@@ -917,7 +937,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
             }
 
             RetrieveMut::Miss => {
-                let mut partial = HashMap::new();
+                let partial = DashMap::new();
                 partial.insert(element, Operation::Insert);
 
                 write_lock.insert(
@@ -1022,7 +1042,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
             }
 
             RetrieveMut::Miss => {
-                let mut partial = HashMap::new();
+                let partial = DashMap::new();
                 partial.insert(element.clone(), Operation::Delete);
 
                 write_lock.insert(

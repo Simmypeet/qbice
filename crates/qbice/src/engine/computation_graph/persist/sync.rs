@@ -47,6 +47,8 @@ const INPUT_SESSION_WAITING_MASK: u64 =
 const INPUT_SESSION_WAITING_ONE: u64 = 1 << ACTIVE_COMPUTATION_BITS;
 
 impl PhaseMutex {
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub async fn active_computation_phase_guard(
         self: &Arc<Self>,
     ) -> ActiveComputationPhaseGuard {
@@ -354,14 +356,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Arc<[QueryID]>> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist
@@ -389,14 +383,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist
@@ -424,14 +410,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<NodeInfo> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist
@@ -459,14 +437,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<QueryKind> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist
@@ -494,14 +464,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Timestamp> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist
@@ -529,14 +491,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> BackwardEdge<C> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist
@@ -566,14 +520,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Q::Value> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist
@@ -601,14 +547,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Timestamp> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist
@@ -638,14 +576,6 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Q> {
         {
-            let _guard = self
-                .computation_graph
-                .persist
-                .sync
-                .phase_mutex
-                .active_computation_phase_guard()
-                .await;
-
             if self
                 .computation_graph
                 .persist

@@ -39,8 +39,8 @@ use qbice_storage::{
         DiscriminantEncoding, KeyOfSetColumn, WideColumn, WideColumnValue,
     },
     sieve::{
-        KeyOfSetContainer, KeyOfSetSieve, RemoveElementFromSet,
-        WideColumnSieve, WriteBuffer,
+        ConcurrentSet, KeyOfSetContainer, KeyOfSetSieve, WideColumnSieve,
+        WriteBuffer,
     },
 };
 use rayon::iter::IntoParallelRefIterator;
@@ -175,10 +175,12 @@ impl<'x, C: Config> IntoIterator for &'x BackwardEdge<C> {
     fn into_iter(self) -> Self::IntoIter { self.0.iter() }
 }
 
-impl<C: Config> RemoveElementFromSet for BackwardEdge<C> {
+impl<C: Config> ConcurrentSet for BackwardEdge<C> {
     type Element = QueryID;
 
-    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
+    fn insert_element(&self, element: Self::Element) { self.0.insert(element); }
+
+    fn remove_element<Q: Hash + Eq + ?Sized>(&self, element: &Q) -> bool
     where
         Self::Element: Borrow<Q>,
     {
@@ -273,10 +275,12 @@ impl<'x, C: Config> IntoIterator for &'x ExternalInputSet<C> {
     fn into_iter(self) -> Self::IntoIter { self.0.iter() }
 }
 
-impl<C: Config> RemoveElementFromSet for ExternalInputSet<C> {
+impl<C: Config> ConcurrentSet for ExternalInputSet<C> {
     type Element = Compact128;
 
-    fn remove_element<Q: Hash + Eq + ?Sized>(&mut self, element: &Q) -> bool
+    fn insert_element(&self, element: Self::Element) { self.0.insert(element); }
+
+    fn remove_element<Q: Hash + Eq + ?Sized>(&self, element: &Q) -> bool
     where
         Self::Element: Borrow<Q>,
     {
