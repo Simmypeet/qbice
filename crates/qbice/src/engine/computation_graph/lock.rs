@@ -1,6 +1,7 @@
 use std::{
     self,
     borrow::Cow,
+    collections::{HashMap, hash_map::Entry},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -30,16 +31,16 @@ use crate::{
 
 #[derive(Debug, Default)]
 pub struct ComputingForwardEdges {
-    pub callee_queries: Arc<DashMap<QueryID, Option<Observation>>>,
+    pub callee_queries: HashMap<QueryID, Option<Observation>>,
     pub callee_order: Vec<QueryID>,
 }
 
 impl Computing {
     pub fn register_calee(&mut self, callee: QueryID) {
         match self.callee_info.callee_queries.entry(callee) {
-            dashmap::Entry::Occupied(_) => {}
+            Entry::Occupied(_) => {}
 
-            dashmap::Entry::Vacant(vacant_entry) => {
+            Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(None);
 
                 // if haven't inserted, add to dependency order
@@ -67,12 +68,12 @@ impl Computing {
     }
 
     pub fn observe_callee(
-        &self,
+        &mut self,
         callee_target_id: QueryID,
         seen_value_fingerprint: Compact128,
         seen_transitive_firewall_callees_fingerprint: Compact128,
     ) {
-        let mut callee_observation = self
+        let callee_observation = self
             .callee_info
             .callee_queries
             .get_mut(&callee_target_id)
@@ -329,7 +330,7 @@ impl<C: Config> Engine<C> {
                 vacant_entry.insert(Computing {
                     notify: Arc::new(Notify::new()),
                     callee_info: ComputingForwardEdges {
-                        callee_queries: Arc::new(DashMap::new()),
+                        callee_queries: HashMap::new(),
                         callee_order: Vec::new(),
                     },
 
@@ -427,12 +428,13 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::needless_pass_by_value)]
     fn check_cyclic_internal(
         &self,
-        caller_queries: Arc<DashMap<QueryID, Option<Observation>>>,
-        is_in_scc: Arc<AtomicBool>,
+        computing: &Computing,
         target: QueryID,
     ) -> bool {
-        if caller_queries.contains_key(&target) {
-            is_in_scc.store(true, std::sync::atomic::Ordering::SeqCst);
+        if computing.callee_info.callee_queries.contains_key(&target) {
+            computing
+                .is_in_scc
+                .store(true, std::sync::atomic::Ordering::SeqCst);
 
             return true;
         }
@@ -440,25 +442,19 @@ impl<C: Config> Engine<C> {
         let mut found = false;
 
         // OPTIMIZE: this can be parallelized
-        for dep in caller_queries.iter().map(|x| *x.key()).collect::<Vec<_>>() {
+        for dep in computing.callee_info.callee_queries.keys().copied() {
             let Some(state) = self.computation_graph.lock.try_get_lock(dep)
             else {
                 continue;
             };
 
-            let caller_queries = state.callee_info.callee_queries.clone();
-            let is_in_scc = state.is_in_scc.clone();
-            drop(state);
-
-            found |= self.check_cyclic_internal(
-                caller_queries,
-                is_in_scc.clone(),
-                target,
-            );
+            found |= self.check_cyclic_internal(&state, target);
         }
 
         if found {
-            is_in_scc.store(true, std::sync::atomic::Ordering::SeqCst);
+            computing
+                .is_in_scc
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         found
@@ -471,10 +467,7 @@ impl<C: Config> Engine<C> {
         running_state: Ref<'_, QueryID, Computing>,
         target: QueryID,
     ) -> bool {
-        let caller_queries = running_state.callee_info.callee_queries.clone();
-        let is_in_scc = running_state.is_in_scc.clone();
-
-        self.check_cyclic_internal(caller_queries, is_in_scc, target)
+        self.check_cyclic_internal(&running_state, target)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -514,10 +507,10 @@ impl<C: Config> Engine<C> {
             callee_info.callee_order.into(),
             callee_info
                 .callee_queries
-                .iter()
+                .into_iter()
                 // in case of cyclic dependencies, some callees may have
                 // been aborted
-                .filter_map(|x| x.value().map(|v| (*x.key(), v)))
+                .filter_map(|(k, v)| v.map(|v| (k, v)))
                 .collect(),
             tfc_archetype,
             has_pending_backward_projection,
