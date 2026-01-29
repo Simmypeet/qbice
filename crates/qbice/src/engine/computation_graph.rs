@@ -4,7 +4,7 @@ use std::sync::Arc;
 pub(crate) use caller::CallerInformation;
 use dashmap::DashSet;
 pub use input_session::{InputSession, SetInputResult};
-pub(crate) use persist::QueryDebug;
+pub(crate) use persist::{ActiveInputSessionGuard, QueryDebug};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};
 use qbice_stable_type_id::Identifiable;
@@ -14,8 +14,11 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::{Config, DefaultConfig},
     engine::computation_graph::{
-        caller::CallerKind, fast_path::FastPathResult, lock::Lock,
-        persist::Persist, statistic::Statistic,
+        caller::CallerKind,
+        fast_path::FastPathResult,
+        lock::Lock,
+        persist::{ActiveComputationGuard, Persist},
+        statistic::Statistic,
     },
     executor::{CyclicError, CyclicPanicPayload},
     query::QueryID,
@@ -204,6 +207,7 @@ pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: Arc<DashSet<QueryID>>,
     caller: CallerInformation,
+    active_computation_guard: Option<ActiveComputationGuard>,
 }
 
 impl<C: Config> TrackedEngine<C> {
@@ -295,12 +299,23 @@ impl<C: Config> TrackedEngine<C> {
     }
 }
 
-impl<C: Config> Clone for TrackedEngine<C> {
-    fn clone(&self) -> Self {
+impl<C: Config> TrackedEngine<C> {
+    /// Clones the `TrackedEngine`, sharing the same underlying engine and
+    /// local cache.
+    ///
+    /// This is intended to be analogous to [`Clone`], but has to be async in
+    /// order to acquire the necessary active computation guard from the engine.
+    pub async fn clone_async(&self) -> Self {
         Self {
-            engine: Arc::clone(&self.engine),
-            cache: Arc::clone(&self.cache),
+            engine: self.engine.clone(),
+            cache: self.cache.clone(),
             caller: self.caller.clone(),
+            active_computation_guard: if self.active_computation_guard.is_some()
+            {
+                Some(self.engine.acquire_active_computation_guard().await)
+            } else {
+                None
+            },
         }
     }
 }
@@ -315,8 +330,9 @@ impl<C: Config> TrackedEngine<C> {
         engine: Arc<Engine<C>>,
         cache: Arc<DashSet<QueryID>>,
         caller: CallerInformation,
+        active_computation_guard: Option<ActiveComputationGuard>,
     ) -> Self {
-        Self { engine, cache, caller }
+        Self { engine, cache, caller, active_computation_guard }
     }
 }
 
@@ -397,8 +413,11 @@ impl<C: Config> Engine<C> {
     pub async fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
         TrackedEngine {
             caller: CallerInformation::new(CallerKind::User, unsafe {
-                self.get_current_timestamp_from_engine()
+                self.get_current_timestamp_from_engine().await
             }),
+            active_computation_guard: Some(
+                self.acquire_active_computation_guard().await,
+            ),
             cache: Arc::new(DashSet::new()),
             engine: self,
         }

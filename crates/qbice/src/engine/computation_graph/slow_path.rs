@@ -75,6 +75,9 @@ impl<C: Config> Engine<C> {
                 )),
                 caller_information.timestamp(),
             ),
+            // NOTE: the parent tracked engine have already hold the active
+            // computation guard for us
+            active_computation_guard: None,
         };
         let guarded_tracked_engine = GuardedTrackedEngine { tracked_engine };
 
@@ -132,7 +135,7 @@ impl<C: Config> Engine<C> {
             let fingerprint = self.hash(&value);
             let updated = old_node_info.value_fingerprint() != fingerprint;
 
-            let mut writer_buffer_with_lock =
+            let mut write_buffer =
                 self.new_write_buffer(caller_information).await;
 
             // if fingerprint has changed, we do dirty propagation
@@ -143,13 +146,13 @@ impl<C: Config> Engine<C> {
                     self.mark_dirty_forward_edge(
                         edge.caller,
                         edge.callee,
-                        writer_buffer_with_lock.writer_buffer(),
+                        &mut write_buffer,
                     );
                 }
             }
 
             (
-                writer_buffer_with_lock,
+                write_buffer,
                 Some(fingerprint),
                 // if the query is a firewall and its value has changed, it
                 // needs to invoke projection queries in the backward direction

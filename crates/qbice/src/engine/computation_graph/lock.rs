@@ -10,7 +10,7 @@ use dashmap::{
     mapref::one::{Ref, RefMut},
 };
 use qbice_stable_hash::Compact128;
-use qbice_storage::intern::Interned;
+use qbice_storage::{intern::Interned, sieve::WriteBuffer};
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
     engine::{
         computation_graph::{
             CallerInformation, QueryKind, QueryWithID,
-            persist::{NodeInfo, Observation, WriterBufferWithLock},
+            persist::{NodeInfo, Observation},
             slow_path::SlowPath,
             tfc_achetype::TransitiveFirewallCallees,
         },
@@ -480,7 +480,7 @@ impl<C: Config> Engine<C> {
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
         existing_forward_edges: Option<&[QueryID]>,
-        continuing_tx: WriterBufferWithLock<C>,
+        continuing_tx: WriteBuffer<C::Database, C::BuildHasher>,
     ) {
         let (notify, query_kind, callee_info, tfc_archetype) = {
             let mut computing = self

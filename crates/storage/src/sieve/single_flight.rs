@@ -34,6 +34,8 @@ impl<K: Eq + Hash> SingleFlight<K> {
                 let notify = Arc::new(Notify::new());
                 let key = vac.insert(notify.clone()).key().clone();
 
+                // vaccant entry is already moved/dropped here
+
                 let result = work();
 
                 self.in_flight.remove(&key);

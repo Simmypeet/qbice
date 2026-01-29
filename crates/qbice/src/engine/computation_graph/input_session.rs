@@ -3,14 +3,16 @@ use std::{collections::VecDeque, sync::Arc};
 use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
 use qbice_stable_hash::{Compact128, StableHash};
+use qbice_storage::sieve::WriteBuffer;
 use tokio::task::JoinSet;
 
 use crate::{
     Engine, Query, TrackedEngine,
     config::Config,
     engine::computation_graph::{
+        ActiveInputSessionGuard,
         caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
-        persist::{NodeInfo, WriterBufferWithLock},
+        persist::NodeInfo,
         slow_path::GuardedTrackedEngine,
     },
     query::QueryID,
@@ -77,14 +79,18 @@ use crate::{
 pub struct InputSession<C: Config> {
     engine: Arc<Engine<C>>,
     dirty_batch: VecDeque<QueryID>,
-    transaction: Option<WriterBufferWithLock<C>>,
+    transaction: Option<WriteBuffer<C::Database, C::BuildHasher>>,
+
+    active_input_session_guard: Option<ActiveInputSessionGuard>,
 }
 
 impl<C: Config> Drop for InputSession<C> {
     // NOTE: the commit needs to always happen, even if the user forgets to call
     // `commit()`. Thus, we perform the commit in the `Drop` impl.
     fn drop(&mut self) {
-        let Some(transaction) = self.transaction.take() else {
+        let (Some(transaction), Some(guard)) =
+            (self.transaction.take(), self.active_input_session_guard.take())
+        else {
             // the transaction has already been committed
             return;
         };
@@ -93,6 +99,7 @@ impl<C: Config> Drop for InputSession<C> {
         let dirty_batch = std::mem::take(&mut self.dirty_batch);
 
         tokio::spawn(async move {
+            let _guard = guard;
             Self::commit_internal(engine, dirty_batch, transaction).await;
         });
     }
@@ -105,8 +112,10 @@ impl<C: Config> InputSession<C> {
         let engine = self.engine.clone();
         let dirty_batch = std::mem::take(&mut self.dirty_batch);
         let transaction = self.transaction.take().unwrap();
+        let guard = self.active_input_session_guard.take().unwrap();
 
         tokio::spawn(async move {
+            let _guard = guard;
             Self::commit_internal(engine, dirty_batch, transaction).await;
         })
         .await
@@ -116,7 +125,7 @@ impl<C: Config> InputSession<C> {
     async fn commit_internal(
         engine: Arc<Engine<C>>,
         dirty_batch: VecDeque<QueryID>,
-        mut transaction: WriterBufferWithLock<C>,
+        mut transaction: WriteBuffer<C::Database, C::BuildHasher>,
     ) {
         engine.computation_graph.reset_statistic();
         engine.clear_dirtied_queries();
@@ -129,7 +138,7 @@ impl<C: Config> InputSession<C> {
             engine.mark_dirty_forward_edge(
                 query_id.caller,
                 query_id.callee,
-                transaction.writer_buffer(),
+                &mut transaction,
             );
         }
 
@@ -202,17 +211,14 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::unused_async)]
     pub async fn input_session(self: &Arc<Self>) -> InputSession<C> {
         // acquire a write lock on the write buffer and increment timestamp
-        let mut write_buffer_with_lock =
-            self.new_write_buffer_with_write_lock();
-
-        unsafe {
-            self.increment_timestamp(&mut write_buffer_with_lock);
-        }
+        let (write_buffer_with_lock, active_input_session_guard) =
+            self.acquire_active_input_session_guard().await;
 
         InputSession {
             dirty_batch: VecDeque::new(),
-            transaction: Some(write_buffer_with_lock),
             engine: self.clone(),
+            transaction: Some(write_buffer_with_lock),
+            active_input_session_guard: Some(active_input_session_guard),
         }
     }
 }
@@ -433,6 +439,7 @@ impl<C: Config> InputSession<C> {
                             )),
                             timestamp,
                         ),
+                        None,
                     );
                     let guarded_tracked_engine =
                         GuardedTrackedEngine::new(tracked_engine);
