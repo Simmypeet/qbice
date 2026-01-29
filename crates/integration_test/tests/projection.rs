@@ -496,8 +496,8 @@ impl<C: Config> Executor<SimpleFirewall, C> for SimpleFirewallExecutor {
         self.0.fetch_add(1, Ordering::SeqCst);
 
         let mut map = HashMap::new();
-        // Query variables 0-3
-        for i in 0..4 {
+
+        for i in 0..100 {
             let val = engine.query(&Variable(i)).await;
             map.insert(i, val);
         }
@@ -625,7 +625,7 @@ async fn diamond_projection_pattern() {
     // Initialize variables
     {
         let mut input_session = engine.input_session().await;
-        for i in 0..4 {
+        for i in 0..100 {
             input_session.set_input(Variable(i), i.cast_signed() + 1).await;
         }
     }
@@ -918,53 +918,55 @@ async fn firewall_same_output_no_propagation() {
 // correctly without race conditions.
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::cast_possible_wrap)]
 async fn concurrent_projection_access() {
-    let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    for _ in 0..100 {
+        let tempdir = tempdir().unwrap();
+        let mut engine = create_test_engine(&tempdir);
 
-    let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
-    let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
+        let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
+        let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
 
-    engine.register_executor(firewall_ex.clone());
-    engine.register_executor(proj1_ex.clone());
+        engine.register_executor(firewall_ex.clone());
+        engine.register_executor(proj1_ex.clone());
 
-    let engine = Arc::new(engine);
+        let engine = Arc::new(engine);
 
-    // Initialize variables
-    {
-        let mut input_session = engine.input_session().await;
-        for i in 0..4 {
-            input_session.set_input(Variable(i), i.cast_signed() + 1).await;
+        // Initialize variables
+        {
+            let mut input_session = engine.input_session().await;
+            for i in 0..100 {
+                input_session.set_input(Variable(i), i.cast_signed() + 1).await;
+            }
         }
+
+        // Spawn concurrent queries to all 100 projections
+        let mut handles = Vec::new();
+        for i in 0..100 {
+            let engine = engine.clone();
+            handles.push(tokio::spawn(async move {
+                let tracked = engine.tracked().await;
+                tracked.query(&ProjectionLevel1(i)).await
+            }));
+        }
+
+        // Collect results
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await.unwrap());
+        }
+
+        // Verify results: (i+1) * 2 for each
+        for (i, result) in results.iter().copied().enumerate() {
+            assert_eq!(result, (i as i64 + 1) * 2);
+        }
+
+        // Firewall should only execute once despite concurrent access
+        assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 1);
+
+        // Each projection executed once
+        assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 100);
     }
-
-    // Spawn concurrent queries to all 4 projections
-    let mut handles = Vec::new();
-    for i in 0..4 {
-        let engine = engine.clone();
-        handles.push(tokio::spawn(async move {
-            let tracked = engine.tracked().await;
-            tracked.query(&ProjectionLevel1(i)).await
-        }));
-    }
-
-    // Collect results
-    let mut results = Vec::new();
-    for handle in handles {
-        results.push(handle.await.unwrap());
-    }
-
-    // Verify results: (i+1) * 2 for each
-    assert_eq!(results[0], 2); // 1 * 2
-    assert_eq!(results[1], 4); // 2 * 2
-    assert_eq!(results[2], 6); // 3 * 2
-    assert_eq!(results[3], 8); // 4 * 2
-
-    // Firewall should only execute once despite concurrent access
-    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 1);
-
-    // Each projection executed once
-    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 4);
 }
 
 // ============================================================================

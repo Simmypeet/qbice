@@ -28,7 +28,7 @@ tokio.workspace = true
 dashmap.workspace = true
 static_assertions.workspace = true
 thiserror.workspace = true
-parking_lot.workspace = true
+parking_lot = { workspace = true, features = ["send_guard"] }
 fxhash.workspace = true
 rayon.workspace = true
 futures.workspace = true

@@ -397,7 +397,7 @@ impl<C: Config> Engine<C> {
     pub async fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
         TrackedEngine {
             caller: CallerInformation::new(CallerKind::User, unsafe {
-                self.get_current_timestamp_from_engine().await
+                self.get_current_timestamp_from_engine()
             }),
             cache: Arc::new(DashSet::new()),
             engine: self,

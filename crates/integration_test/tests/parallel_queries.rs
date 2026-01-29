@@ -10,7 +10,6 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 use qbice::{
@@ -60,9 +59,6 @@ impl<C: Config> Executor<CollectVariables, C> for CollectVariablesExecutor {
         let mut result = HashMap::new();
 
         for &var in query.vars.iter() {
-            // simulate some async work
-            tokio::time::sleep(Duration::from_millis(16)).await;
-
             let value = engine.query(&var).await;
 
             result.insert(var, value);
@@ -112,10 +108,10 @@ impl<C: Config> Executor<ReadVariableMap, C> for ReadVariableMapExecutor {
         // track usage
         self.0.fetch_add(1, Ordering::Relaxed);
 
+        let variables = (0..100).map(Variable).collect::<Vec<_>>();
+
         let var_map = engine
-            .query(&CollectVariables {
-                vars: Arc::new([Variable(0), Variable(1), Variable(2)]),
-            })
+            .query(&CollectVariables { vars: Arc::from(variables) })
             .await;
 
         *var_map.get(&query.0).unwrap()
@@ -125,43 +121,48 @@ impl<C: Config> Executor<ReadVariableMap, C> for ReadVariableMapExecutor {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::cast_possible_wrap)]
 async fn parallel_read_variable_map() {
-    let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    for _ in 0..1_000 {
+        let tempdir = tempdir().unwrap();
+        let mut engine = create_test_engine(&tempdir);
 
-    let collect_ex = Arc::new(CollectVariablesExecutor::default());
-    let read_map_ex = Arc::new(ReadVariableMapExecutor::default());
+        let collect_ex = Arc::new(CollectVariablesExecutor::default());
+        let read_map_ex = Arc::new(ReadVariableMapExecutor::default());
 
-    engine.register_executor(collect_ex.clone());
-    engine.register_executor(read_map_ex.clone());
+        engine.register_executor(collect_ex.clone());
+        engine.register_executor(read_map_ex.clone());
 
-    let engine = Arc::new(engine);
+        let engine = Arc::new(engine);
 
-    {
-        let mut input_session = engine.input_session().await;
+        {
+            let mut input_session = engine.input_session().await;
 
-        input_session.set_input(Variable(0), 10).await;
-        input_session.set_input(Variable(1), 20).await;
-        input_session.set_input(Variable(2), 30).await;
-    }
+            for i in 0..100 {
+                input_session.set_input(Variable(i), (i as i64 + 1) * 10).await;
+            }
+        }
 
-    let tracked_engine = engine.tracked().await;
+        let tracked_engine = engine.tracked().await;
 
-    let handles: Vec<_> = (0..3)
-        .map(|i| {
-            let tracked_engine = tracked_engine.clone();
-            tokio::spawn(async move {
-                tracked_engine.query(&ReadVariableMap::new(Variable(i))).await
+        let handles: Vec<_> = (0..100)
+            .map(|i| {
+                let tracked_engine = tracked_engine.clone();
+                tokio::spawn(async move {
+                    tracked_engine
+                        .query(&ReadVariableMap::new(Variable(i)))
+                        .await
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    for (i, handle) in handles.into_iter().enumerate() {
-        let result = handle.await.unwrap();
-        assert_eq!(result, (i as i64 + 1) * 10);
+        for (i, handle) in handles.into_iter().enumerate() {
+            let result = handle.await.unwrap();
+            assert_eq!(result, (i as i64 + 1) * 10);
+        }
+
+        // CollectVariablesExecutor should have been called only once
+        assert_eq!(collect_ex.0.load(Ordering::Relaxed), 1);
+
+        // ReadVariableMapExecutor should have been called three times
+        assert_eq!(read_map_ex.0.load(Ordering::Relaxed), 100);
     }
-
-    // CollectVariablesExecutor should have been called only once
-    assert_eq!(collect_ex.0.load(Ordering::Relaxed), 1);
-    // ReadVariableMapExecutor should have been called three times
-    assert_eq!(read_map_ex.0.load(Ordering::Relaxed), 3);
 }

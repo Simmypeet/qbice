@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+use parking_lot::{RawRwLock, lock_api::RawRwLock as _};
 use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{
@@ -29,99 +30,41 @@ use crate::{
 };
 
 pub struct PhaseMutex {
-    /// The current phase of the mutex.
-    ///
-    /// [1 bit: InputSessionActive | 31 bits: WaitingInputSessions | 32 bits:
-    /// ActiveComputations]
-    state: AtomicU64,
-
-    notify: Arc<tokio::sync::Notify>,
+    raw_rwlock: RawRwLock,
 }
 
-const INPUT_SESSION_ACTIVE_BIT: u64 = 1 << (u64::BITS - 1);
-const ACTIVE_COMPUTATION_BITS: u64 = (u64::BITS as u64) / 2;
-
-const ACTIVE_COMPUTATION_MASK: u64 = (1 << ACTIVE_COMPUTATION_BITS) - 1;
-const INPUT_SESSION_WAITING_MASK: u64 =
-    !ACTIVE_COMPUTATION_MASK & !INPUT_SESSION_ACTIVE_BIT;
-const INPUT_SESSION_WAITING_ONE: u64 = 1 << ACTIVE_COMPUTATION_BITS;
-
 impl PhaseMutex {
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
-    pub async fn active_computation_phase_guard(
+    pub fn owned_active_computation_phase_guard(
         self: &Arc<Self>,
     ) -> ActiveComputationPhaseGuard {
-        loop {
-            let state = self.state.load(Ordering::SeqCst);
-
-            if (state & INPUT_SESSION_ACTIVE_BIT != 0)
-                || (state & INPUT_SESSION_WAITING_MASK != 0)
-            {
-                self.wait_for_state_change().await;
-                continue;
-            }
-
-            // Try to acquire Read lock
-            // We only succeed if state hasn't changed (no new writers arrived)
-            if self
-                .state
-                .compare_exchange_weak(
-                    state,
-                    state + 1, // Increment reader count
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                return ActiveComputationPhaseGuard {
-                    phase_mutex: self.clone(),
-                };
-            }
-        }
+        self.raw_rwlock.lock_shared();
+        ActiveComputationPhaseGuard { phase_mutex: self.clone() }
     }
 
-    pub async fn input_session_pphase_guard(
+    pub fn active_computation_phase_guard(
+        &self,
+    ) -> LocalActiveComputationPhaseGuard<'_> {
+        self.raw_rwlock.lock_shared();
+        LocalActiveComputationPhaseGuard { phase_mutex: self }
+    }
+
+    pub fn owned_input_session_pphase_guard(
         self: &Arc<Self>,
     ) -> InputSessionPhaseGuard {
-        // Indicate that an input session is waiting
-        self.state.fetch_add(INPUT_SESSION_WAITING_ONE, Ordering::SeqCst);
-
-        loop {
-            let state = self.state.load(Ordering::SeqCst);
-
-            let active_input_session = state & INPUT_SESSION_ACTIVE_BIT != 0;
-            let active_computations = state & ACTIVE_COMPUTATION_MASK != 0;
-
-            if active_input_session || active_computations {
-                self.wait_for_state_change().await;
-                continue;
-            }
-
-            let next_state =
-                (state - INPUT_SESSION_WAITING_ONE) | INPUT_SESSION_ACTIVE_BIT;
-
-            // Try to acquire Write lock
-            // We only succeed if state hasn't changed (no new readers/writers
-            // arrived)
-            if self
-                .state
-                .compare_exchange_weak(
-                    state,
-                    next_state,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                return InputSessionPhaseGuard { phase_mutex: self.clone() };
-            }
-        }
+        self.raw_rwlock.lock_exclusive();
+        InputSessionPhaseGuard { phase_mutex: self.clone() }
     }
+}
 
-    async fn wait_for_state_change(&self) {
-        let notified = self.notify.notified();
-        notified.await;
+pub struct LocalActiveComputationPhaseGuard<'a> {
+    phase_mutex: &'a PhaseMutex,
+}
+
+impl Drop for LocalActiveComputationPhaseGuard<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.phase_mutex.raw_rwlock.unlock_shared();
+        }
     }
 }
 
@@ -131,11 +74,8 @@ pub struct ActiveComputationPhaseGuard {
 
 impl Drop for ActiveComputationPhaseGuard {
     fn drop(&mut self) {
-        let prev_state = self.phase_mutex.state.fetch_sub(1, Ordering::SeqCst);
-
-        // If there are no more active computations, notify waiters
-        if (prev_state & ACTIVE_COMPUTATION_MASK) == 1 {
-            self.phase_mutex.notify.notify_waiters();
+        unsafe {
+            self.phase_mutex.raw_rwlock.unlock_shared();
         }
     }
 }
@@ -146,11 +86,9 @@ pub struct InputSessionPhaseGuard {
 
 impl Drop for InputSessionPhaseGuard {
     fn drop(&mut self) {
-        self.phase_mutex
-            .state
-            .fetch_and(!INPUT_SESSION_ACTIVE_BIT, Ordering::SeqCst);
-
-        self.phase_mutex.notify.notify_waiters();
+        unsafe {
+            self.phase_mutex.raw_rwlock.unlock_exclusive();
+        }
     }
 }
 
@@ -218,10 +156,7 @@ impl<C: Config> Sync<C> {
 
         Self {
             timestamp: AtomicU64::new(timestamp.0),
-            phase_mutex: Arc::new(PhaseMutex {
-                state: AtomicU64::new(0),
-                notify: Arc::new(tokio::sync::Notify::new()),
-            }),
+            phase_mutex: Arc::new(PhaseMutex { raw_rwlock: RawRwLock::INIT }),
             background: background_writer,
         }
     }
@@ -239,8 +174,7 @@ impl<C: Config> Engine<C> {
                 .persist
                 .sync
                 .phase_mutex
-                .active_computation_phase_guard()
-                .await;
+                .owned_active_computation_phase_guard();
 
             if self
                 .computation_graph
@@ -265,7 +199,7 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    pub(in crate::engine::computation_graph) async fn new_write_buffer_with_write_lock(
+    pub(in crate::engine::computation_graph) fn new_write_buffer_with_write_lock(
         &self,
     ) -> WriterBufferWithLock<C> {
         let writer_buffer =
@@ -276,8 +210,7 @@ impl<C: Config> Engine<C> {
                 .persist
                 .sync
                 .phase_mutex
-                .input_session_pphase_guard()
-                .await,
+                .owned_input_session_pphase_guard(),
         );
 
         WriterBufferWithLock { guard, writer_buffer }
@@ -306,7 +239,7 @@ impl<C: Config> Engine<C> {
         )
     }
 
-    pub(in crate::engine::computation_graph) async unsafe fn get_current_timestamp_from_engine(
+    pub(in crate::engine::computation_graph) unsafe fn get_current_timestamp_from_engine(
         &self,
     ) -> Timestamp {
         let _active_computation_phase_guard = self
@@ -314,8 +247,7 @@ impl<C: Config> Engine<C> {
             .persist
             .sync
             .phase_mutex
-            .active_computation_phase_guard()
-            .await;
+            .owned_active_computation_phase_guard();
 
         Timestamp(
             self.computation_graph
@@ -356,6 +288,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Arc<[QueryID]>> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist
@@ -383,6 +322,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist
@@ -410,6 +356,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<NodeInfo> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist
@@ -437,6 +390,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<QueryKind> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist
@@ -464,6 +424,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Timestamp> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist
@@ -491,6 +458,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> BackwardEdge<C> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist
@@ -520,6 +494,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Q::Value> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist
@@ -547,6 +528,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Timestamp> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist
@@ -576,6 +564,13 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) -> Option<Q> {
         {
+            let _active_computation_phase_guard = self
+                .computation_graph
+                .persist
+                .sync
+                .phase_mutex
+                .active_computation_phase_guard();
+
             if self
                 .computation_graph
                 .persist

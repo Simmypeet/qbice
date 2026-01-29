@@ -199,10 +199,11 @@ impl<C: Config> Engine<C> {
     /// create a new session while another is active will result in a
     /// deadlock.
     #[must_use]
+    #[allow(clippy::unused_async)]
     pub async fn input_session(self: &Arc<Self>) -> InputSession<C> {
         // acquire a write lock on the write buffer and increment timestamp
         let mut write_buffer_with_lock =
-            self.new_write_buffer_with_write_lock().await;
+            self.new_write_buffer_with_write_lock();
 
         unsafe {
             self.increment_timestamp(&mut write_buffer_with_lock);
