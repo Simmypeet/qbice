@@ -4,7 +4,7 @@
 //! databases in a backend-agnostic way. It provides abstractions for logical
 //! data structures, column families, transactions, and async access patterns.
 
-use std::hash::Hash;
+use std::{fmt::Debug, hash::Hash};
 
 use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
@@ -273,6 +273,7 @@ pub trait WideColumn: Identifiable + Send + Sync + 'static {
     /// The type of the discriminant used to distinguish different values.
     type Discriminant: Encode
         + Decode
+        + Debug
         + Hash
         + Eq
         + Clone
@@ -281,7 +282,15 @@ pub trait WideColumn: Identifiable + Send + Sync + 'static {
         + Sync;
 
     /// The type of keys used in this wide column.
-    type Key: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;
+    type Key: Encode
+        + Decode
+        + Debug
+        + Hash
+        + Eq
+        + Clone
+        + 'static
+        + Send
+        + Sync;
 
     /// Specifies how the discriminant is encoded in the key.
     fn discriminant_encoding() -> DiscriminantEncoding;
@@ -397,7 +406,7 @@ pub trait WideColumnValue<C: WideColumn>:
 /// ```
 pub trait KeyOfSetColumn: Identifiable + Send + Sync + 'static {
     /// The type of keys used in this key-of-set column.
-    type Key: Encode + Hash + Eq + Clone + 'static + Send + Sync;
+    type Key: Debug + Encode + Hash + Eq + Clone + 'static + Send + Sync;
 
     /// The type of elements stored in the sets associated with each key.
     type Element: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;

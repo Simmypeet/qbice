@@ -72,20 +72,20 @@ use core::fmt;
 use std::{
     any::{Any, TypeId},
     borrow::Borrow,
-    collections::HashMap,
+    collections::{HashMap, hash_map},
     fmt::Debug,
     hash::{BuildHasher, BuildHasherDefault, Hash},
     marker::PhantomData,
     option::Option,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
 use dashmap::{DashMap, DashSet};
 use enum_as_inner::EnumAsInner;
-use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
+use parking_lot::RwLockReadGuard;
 
 use crate::{
     kv_database::{KeyOfSetColumn, KvDatabase, WideColumn, WideColumnValue},
@@ -102,7 +102,7 @@ pub use write_behind::{BackgroundWriter, WriteBuffer};
 /// storage in the SIEVE cache.
 pub trait BackingStorage {
     /// The type of keys used in the backing storage.
-    type Key: Eq + Hash + Clone;
+    type Key: Debug + Eq + Hash + Clone;
 
     /// The type of values stored in the backing storage.
     type Value;
@@ -231,6 +231,179 @@ impl<T: Eq + Hash, S: BuildHasher + Clone> ConcurrentSet for DashSet<T, S> {
     }
 }
 
+struct StorageEntry<V: ?Sized> {
+    visited: AtomicBool,
+    pending_writes: AtomicUsize,
+    value: V,
+}
+
+struct Policy<K> {
+    keys: Vec<Option<K>>,
+    hand: usize,
+    capacity: usize,
+}
+
+impl<K> Policy<K> {
+    /// Inserts a key into the policy structure. Returns an evicted key if
+    /// necessary.
+    fn insert<V, S: BuildHasher>(
+        &mut self,
+        key: K,
+        sharded_storages: &Sharded<HashMap<K, StorageEntry<V>, S>>,
+        shard_index: usize,
+    ) where
+        K: Debug + Eq + Hash,
+    {
+        const MAX_HAND_SWEEPS: usize = 64;
+
+        // fast path: still have capacity
+        if self.keys.len() < self.capacity {
+            self.keys.push(Some(key));
+            return;
+        }
+
+        let mut read_lock = sharded_storages.read_shard(shard_index);
+
+        // normal path: evict using SIEVE
+        for _ in 0..MAX_HAND_SWEEPS {
+            let index = self.hand % self.capacity;
+            self.hand = (self.hand + 1) % self.capacity;
+
+            if let Some(existing_key) = &self.keys[index] {
+                let (visited, pending_writes) = {
+                    let entry = read_lock
+                        .get(existing_key)
+                        .expect("should exist in storage");
+
+                    (
+                        entry.visited.swap(false, Ordering::SeqCst),
+                        entry.pending_writes.load(Ordering::SeqCst),
+                    )
+                };
+
+                // if is visited or has pending writes, give a second chance
+                if visited || pending_writes != 0 {
+                    continue;
+                }
+
+                let Some(new_read_lock) = Self::try_evict(
+                    read_lock,
+                    existing_key,
+                    sharded_storages,
+                    shard_index,
+                ) else {
+                    // successfully evicted
+                    self.keys[index].replace(key);
+
+                    return;
+                };
+
+                read_lock = new_read_lock;
+            } else {
+                // has no key, can use this slot
+                self.keys[index] = Some(key);
+
+                return;
+            }
+        }
+
+        // reached max sweeps, evict at the nearest available slot that has no
+        // pending writes
+        {
+            let max_scan = self.keys.len();
+            let mut scanned = 0;
+
+            // scan until we find a slot to evict
+            while scanned < max_scan {
+                let index = self.hand % self.capacity;
+                self.hand = (self.hand + 1) % self.capacity;
+                scanned += 1;
+
+                if let Some(existing_key) = &self.keys[index] {
+                    let pending_writes = {
+                        let read_lock =
+                            sharded_storages.read_shard(shard_index);
+
+                        let entry = read_lock
+                            .get(existing_key)
+                            .expect("should exist in storage");
+
+                        entry.pending_writes.load(Ordering::SeqCst)
+                    };
+
+                    if pending_writes != 0 {
+                        continue;
+                    }
+
+                    let Some(new_read_lock) = Self::try_evict(
+                        read_lock,
+                        existing_key,
+                        sharded_storages,
+                        shard_index,
+                    ) else {
+                        // successfully evicted
+                        self.keys[index].replace(key);
+
+                        return;
+                    };
+
+                    read_lock = new_read_lock;
+                } else {
+                    // has no key, can use this slot
+                    self.keys[index] = Some(key);
+
+                    return;
+                }
+            }
+        }
+
+        // last resort: no evictable entry found, expand capacity
+        self.keys.push(Some(key));
+        self.capacity += 1;
+        self.hand = 0;
+    }
+
+    fn try_evict<'v, V, S: BuildHasher>(
+        read_guard: RwLockReadGuard<'v, HashMap<K, StorageEntry<V>, S>>,
+        key: &K,
+        sharded_storages: &'v Sharded<HashMap<K, StorageEntry<V>, S>>,
+        shard_index: usize,
+    ) -> Option<RwLockReadGuard<'v, HashMap<K, StorageEntry<V>, S>>>
+    where
+        K: Debug + Eq + Hash,
+    {
+        drop(read_guard);
+
+        let mut write_lock = sharded_storages.write_shard(shard_index);
+
+        let Some(entry) = write_lock.get(key) else {
+            panic!("key {key:?} should exist in storage");
+        };
+
+        // double check no pending writes
+        if entry.pending_writes.load(Ordering::SeqCst) != 0 {
+            // while we're about to obtain write lock and evict, pending writes
+            // appeared; cannot evict
+            return Some({
+                drop(write_lock);
+
+                sharded_storages.read_shard(shard_index)
+            });
+        }
+
+        // now we can safely evict without worrying about pending writes
+        let old_value = write_lock.remove(key);
+
+        // we drop the shard lock first since dropping the entry might take long
+        // time.
+        drop(write_lock);
+
+        assert!(old_value.is_some(), "key {key:?} should exist in storage");
+
+        None
+    }
+}
+
 /// A sharded cache using the SIEVE eviction algorithm with lazy loading.
 ///
 /// `Sieve` provides a high-performance, thread-safe cache that transparently
@@ -305,7 +478,9 @@ pub struct Sieve<
     DB,
     S = BuildHasherDefault<fxhash::FxHasher>,
 > {
-    shards: Sharded<SieveShard<B, S>>,
+    storages: Sharded<HashMap<B::Key, StorageEntry<B::Value>, S>>,
+    policies: Sharded<Policy<B::Key>>,
+
     hasher_builder: S,
     single_flight: SingleFlight<B::SingleFlightKey>,
 
@@ -320,11 +495,9 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut map = f.debug_map();
 
-        for shard in self.shards.iter_read_shards() {
-            for (key, &index) in &shard.map {
-                let value = &shard.nodes[index].as_ref().unwrap().value;
-
-                map.entry(key, value);
+        for shard in self.storages.iter_read_shards() {
+            for (key, value) in shard.iter() {
+                map.entry(key, &value.value);
             }
         }
 
@@ -387,8 +560,13 @@ impl<B: BackingStorage, DB, S: Clone> Sieve<B, DB, S> {
         let per_shard = total_capacity.div_ceil(shard_amount);
 
         Self {
-            shards: Sharded::new(shard_amount, |_| {
-                SieveShard::new(per_shard, hasher_builder.clone())
+            storages: Sharded::new(shard_amount, |_| {
+                HashMap::with_hasher(hasher_builder.clone())
+            }),
+            policies: Sharded::new(shard_amount, |_| Policy {
+                keys: Vec::new(),
+                hand: 0,
+                capacity: per_shard,
             }),
             single_flight: SingleFlight::new(shard_amount),
             hasher_builder,
@@ -401,14 +579,11 @@ impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
     fn decrement_pending_write(&self, key: &B::Key) {
         let shard_index = self.shard_index(key);
 
-        let read = self.shards.read_shard(shard_index);
+        let read = self.storages.read_shard(shard_index);
 
-        let Retrieve::Hit(node) = read.get(key, false) else {
-            panic!(
-                "should have the key in the cache when decrementing pending \
-                 writes"
-            );
-        };
+        let node = read
+            .get(key)
+            .unwrap_or_else(|| panic!("key {key:?} should exist in storage"));
 
         node.pending_writes.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
@@ -416,7 +591,7 @@ impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
 
 impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
     fn shard_index(&self, key: &B::Key) -> usize {
-        self.shards.shard_index(self.hasher_builder.hash_one(key))
+        self.storages.shard_index(self.hasher_builder.hash_one(key))
     }
 }
 
@@ -493,26 +668,27 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
     pub async fn get_normal<W: WideColumnValue<C> + Send + Sync + 'static>(
         &self,
         key: C::Key,
-    ) -> Option<MappedRwLockReadGuard<'_, W>> {
+    ) -> Option<W> {
         let combined_key = (key, W::discriminant());
         let shard_index = self.shard_index(&combined_key);
 
         loop {
-            let read_lock = self.shards.read_shard(shard_index);
-
-            if let Ok(guard) = RwLockReadGuard::try_map(read_lock, |x| match x
-                .get(&combined_key, true)
+            // first try read lock
             {
-                Retrieve::Hit(entry) => Some(entry),
-                Retrieve::Miss => None,
-            }) {
-                return MappedRwLockReadGuard::try_map(guard, |entry| {
-                    entry.value.as_ref().map(|node| {
-                        let any_ref: &dyn Any = node.as_ref();
-                        any_ref.downcast_ref::<W>().unwrap()
-                    })
-                })
-                .ok();
+                let read_lock = self.storages.read_shard(shard_index);
+
+                if let Some(value) = read_lock.get(&combined_key) {
+                    value
+                        .visited
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    return value.value.as_ref().map(|x| {
+                        x.as_ref()
+                            .downcast_ref::<W>()
+                            .expect("stored type should match requested type")
+                            .clone()
+                    });
+                }
             }
 
             self.single_flight
@@ -523,33 +699,39 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                             .backing_db
                             .get_wide_column::<C, W>(&combined_key.0);
 
-                        let mut write_lock =
-                            self.shards.write_shard(shard_index);
-
-                        if let Retrieve::Hit(_) =
-                            write_lock.get(&combined_key, false)
+                        // insert into cache
                         {
-                            // another thread already filled the cache while we
-                            // were acquiring the
-                            // write lock, retry read
-                            return;
+                            let mut storage_lock =
+                                self.storages.write_shard(shard_index);
+
+                            let hash_map::Entry::Vacant(entry) =
+                                storage_lock.entry(combined_key.clone())
+                            else {
+                                // another thread already filled the cache while
+                                // we were acquiring the write lock, retry read
+                                return;
+                            };
+
+                            entry.insert(StorageEntry {
+                                value: db_value.map(|x| {
+                                    Box::new(x) as Box<dyn Any + Send + Sync>
+                                }),
+                                visited: AtomicBool::new(true),
+                                pending_writes: AtomicUsize::new(0),
+                            });
                         }
 
-                        let old_info = write_lock.insert(
-                            combined_key.clone(),
-                            db_value.map(|x| {
-                                Box::new(x) as Box<dyn Any + Send + Sync>
-                            }),
-                            true,
-                            0,
-                        );
+                        // update policy
+                        {
+                            let mut policy_lock =
+                                self.policies.write_shard(shard_index);
 
-                        drop(write_lock);
-
-                        // NOTE: sometimes the value maybe very large, so
-                        // dropping them outside the lock scope to reduce the
-                        // time we hold the lock
-                        drop(old_info);
+                            policy_lock.insert(
+                                combined_key.clone(),
+                                &self.storages,
+                                shard_index,
+                            );
+                        };
                     },
                 )
                 .await;
@@ -632,14 +814,13 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
         );
         let boxed = value.map(|v| Box::new(v) as Box<dyn Any + Send + Sync>);
 
-        let mut write_lock = self.shards.write_shard(shard_index);
+        let mut write_lock = self.storages.write_shard(shard_index);
 
-        if let RetrieveMut::Hit(node) = write_lock.get_mut(&combined_key, false)
-        {
-            let old_node = std::mem::replace(&mut node.value, boxed);
+        if let Some(entry) = write_lock.get_mut(&combined_key) {
+            let old_node = std::mem::replace(&mut entry.value, boxed);
 
             if updated {
-                *node.pending_writes.get_mut() += 1;
+                *entry.pending_writes.get_mut() += 1;
             }
 
             drop(write_lock);
@@ -648,17 +829,20 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
             // outside the lock scope to reduce the time we hold the lock
             drop(old_node);
         } else {
-            let old_info = write_lock.insert(
-                combined_key,
-                boxed,
-                false,
-                usize::from(updated),
-            );
+            let old_value =
+                write_lock.insert(combined_key.clone(), StorageEntry {
+                    value: boxed,
+                    visited: AtomicBool::new(true),
+                    pending_writes: AtomicUsize::new(usize::from(updated)),
+                });
 
             drop(write_lock);
-            // NOTE: sometimes the value maybe very large, so dropping them
-            // outside the lock scope to reduce the time we hold the lock
-            drop(old_info);
+            drop(old_value);
+
+            let mut policy_lock = self.policies.write_shard(shard_index);
+
+            // update policy
+            policy_lock.insert(combined_key, &self.storages, shard_index);
         }
     }
 }
@@ -697,6 +881,7 @@ pub trait KeyOfSetContainer: KeyOfSetColumn {
     /// The in-memory container type used to represent the set.
     type Container: FromIterator<Self::Element>
         + ConcurrentSet<Element = Self::Element>
+        + Clone
         + Send
         + Sync
         + 'static;
@@ -766,21 +951,18 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
     /// println!("Total tags: {}", tags.len());
     /// ```
     #[allow(clippy::unused_async)]
-    pub async fn get_set(
-        &self,
-        key: &C::Key,
-    ) -> MappedRwLockReadGuard<'_, C::Container> {
+    pub async fn get_set(&self, key: &C::Key) -> C::Container {
         let shard_index = self.shard_index(key);
         loop {
-            let read_lock = self.shards.read_shard(shard_index);
-
-            if let Ok(guard) = RwLockReadGuard::try_map(read_lock, |x| match x
-                .get(key, true)
+            // first try read lock
             {
-                Retrieve::Hit(entry) => entry.value.as_full(),
-                Retrieve::Miss => None,
-            }) {
-                return guard;
+                let read_lock = self.storages.read_shard(shard_index);
+
+                if let Some(guard) =
+                    read_lock.get(key).and_then(|x| x.value.as_full())
+                {
+                    return guard.clone();
+                }
             }
 
             self.single_flight
@@ -790,58 +972,81 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                         .scan_members::<C>(key)
                         .collect::<C::Container>();
 
-                    let mut write_lock = self.shards.write_shard(shard_index);
+                    {
+                        let mut write_lock =
+                            self.storages.write_shard(shard_index);
 
-                    // the deltas that have to be applied to the full set
-                    let entry = write_lock.get_mut(key, false);
+                        // the deltas that have to be applied to the full set
+                        let entry = write_lock.entry(key.clone());
 
-                    let partial = if let RetrieveMut::Hit(en) = &entry {
-                        match &en.value {
-                            KeyOfSetEntry::Full(_) => {
-                                // another thread already filled the cache while
-                                // we were
-                                // acquiring the write lock, retry read
-                                return;
-                            }
-
-                            KeyOfSetEntry::Partial(hash_map) => Some(hash_map),
-                        }
-                    } else {
-                        None
-                    };
-
-                    if let Some(partial_ops) = partial {
-                        for entry in partial_ops {
-                            match entry.value() {
-                                Operation::Insert => {
-                                    db_value
-                                        .insert_element(entry.key().clone());
+                        let partial = if let hash_map::Entry::Occupied(en) =
+                            &entry
+                        {
+                            match &en.get().value {
+                                KeyOfSetEntry::Full(_) => {
+                                    // another thread already filled the cache
+                                    // while
+                                    // we were acquiring the write lock, retry
+                                    // read
+                                    return;
                                 }
-                                Operation::Delete => {
-                                    db_value.remove_element(entry.key());
+
+                                KeyOfSetEntry::Partial(hash_map) => {
+                                    Some(hash_map)
                                 }
                             }
+                        } else {
+                            None
+                        };
+
+                        if let Some(partial_ops) = partial {
+                            for entry in partial_ops {
+                                match entry.value() {
+                                    Operation::Insert => {
+                                        db_value.insert_element(
+                                            entry.key().clone(),
+                                        );
+                                    }
+                                    Operation::Delete => {
+                                        db_value.remove_element(entry.key());
+                                    }
+                                }
+                            }
                         }
-                    }
 
-                    match entry {
-                        RetrieveMut::Hit(node) => {
-                            node.value = KeyOfSetEntry::Full(db_value);
-                        }
-                        RetrieveMut::Miss => {
-                            let old_result = write_lock.insert(
-                                key.clone(),
-                                KeyOfSetEntry::Full(db_value),
-                                true,
-                                0,
-                            );
+                        match entry {
+                            hash_map::Entry::Occupied(mut node) => {
+                                let old_value = std::mem::replace(
+                                    &mut node.get_mut().value,
+                                    KeyOfSetEntry::Full(db_value),
+                                );
 
-                            drop(write_lock);
+                                drop(write_lock);
 
-                            // NOTE: sometimes the value maybe very large, so
-                            // dropping them outside the lock scope to reduce
-                            // the time we hold the lock
-                            drop(old_result);
+                                // NOTE: sometimes the value maybe very large,
+                                // so dropping them outside the lock scope to
+                                // reduce the time we hold the lock
+                                drop(old_value);
+                            }
+
+                            hash_map::Entry::Vacant(entry) => {
+                                entry.insert(StorageEntry {
+                                    value: KeyOfSetEntry::Full(db_value),
+                                    visited: AtomicBool::new(true),
+                                    pending_writes: AtomicUsize::new(0),
+                                });
+
+                                drop(write_lock);
+
+                                let mut policy_lock =
+                                    self.policies.write_shard(shard_index);
+
+                                policy_lock.insert(
+                                    key.clone(),
+                                    &self.storages,
+                                    shard_index,
+                                );
+                            }
                         }
                     }
                 })
@@ -916,10 +1121,10 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
             self,
         );
 
-        let read_shard = self.shards.read_shard(shard_index);
+        {
+            let read_shard = self.storages.read_shard(shard_index);
 
-        match read_shard.get(key, false) {
-            Retrieve::Hit(entry) => {
+            if let Some(entry) = read_shard.get(key) {
                 match &entry.value {
                     KeyOfSetEntry::Full(container) => {
                         container.insert_element(element);
@@ -937,19 +1142,15 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
 
                 return;
             }
-
-            Retrieve::Miss => {
-                // has to acquire write lock
-            }
         }
 
-        // drop read lock before acquiring write lock
-        drop(read_shard);
+        // has to acquire write lock
 
-        let mut write_lock = self.shards.write_shard(shard_index);
+        let mut write_lock = self.storages.write_shard(shard_index);
 
-        match write_lock.get_mut(key, false) { RetrieveMut::Hit(entry) => {
-                match &mut entry.value {
+        match write_lock.entry(key.clone()) {
+            hash_map::Entry::Occupied(mut entry) => {
+                match &mut entry.get_mut().value {
                     KeyOfSetEntry::Full(container) => {
                         container.insert_element(element);
                     }
@@ -959,28 +1160,27 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                 }
 
                 if updated {
-                    entry
-                        .pending_writes
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    *entry.get_mut().pending_writes.get_mut() += 1;
                 }
             }
 
-            RetrieveMut::Miss => {
+            hash_map::Entry::Vacant(entry) => {
                 let partial = DashMap::new();
                 partial.insert(element, Operation::Insert);
 
-                let old_info = write_lock.insert(
-                    key.clone(),
-                    KeyOfSetEntry::Partial(partial),
-                    false,
-                    usize::from(updated),
-                );
+                entry.insert(StorageEntry {
+                    value: KeyOfSetEntry::Partial(partial),
+                    visited: AtomicBool::new(false),
+                    pending_writes: AtomicUsize::new(usize::from(updated)),
+                });
 
                 drop(write_lock);
 
-                // NOTE: sometimes the value maybe very large, so dropping them
-                // outside the lock scope to reduce the time we hold the lock
-                drop(old_info);
+                let mut policy_lock = self.policies.write_shard(shard_index);
+
+                policy_lock.insert(key.clone(), &self.storages, shard_index);
+
+                drop(policy_lock);
             }
         }
     }
@@ -1050,8 +1250,6 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
     ) {
         let shard_index = self.shard_index(key);
 
-        let mut write_lock = self.shards.write_shard(shard_index);
-
         let updated = write_buffer.key_of_set_writes.put(
             key.clone(),
             element.clone(),
@@ -1059,9 +1257,11 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
             self,
         );
 
-        match write_lock.get_mut(key, false) {
-            RetrieveMut::Hit(entry) => {
-                match &mut entry.value {
+        {
+            let read_shard = self.storages.read_shard(shard_index);
+
+            if let Some(entry) = read_shard.get(key) {
+                match &entry.value {
                     KeyOfSetEntry::Full(container) => {
                         container.remove_element(element);
                     }
@@ -1075,187 +1275,46 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                         .pending_writes
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
+
+                return;
+            }
+        }
+
+        // has to acquire write lock
+        let mut write_lock = self.storages.write_shard(shard_index);
+
+        match write_lock.entry(key.clone()) {
+            hash_map::Entry::Occupied(mut entry) => {
+                match &mut entry.get_mut().value {
+                    KeyOfSetEntry::Full(container) => {
+                        container.remove_element(element);
+                    }
+                    KeyOfSetEntry::Partial(partial) => {
+                        partial.insert(element.clone(), Operation::Delete);
+                    }
+                }
+
+                if updated {
+                    *entry.get_mut().pending_writes.get_mut() += 1;
+                }
             }
 
-            RetrieveMut::Miss => {
+            hash_map::Entry::Vacant(entry) => {
                 let partial = DashMap::new();
                 partial.insert(element.clone(), Operation::Delete);
 
-                let old_info = write_lock.insert(
-                    key.clone(),
-                    KeyOfSetEntry::Partial(partial),
-                    false,
-                    usize::from(updated),
-                );
+                entry.insert(StorageEntry {
+                    value: KeyOfSetEntry::Partial(partial),
+                    visited: AtomicBool::new(false),
+                    pending_writes: AtomicUsize::new(usize::from(updated)),
+                });
 
                 drop(write_lock);
 
-                // NOTE: sometimes the value maybe very large, so dropping them
-                // outside the lock scope to reduce the time we hold the lock
-                drop(old_info);
+                let mut policy_lock = self.policies.write_shard(shard_index);
+
+                policy_lock.insert(key.clone(), &self.storages, shard_index);
             }
         }
-    }
-}
-
-struct Node<B: BackingStorage> {
-    key: B::Key,
-    value: B::Value,
-    pending_writes: AtomicUsize,
-    visited: AtomicBool,
-}
-
-type Index = usize;
-
-struct SieveShard<B: BackingStorage, S = BuildHasherDefault<fxhash::FxHasher>> {
-    map: HashMap<B::Key, Index, S>,
-    nodes: Vec<Option<Node<B>>>,
-    hand: Index,
-    capacity: usize,
-
-    active: usize,
-}
-
-impl<B: BackingStorage, S> SieveShard<B, S> {
-    const fn new(capacity: usize, hasher: S) -> Self {
-        Self {
-            nodes: Vec::new(),
-            hand: 0,
-            capacity,
-            active: 0,
-            map: HashMap::with_hasher(hasher),
-        }
-    }
-}
-
-enum Retrieve<'x, B: BackingStorage> {
-    Hit(&'x Node<B>),
-    Miss,
-}
-
-enum RetrieveMut<'x, B: BackingStorage> {
-    Hit(&'x mut Node<B>),
-    Miss,
-}
-
-impl<B: BackingStorage, S: BuildHasher> SieveShard<B, S> {
-    fn insert(
-        &mut self,
-        key: B::Key,
-        value: B::Value,
-        visited: bool,
-        pending_writes: usize,
-    ) -> Option<(B::Key, B::Value)> {
-        // If we haven't reached capacity yet, just push to the vector
-        if self.nodes.len() < self.capacity {
-            let index = self.nodes.len();
-            self.nodes.push(Some(Node {
-                key: key.clone(),
-                value,
-                pending_writes: AtomicUsize::new(pending_writes),
-                visited: AtomicBool::new(visited),
-            }));
-            self.map.insert(key, index);
-            self.active += 1;
-
-            return None;
-        }
-
-        // Cache is at capacity, scan for an eviction candidate
-        let mut scanned = 0;
-        let max_scan = self.capacity * 2;
-
-        loop {
-            if scanned > max_scan {
-                // All entries have pending writes or were recently visited
-                // Unconditionally grow beyond capacity as a fallback
-                break;
-            }
-
-            let index = self.hand;
-            self.hand = (self.hand + 1) % self.nodes.len();
-
-            if let Some(node) = &mut self.nodes[index] {
-                if node
-                    .visited
-                    .swap(false, std::sync::atomic::Ordering::Relaxed)
-                    || node
-                        .pending_writes
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                        != 0
-                {
-                    // give a second chance
-                    scanned += 1;
-                    continue;
-                }
-
-                // evict this node
-                self.map.remove(&node.key);
-
-                let old_key = std::mem::replace(&mut node.key, key.clone());
-                let old_value = std::mem::replace(&mut node.value, value);
-
-                node.pending_writes = AtomicUsize::new(pending_writes);
-                node.visited = AtomicBool::new(visited);
-
-                self.map.insert(key, index);
-
-                return Some((old_key, old_value));
-            }
-
-            // empty slot found (shouldn't happen if capacity is reached, but
-            // handle it)
-            self.nodes[index] = Some(Node {
-                key: key.clone(),
-                value,
-                pending_writes: AtomicUsize::new(pending_writes),
-                visited: AtomicBool::new(visited),
-            });
-            self.map.insert(key, index);
-            self.active += 1;
-
-            return None;
-        }
-
-        // Fallback: grow beyond capacity
-        self.nodes.push(Some(Node {
-            key: key.clone(),
-            value,
-            pending_writes: AtomicUsize::new(pending_writes),
-            visited: AtomicBool::new(visited),
-        }));
-        self.map.insert(key, self.nodes.len() - 1);
-        self.active += 1;
-        self.hand = 0; // reset hand to start scanning from beginning next time
-
-        None
-    }
-
-    fn get(&self, key: &B::Key, visit: bool) -> Retrieve<'_, B> {
-        if let Some(&index) = self.map.get(key) {
-            let node = self.nodes[index].as_ref().unwrap();
-
-            if visit {
-                node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-
-            return Retrieve::Hit(node);
-        }
-
-        Retrieve::Miss
-    }
-
-    fn get_mut(&mut self, key: &B::Key, visit: bool) -> RetrieveMut<'_, B> {
-        if let Some(&index) = self.map.get(key) {
-            let node = self.nodes[index].as_mut().unwrap();
-
-            if visit {
-                node.visited.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-
-            return RetrieveMut::Hit(node);
-        }
-
-        RetrieveMut::Miss
     }
 }
