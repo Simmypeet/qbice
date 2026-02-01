@@ -44,6 +44,13 @@ impl<T> Sharded<T> {
         self.shards[shard_index].read()
     }
 
+    pub fn upgradable_read_shard(
+        &self,
+        shard_index: usize,
+    ) -> parking_lot::RwLockUpgradableReadGuard<'_, T> {
+        self.shards[shard_index].upgradable_read()
+    }
+
     pub fn write_shard(
         &self,
         shard_index: usize,

@@ -85,7 +85,7 @@ use std::{
 
 use dashmap::{DashMap, DashSet};
 use enum_as_inner::EnumAsInner;
-use parking_lot::RwLockReadGuard;
+use parking_lot::RwLockUpgradableReadGuard;
 
 use crate::{
     kv_database::{KeyOfSetColumn, KvDatabase, WideColumn, WideColumnValue},
@@ -179,36 +179,10 @@ pub type WideColumnSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
 pub type KeyOfSetSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
     Sieve<KeyOfSetAdaptor<C>, DB, S>;
 
-/// A trait for removing elements from set-like collections.
+/// A trait for containers used in key-of-set storage.
 ///
-/// This trait provides a uniform interface for element removal across different
-/// set implementations used in the SIEVE cache. It enables the cache to work
-/// with various set types (`HashSet`, `DashSet`, custom implementations) while
-/// maintaining consistent removal semantics.
-///
-/// # Generic Element Lookup
-///
-/// The `remove_element` method accepts any borrowed form `Q` of the element
-/// type through the `Borrow` trait. This allows efficient removal without
-/// requiring owned values, matching the flexibility of standard library
-/// collections.
-///
-/// # Implementations
-///
-/// The trait is implemented for:
-/// - `HashSet<T, S>`: Standard single-threaded set
-/// - `DashSet<T, S>`: Concurrent sharded set from `dashmap`
-///
-/// # Example
-///
-/// ```ignore
-/// let mut set = HashSet::new();
-/// set.insert("key".to_string());
-///
-/// // Remove using a borrowed form
-/// let removed = set.remove_element("key");
-/// assert!(removed);
-/// ```
+/// This implemented type must be able to clone itself in cheap manner. For
+/// example, `Arc<DashSet<T>>` is a good candidate.
 pub trait ConcurrentSet {
     /// The type of elements stored in the set.
     type Element;
@@ -227,7 +201,10 @@ pub trait ConcurrentSet {
         Self::Element: Borrow<Q>;
 }
 
-impl<T: Eq + Hash, S: BuildHasher + Clone> ConcurrentSet for DashSet<T, S> {
+impl<T> ConcurrentSet for Arc<DashSet<T>>
+where
+    T: Eq + Hash + Clone,
+{
     type Element = T;
 
     fn insert_element(&self, element: Self::Element) { self.insert(element); }
@@ -271,7 +248,7 @@ impl<K> Policy<K> {
             return;
         }
 
-        let mut read_lock = sharded_storages.read_shard(shard_index);
+        let mut read_lock = sharded_storages.upgradable_read_shard(shard_index);
 
         // normal path: evict using SIEVE
         for _ in 0..MAX_HAND_SWEEPS {
@@ -285,8 +262,8 @@ impl<K> Policy<K> {
                         .expect("should exist in storage");
 
                     (
-                        entry.visited.swap(false, Ordering::SeqCst),
-                        entry.pending_writes.load(Ordering::SeqCst),
+                        entry.visited.swap(false, Ordering::Relaxed),
+                        entry.pending_writes.load(Ordering::Relaxed),
                     )
                 };
 
@@ -295,19 +272,12 @@ impl<K> Policy<K> {
                     continue;
                 }
 
-                let Some(new_read_lock) = Self::try_evict(
-                    read_lock,
-                    existing_key,
-                    sharded_storages,
-                    shard_index,
-                ) else {
+                if Self::try_evict(&mut read_lock, existing_key) {
                     // successfully evicted
                     self.keys[index].replace(key);
 
                     return;
-                };
-
-                read_lock = new_read_lock;
+                }
             } else {
                 // has no key, can use this slot
                 self.keys[index] = Some(key);
@@ -334,26 +304,19 @@ impl<K> Policy<K> {
                             .get(existing_key)
                             .expect("should exist in storage");
 
-                        entry.pending_writes.load(Ordering::SeqCst)
+                        entry.pending_writes.load(Ordering::Relaxed)
                     };
 
                     if pending_writes != 0 {
                         continue;
                     }
 
-                    let Some(new_read_lock) = Self::try_evict(
-                        read_lock,
-                        existing_key,
-                        sharded_storages,
-                        shard_index,
-                    ) else {
+                    if Self::try_evict(&mut read_lock, existing_key) {
                         // successfully evicted
                         self.keys[index].replace(key);
 
                         return;
-                    };
-
-                    read_lock = new_read_lock;
+                    }
                 } else {
                     // has no key, can use this slot
                     self.keys[index] = Some(key);
@@ -369,44 +332,35 @@ impl<K> Policy<K> {
         self.hand = 0;
     }
 
-    fn try_evict<'v, V, S: BuildHasher>(
-        read_guard: RwLockReadGuard<'v, HashMap<K, StorageEntry<V>, S>>,
+    fn try_evict<V, S: BuildHasher>(
+        read_guard: &mut RwLockUpgradableReadGuard<
+            '_,
+            HashMap<K, StorageEntry<V>, S>,
+        >,
         key: &K,
-        sharded_storages: &'v Sharded<HashMap<K, StorageEntry<V>, S>>,
-        shard_index: usize,
-    ) -> Option<RwLockReadGuard<'v, HashMap<K, StorageEntry<V>, S>>>
+    ) -> bool
     where
         K: Debug + Eq + Hash,
     {
-        drop(read_guard);
+        read_guard.with_upgraded(|x| {
+            let Some(entry) = x.get(key) else {
+                panic!("key {key:?} should exist in storage");
+            };
 
-        let mut write_lock = sharded_storages.write_shard(shard_index);
+            // double check no pending writes
+            if entry.pending_writes.load(Ordering::Relaxed) != 0 {
+                // while we're about to obtain write lock and evict, pending
+                // writes appeared; cannot evict
+                return false;
+            }
 
-        let Some(entry) = write_lock.get(key) else {
-            panic!("key {key:?} should exist in storage");
-        };
+            // now we can safely evict without worrying about pending writes
+            let old_value = x.remove(key);
 
-        // double check no pending writes
-        if entry.pending_writes.load(Ordering::SeqCst) != 0 {
-            // while we're about to obtain write lock and evict, pending writes
-            // appeared; cannot evict
-            return Some({
-                drop(write_lock);
+            assert!(old_value.is_some(), "key {key:?} should exist in storage");
 
-                sharded_storages.read_shard(shard_index)
-            });
-        }
-
-        // now we can safely evict without worrying about pending writes
-        let old_value = write_lock.remove(key);
-
-        // we drop the shard lock first since dropping the entry might take long
-        // time.
-        drop(write_lock);
-
-        assert!(old_value.is_some(), "key {key:?} should exist in storage");
-
-        None
+            true
+        })
     }
 }
 
@@ -591,7 +545,7 @@ impl<B: BackingStorage, DB: KvDatabase, S: BuildHasher> Sieve<B, DB, S> {
             .get(key)
             .unwrap_or_else(|| panic!("key {key:?} should exist in storage"));
 
-        node.pending_writes.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        node.pending_writes.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -686,7 +640,7 @@ impl<C: WideColumn, DB: KvDatabase, S: BuildHasher>
                 if let Some(value) = read_lock.get(&combined_key) {
                     value
                         .visited
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
 
                     return value.value.as_ref().map(|x| {
                         x.as_ref()
@@ -1136,7 +1090,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                     if updated {
                         entry
                             .pending_writes
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
 
                     Some(entry.value.clone())
@@ -1158,6 +1112,8 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
         }
 
         // has to acquire write lock
+
+        let partial = Arc::new(DashMap::new());
 
         let mut write_lock = self.storages.write_shard(shard_index);
 
@@ -1183,7 +1139,6 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
             }
 
             hash_map::Entry::Vacant(entry) => {
-                let partial = Arc::new(DashMap::new());
                 partial.insert(element, Operation::Insert);
 
                 entry.insert(StorageEntry {
@@ -1284,7 +1239,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                     if updated {
                         entry
                             .pending_writes
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
 
                     Some(entry.value.clone())
