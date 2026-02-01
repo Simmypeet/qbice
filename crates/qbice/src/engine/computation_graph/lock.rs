@@ -6,12 +6,12 @@ use std::{
 use dashmap::{DashMap, DashSet, Entry, mapref::one::Ref};
 use parking_lot::RwLock;
 use qbice_stable_hash::Compact128;
-use qbice_storage::{intern::Interned, sieve::WriteBuffer};
+use qbice_storage::intern::Interned;
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
     Engine, ExecutionStyle, Query,
-    config::Config,
+    config::{Config, WriteTransaction},
     engine::{
         computation_graph::{
             CallerInformation, QueryKind, QueryWithID,
@@ -32,15 +32,15 @@ pub struct ComputingForwardEdges {
 }
 
 impl Computing {
-    pub fn register_calee(&self, callee: QueryID) {
-        match self.callee_info.callee_queries.entry(callee) {
+    pub fn register_calee(&self, callee: &QueryID) {
+        match self.callee_info.callee_queries.entry(*callee) {
             Entry::Occupied(_) => {}
 
             Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(None);
 
                 // if haven't inserted, add to dependency order
-                self.callee_info.callee_order.write().push(callee);
+                self.callee_info.callee_order.write().push(*callee);
             }
         }
     }
@@ -64,14 +64,14 @@ impl Computing {
 
     pub fn observe_callee(
         &self,
-        callee_target_id: QueryID,
+        callee_target_id: &QueryID,
         seen_value_fingerprint: Compact128,
         seen_transitive_firewall_callees_fingerprint: Compact128,
     ) {
         let mut callee_observation = self
             .callee_info
             .callee_queries
-            .get_mut(&callee_target_id)
+            .get_mut(callee_target_id)
             .expect("callee should have been registered");
 
         *callee_observation = Some(Observation {
@@ -241,29 +241,29 @@ impl<C: Config> Drop for ComputingLockGuard<'_, C> {
 impl<C: Config> Lock<C> {
     pub fn try_get_lock_for_fast_path(
         &self,
-        query_id: QueryID,
+        query_id: &QueryID,
     ) -> Option<(OwnedNotified, Arc<Computing>)> {
-        let guard = self.normal_lock.get(&query_id)?;
+        let guard = self.normal_lock.get(query_id)?;
         let notified_owned = guard.notified_owned();
 
         Some((notified_owned, guard.clone()))
     }
 
-    pub fn try_get_lock(&self, query_id: QueryID) -> Option<Arc<Computing>> {
-        let guard = self.normal_lock.get(&query_id)?;
+    pub fn try_get_lock(&self, query_id: &QueryID) -> Option<Arc<Computing>> {
+        let guard = self.normal_lock.get(query_id)?;
         Some(guard.clone())
     }
 
     pub fn try_get_pending_backward_projection_lock(
         &self,
-        query_id: QueryID,
+        query_id: &QueryID,
     ) -> Option<Ref<'_, QueryID, PendingBackwardProjection>> {
-        self.backward_projection_lock.get(&query_id)
+        self.backward_projection_lock.get(query_id)
     }
 
-    pub fn get_lock(&self, query_id: QueryID) -> Arc<Computing> {
+    pub fn get_lock(&self, query_id: &QueryID) -> Arc<Computing> {
         self.normal_lock
-            .get(&query_id)
+            .get(query_id)
             .expect("computing lock should exist")
             .clone()
     }
@@ -276,7 +276,7 @@ pub enum LockGuard<'x, C: Config> {
 impl<C: Config> Engine<C> {
     async fn computing_lock_guard(
         &self,
-        query_id: QueryID,
+        query_id: &QueryID,
         caller_information: &CallerInformation,
         type_name: &'static str,
     ) -> Option<ComputingLockGuard<'_, C>> {
@@ -306,28 +306,30 @@ impl<C: Config> Engine<C> {
             (ComputingMode::Execute, QueryKind::Executable(style))
         };
 
-        match self.computation_graph.lock.normal_lock.entry(query_id) {
+        let entry = Arc::new(Computing {
+            notify: Arc::new(Notify::new()),
+            callee_info: ComputingForwardEdges {
+                callee_queries: DashMap::new(),
+                callee_order: RwLock::new(Vec::new()),
+            },
+
+            query_kind,
+            is_in_scc: Arc::new(AtomicBool::new(false)),
+            tfc: DashSet::new(),
+        });
+
+        match self.computation_graph.lock.normal_lock.entry(*query_id) {
             dashmap::Entry::Occupied(_) => {
                 // there's some computing state already try again
                 None
             }
 
             dashmap::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(Arc::new(Computing {
-                    notify: Arc::new(Notify::new()),
-                    callee_info: ComputingForwardEdges {
-                        callee_queries: DashMap::new(),
-                        callee_order: RwLock::new(Vec::new()),
-                    },
-
-                    query_kind,
-                    is_in_scc: Arc::new(AtomicBool::new(false)),
-                    tfc: DashSet::new(),
-                }));
+                vacant_entry.insert(entry);
 
                 Some(ComputingLockGuard {
                     computing_lock: &self.computation_graph.lock,
-                    query_id,
+                    query_id: *query_id,
                     defused: false,
                     computing_mode: mode,
                 })
@@ -337,13 +339,13 @@ impl<C: Config> Engine<C> {
 
     pub(super) fn get_backward_projection_lock_guard(
         &self,
-        query_id: QueryID,
+        query_id: &QueryID,
     ) -> Option<BackwardProjectionLockGuard<'_, C>> {
         match self
             .computation_graph
             .lock
             .backward_projection_lock
-            .entry(query_id)
+            .entry(*query_id)
         {
             dashmap::Entry::Occupied(_) => {
                 // there's some computing state already try again
@@ -357,7 +359,7 @@ impl<C: Config> Engine<C> {
 
                 Some(BackwardProjectionLockGuard {
                     computing_lock: &self.computation_graph.lock,
-                    query_id,
+                    query_id: *query_id,
                     defused: false,
                 })
             }
@@ -366,7 +368,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) async fn get_lock_guard(
         &self,
-        query_id: QueryID,
+        query_id: &QueryID,
         slow_path: SlowPath,
         caller_information: &CallerInformation,
         type_name: &'static str,
@@ -386,7 +388,7 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::option_option)]
     pub(super) async fn computing_lock_to_clean_query(
         &self,
-        query_id: QueryID,
+        query_id: &QueryID,
         clean_edges: &[QueryID],
         new_tfc: Option<Interned<TransitiveFirewallCallees>>,
         caller_information: &CallerInformation,
@@ -396,7 +398,7 @@ impl<C: Config> Engine<C> {
             .await;
 
         let dashmap::Entry::Occupied(entry_lock) =
-            self.computation_graph.lock.normal_lock.entry(query_id)
+            self.computation_graph.lock.normal_lock.entry(*query_id)
         else {
             panic!("computing lock should exist when transferring to computed");
         };
@@ -415,9 +417,9 @@ impl<C: Config> Engine<C> {
     fn check_cyclic_internal(
         &self,
         computing: &Computing,
-        target: QueryID,
+        target: &QueryID,
     ) -> bool {
-        if computing.callee_info.callee_queries.contains_key(&target) {
+        if computing.callee_info.callee_queries.contains_key(target) {
             computing
                 .is_in_scc
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -430,7 +432,7 @@ impl<C: Config> Engine<C> {
         // OPTIMIZE: this can be parallelized
         for dep in computing.callee_info.callee_queries.iter().map(|x| *x.key())
         {
-            let Some(state) = self.computation_graph.lock.try_get_lock(dep)
+            let Some(state) = self.computation_graph.lock.try_get_lock(&dep)
             else {
                 continue;
             };
@@ -452,7 +454,7 @@ impl<C: Config> Engine<C> {
     pub(super) fn check_cyclic(
         &self,
         running_state: &Computing,
-        target: QueryID,
+        target: &QueryID,
     ) -> bool {
         self.check_cyclic_internal(running_state, target)
     }
@@ -467,7 +469,7 @@ impl<C: Config> Engine<C> {
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
         existing_forward_edges: Option<&[QueryID]>,
-        continuing_tx: WriteBuffer<C::Database, C::BuildHasher>,
+        continuing_tx: WriteTransaction<C>,
     ) {
         let (
             notify,
@@ -476,7 +478,7 @@ impl<C: Config> Engine<C> {
             forward_edges,
             tfc_archetype,
         ) = {
-            let computing = self.computation_graph.lock.get_lock(query_id.id);
+            let computing = self.computation_graph.lock.get_lock(&query_id.id);
 
             (
                 computing.notify.clone(),
@@ -522,7 +524,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) fn is_query_running_in_scc(
         &self,
-        caller: Option<QueryID>,
+        caller: Option<&QueryID>,
     ) -> Result<(), CyclicError> {
         let Some(called_from) = caller else {
             return Ok(());

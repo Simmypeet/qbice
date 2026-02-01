@@ -25,25 +25,28 @@
 //!   that resources are freed up quickly.
 
 use std::{
-    borrow::Borrow, collections::HashMap, hash::Hash, marker::PhantomData,
-    pin::Pin, sync::Arc,
+    collections::HashMap,
+    hash::{BuildHasher, Hash},
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
 };
 
-use dashmap::{DashMap, DashSet, setref::multiple::RefMulti};
+use dashmap::{DashMap, DashSet};
+use parking_lot::RwLock;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{Compact128, StableHash};
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{
+    dynamic_map::DynamicMap as _,
     intern::Interned,
+    key_of_set_map::{ConcurrentSet, KeyOfSetMap as _},
     kv_database::{
         DiscriminantEncoding, KeyOfSetColumn, WideColumn, WideColumnValue,
     },
-    sieve::{
-        ConcurrentSet, KeyOfSetContainer, KeyOfSetSieve, WideColumnSieve,
-        WriteBuffer,
-    },
+    single_map::SingleMap as _,
+    storage_engine::StorageEngine,
 };
-use rayon::iter::IntoParallelRefIterator;
 pub(super) use sync::ActiveComputationGuard;
 pub(crate) use sync::ActiveInputSessionGuard;
 
@@ -51,7 +54,7 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::Config,
     engine::computation_graph::{
-        CallerInformation, QueryKind, QueryWithID, Sieve,
+        CallerInformation, QueryKind, QueryWithID,
         lock::BackwardProjectionLockGuard,
         tfc_achetype::TransitiveFirewallCallees,
     },
@@ -93,202 +96,6 @@ impl QueryKind {
     }
 }
 
-pub struct BackwardEdge<C: Config>(Arc<DashSet<QueryID, C::BuildHasher>>);
-
-impl<C: Config> BackwardEdge<C> {
-    pub fn par_iter(&self) -> dashmap::rayon::set::Iter<'_, QueryID> {
-        self.0.par_iter()
-    }
-
-    pub fn iter(
-        &self,
-    ) -> dashmap::iter_set::Iter<
-        '_,
-        QueryID,
-        C::BuildHasher,
-        DashMap<QueryID, (), C::BuildHasher>,
-    > {
-        self.0.iter()
-    }
-}
-
-impl<C: Config> std::fmt::Debug for BackwardEdge<C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BackwardEdge")
-            .field("edges", &self.0)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<C: Config> Clone for BackwardEdge<C> {
-    fn clone(&self) -> Self { Self(self.0.clone()) }
-}
-
-impl<C: Config> Encode for BackwardEdge<C> {
-    fn encode<E: qbice_serialize::Encoder + ?Sized>(
-        &self,
-        encoder: &mut E,
-        plugin: &qbice_serialize::Plugin,
-        session: &mut qbice_serialize::session::Session,
-    ) -> std::io::Result<()> {
-        (*self.0).encode(encoder, plugin, session)
-    }
-}
-
-impl<C: Config> Decode for BackwardEdge<C> {
-    fn decode<D: qbice_serialize::Decoder + ?Sized>(
-        decoder: &mut D,
-        plugin: &qbice_serialize::Plugin,
-        session: &mut qbice_serialize::session::Session,
-    ) -> std::io::Result<Self> {
-        let set = DashSet::decode(decoder, plugin, session)?;
-        Ok(Self(Arc::new(set)))
-    }
-}
-
-impl<C: Config> Default for BackwardEdge<C> {
-    fn default() -> Self { Self(Arc::new(DashSet::default())) }
-}
-
-impl<C: Config> Extend<QueryID> for BackwardEdge<C> {
-    fn extend<T: IntoIterator<Item = QueryID>>(&mut self, iter: T) {
-        for query_id in iter {
-            self.0.insert(query_id);
-        }
-    }
-}
-
-impl<C: Config> FromIterator<QueryID> for BackwardEdge<C> {
-    fn from_iter<T: IntoIterator<Item = QueryID>>(iter: T) -> Self {
-        Self(Arc::new(FromIterator::from_iter(iter)))
-    }
-}
-
-impl<'x, C: Config> IntoIterator for &'x BackwardEdge<C> {
-    type Item = RefMulti<'x, QueryID>;
-    type IntoIter = dashmap::iter_set::Iter<
-        'x,
-        QueryID,
-        C::BuildHasher,
-        DashMap<QueryID, (), C::BuildHasher>,
-    >;
-
-    fn into_iter(self) -> Self::IntoIter { self.0.iter() }
-}
-
-impl<C: Config> ConcurrentSet for BackwardEdge<C> {
-    type Element = QueryID;
-
-    fn insert_element(&self, element: Self::Element) { self.0.insert(element); }
-
-    fn remove_element<Q: Hash + Eq + ?Sized>(&self, element: &Q) -> bool
-    where
-        Self::Element: Borrow<Q>,
-    {
-        self.0.remove(element).is_some()
-    }
-}
-
-/// Container for storing query hashes (Compact128) that were computed
-/// with [`ExecutionStyle::ExternalInput`] for a specific query type.
-///
-/// This enables refreshing all external input queries of a given type
-/// during an input session.
-pub struct ExternalInputSet<C: Config>(
-    Arc<DashSet<Compact128, C::BuildHasher>>,
-);
-
-impl<C: Config> ExternalInputSet<C> {
-    /// Returns an iterator over all query hashes in this set.
-    pub fn iter(
-        &self,
-    ) -> dashmap::iter_set::Iter<
-        '_,
-        Compact128,
-        C::BuildHasher,
-        DashMap<Compact128, (), C::BuildHasher>,
-    > {
-        self.0.iter()
-    }
-}
-
-impl<C: Config> std::fmt::Debug for ExternalInputSet<C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExternalInputSet")
-            .field("queries", &self.0)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<C: Config> Clone for ExternalInputSet<C> {
-    fn clone(&self) -> Self { Self(self.0.clone()) }
-}
-
-impl<C: Config> Encode for ExternalInputSet<C> {
-    fn encode<E: qbice_serialize::Encoder + ?Sized>(
-        &self,
-        encoder: &mut E,
-        plugin: &qbice_serialize::Plugin,
-        session: &mut qbice_serialize::session::Session,
-    ) -> std::io::Result<()> {
-        (*self.0).encode(encoder, plugin, session)
-    }
-}
-
-impl<C: Config> Decode for ExternalInputSet<C> {
-    fn decode<D: qbice_serialize::Decoder + ?Sized>(
-        decoder: &mut D,
-        plugin: &qbice_serialize::Plugin,
-        session: &mut qbice_serialize::session::Session,
-    ) -> std::io::Result<Self> {
-        let set = DashSet::decode(decoder, plugin, session)?;
-        Ok(Self(Arc::new(set)))
-    }
-}
-
-impl<C: Config> Default for ExternalInputSet<C> {
-    fn default() -> Self { Self(Arc::new(DashSet::default())) }
-}
-
-impl<C: Config> Extend<Compact128> for ExternalInputSet<C> {
-    fn extend<T: IntoIterator<Item = Compact128>>(&mut self, iter: T) {
-        for hash in iter {
-            self.0.insert(hash);
-        }
-    }
-}
-
-impl<C: Config> FromIterator<Compact128> for ExternalInputSet<C> {
-    fn from_iter<T: IntoIterator<Item = Compact128>>(iter: T) -> Self {
-        Self(Arc::new(FromIterator::from_iter(iter)))
-    }
-}
-
-impl<'x, C: Config> IntoIterator for &'x ExternalInputSet<C> {
-    type Item = RefMulti<'x, Compact128>;
-    type IntoIter = dashmap::iter_set::Iter<
-        'x,
-        Compact128,
-        C::BuildHasher,
-        DashMap<Compact128, (), C::BuildHasher>,
-    >;
-
-    fn into_iter(self) -> Self::IntoIter { self.0.iter() }
-}
-
-impl<C: Config> ConcurrentSet for ExternalInputSet<C> {
-    type Element = Compact128;
-
-    fn insert_element(&self, element: Self::Element) { self.0.insert(element); }
-
-    fn remove_element<Q: Hash + Eq + ?Sized>(&self, element: &Q) -> bool
-    where
-        Self::Element: Borrow<Q>,
-    {
-        self.0.remove(element).is_some()
-    }
-}
-
 /// Column marker for storing external input queries grouped by their type.
 ///
 /// Maps [`StableTypeID`] (query type) → `HashSet<Compact128>` (query hashes).
@@ -302,10 +109,6 @@ pub struct ExternalInputColumn<C: Config>(PhantomData<C>);
 impl<C: Config> KeyOfSetColumn for ExternalInputColumn<C> {
     type Key = StableTypeID;
     type Element = Compact128;
-}
-
-impl<C: Config> KeyOfSetContainer for ExternalInputColumn<C> {
-    type Container = ExternalInputSet<C>;
 }
 
 #[derive(Identifiable)]
@@ -391,8 +194,138 @@ impl<C: Config> KeyOfSetColumn for BackwardEdgeColumn<C> {
     type Element = QueryID;
 }
 
-impl<C: Config> KeyOfSetContainer for BackwardEdgeColumn<C> {
-    type Container = BackwardEdge<C>;
+pub enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+impl<L: Iterator, R: Iterator<Item = L::Item>> Iterator for Either<L, R> {
+    type Item = L::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Left(l) => l.next(),
+            Self::Right(r) => r.next(),
+        }
+    }
+}
+
+pub enum TieredStorage<S: BuildHasher + Clone> {
+    /// 0-32 queries, stored as a small vec.
+    Small(RwLock<Vec<QueryID>>),
+
+    /// More than 32 queries, stored as an Arc to a slice.
+    Large(DashSet<QueryID, S>),
+}
+
+impl<S: BuildHasher + Clone> TieredStorage<S> {
+    #[must_use]
+    pub const fn new() -> Self { Self::Small(RwLock::new(Vec::new())) }
+}
+
+impl<S: BuildHasher + Clone> Default for TieredStorage<S> {
+    fn default() -> Self { Self::new() }
+}
+
+pub struct GuardedVecIterator<'a, T> {
+    guard: parking_lot::RwLockReadGuard<'a, Vec<T>>,
+    index: usize,
+}
+
+impl<T> Iterator for GuardedVecIterator<'_, T>
+where
+    T: Clone,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.guard.len() {
+            None
+        } else {
+            let item = self.guard[self.index].clone();
+            self.index += 1;
+            Some(item)
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+#[derive(Default, Clone)]
+pub struct CompressedBackwardEdgeSet<S: BuildHasher + Clone>(
+    pub Arc<RwLock<TieredStorage<S>>>,
+);
+
+impl<S: BuildHasher + Default + Clone + Send + Sync> ConcurrentSet
+    for CompressedBackwardEdgeSet<S>
+{
+    type Element = QueryID;
+
+    fn insert_element(&self, element: Self::Element) -> bool {
+        let read = self.0.read();
+        match &*read {
+            TieredStorage::Small(vec_lock) => {
+                let mut vec = vec_lock.write();
+
+                // Upgrade to large storage if exceed threshold
+                if vec.len() == 32 {
+                    let large_set = DashSet::with_hasher(S::default());
+
+                    for item in vec.drain(..) {
+                        large_set.insert(item);
+                    }
+
+                    let result = large_set.insert(element);
+
+                    drop(vec);
+                    drop(read);
+
+                    *self.0.write() = TieredStorage::Large(large_set);
+
+                    result
+                } else {
+                    if vec.contains(&element) {
+                        return false;
+                    }
+
+                    vec.push(element);
+
+                    true
+                }
+            }
+
+            TieredStorage::Large(set) => set.insert(element),
+        }
+    }
+
+    fn remove_element(&self, element: &Self::Element) -> bool {
+        match &*self.0.read() {
+            TieredStorage::Small(vec_lock) => {
+                let mut vec = vec_lock.write();
+
+                vec.iter().position(|x| x == element).is_some_and(|pos| {
+                    vec.swap_remove(pos);
+                    true
+                })
+            }
+
+            TieredStorage::Large(set) => set.remove(element).is_some(),
+        }
+    }
+}
+
+impl<S: BuildHasher + Clone> TieredStorage<S> {
+    pub fn iter(&self) -> impl Iterator<Item = QueryID> + '_ {
+        match self {
+            Self::Small(vec_lock) => Either::Left(GuardedVecIterator {
+                guard: vec_lock.read(),
+                index: 0,
+            }),
+
+            Self::Large(set) => {
+                Either::Right(set.iter().map(|entry| *entry.key()))
+            }
+        }
+    }
 }
 
 #[derive(
@@ -530,61 +463,77 @@ impl<Q: Query> WideColumnValue<QueryStoreColumn> for QueryResult<Q> {
     }
 }
 
+type SingleMap<C, K, V> =
+    <<C as Config>::StorageEngine as StorageEngine>::SingleMap<K, V>;
+
+type DynamicMap<C, K> =
+    <<C as Config>::StorageEngine as StorageEngine>::DynamicMap<K>;
+
+type KeyOfSetMap<C, K, Con> =
+    <<C as Config>::StorageEngine as StorageEngine>::KeyOfSetMap<K, Con>;
+
+type WriteTransaction<C> =
+    <<C as Config>::StorageEngine as StorageEngine>::WriteTransaction;
+
+#[allow(clippy::type_complexity)]
 pub struct Persist<C: Config> {
-    query_node:
-        Arc<WideColumnSieve<QueryNodeColumn, C::Database, C::BuildHasher>>,
-    dirty_edge_set:
-        Arc<WideColumnSieve<DirtySetColumn, C::Database, C::BuildHasher>>,
-    query_store:
-        Arc<WideColumnSieve<QueryStoreColumn, C::Database, C::BuildHasher>>,
-    backward_edges:
-        Arc<KeyOfSetSieve<BackwardEdgeColumn<C>, C::Database, C::BuildHasher>>,
-    /// Stores external input queries grouped by their type.
-    ///
-    /// Maps [`StableTypeID`] → `HashSet<Compact128>` for all queries computed
-    /// with [`ExecutionStyle::ExternalInput`]. Used by `InputSession::refresh`
-    /// to find and re-invoke all external input queries of a specific type.
-    external_input_queries:
-        Arc<KeyOfSetSieve<ExternalInputColumn<C>, C::Database, C::BuildHasher>>,
+    last_verified: SingleMap<C, QueryNodeColumn, LastVerified>,
+    forward_edge_order: SingleMap<C, QueryNodeColumn, ForwardEdgeOrder>,
+    forward_edge_observation:
+        SingleMap<C, QueryNodeColumn, ForwardEdgeObservation<C>>,
+    query_kind: SingleMap<C, QueryNodeColumn, QueryKind>,
+    node_info: SingleMap<C, QueryNodeColumn, NodeInfo>,
+    pending_backward_projection:
+        SingleMap<C, QueryNodeColumn, PendingBackwardProjection>,
+
+    dirty_edge_set: SingleMap<C, DirtySetColumn, Unit>,
+
+    query_store: DynamicMap<C, QueryStoreColumn>,
+
+    backward_edges: KeyOfSetMap<
+        C,
+        BackwardEdgeColumn<C>,
+        CompressedBackwardEdgeSet<C::BuildHasher>,
+    >,
+
+    external_input_queries: KeyOfSetMap<
+        C,
+        ExternalInputColumn<C>,
+        Arc<DashSet<Compact128, C::BuildHasher>>,
+    >,
 
     sync: sync::Sync<C>,
 }
 
 impl<C: Config> Persist<C> {
-    pub fn new(db: Arc<C::Database>, shard_amount: usize) -> Self {
+    pub async fn new(db: &C::StorageEngine) -> Self {
         Self {
-            sync: sync::Sync::new(&db),
-            query_node: Arc::new(Sieve::<_, C>::new(
-                C::cache_entry_capacity() * 2 * 2 * 2,
-                shard_amount * 2 * 2,
-                db.clone(),
-                C::BuildHasher::default(),
-            )),
-            query_store: Arc::new(Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db.clone(),
-                C::BuildHasher::default(),
-            )),
-            dirty_edge_set: Arc::new(Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db.clone(),
-                C::BuildHasher::default(),
-            )),
-            backward_edges: Arc::new(Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db.clone(),
-                C::BuildHasher::default(),
-            )),
-            external_input_queries: Arc::new(Sieve::<_, C>::new(
-                C::cache_entry_capacity(),
-                shard_amount,
-                db,
-                C::BuildHasher::default(),
-            )),
-        }
+        last_verified: db.new_single_map::<QueryNodeColumn, LastVerified>(),
+        forward_edge_order:
+            db.new_single_map::<QueryNodeColumn, ForwardEdgeOrder>(),
+        forward_edge_observation: db
+            .new_single_map::<QueryNodeColumn, ForwardEdgeObservation<C>>(),
+        query_kind: db.new_single_map::<QueryNodeColumn, QueryKind>(),
+        node_info: db.new_single_map::<QueryNodeColumn, NodeInfo>(),
+        pending_backward_projection: db
+            .new_single_map::<QueryNodeColumn, PendingBackwardProjection>(),
+
+        dirty_edge_set: db.new_single_map::<DirtySetColumn, Unit>(),
+
+        query_store: db.new_dynamic_map::<QueryStoreColumn>(),
+
+        backward_edges: db.new_key_of_set_map::<
+            BackwardEdgeColumn<C>,
+            CompressedBackwardEdgeSet<C::BuildHasher>,
+        >(),
+
+        external_input_queries: db.new_key_of_set_map::<
+            ExternalInputColumn<C>,
+            Arc<DashSet<Compact128, C::BuildHasher>>,
+        >(),
+
+        sync: sync::Sync::new(db).await,
+    }
     }
 }
 
@@ -612,7 +561,7 @@ impl<C: Config> Engine<C> {
         has_pending_backward_projection: bool,
         caller_information: &CallerInformation,
         existing_forward_edges: Option<&[QueryID]>,
-        mut tx: WriteBuffer<C::Database, C::BuildHasher>,
+        mut tx: WriteTransaction<C>,
     ) {
         let query_value_fingerprint =
             query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
@@ -635,83 +584,85 @@ impl<C: Config> Engine<C> {
             // remove prior backward edges
             if let Some(forward_edges) = existing_forward_edges {
                 for edge in forward_edges {
-                    self.computation_graph
-                        .persist
-                        .backward_edges
-                        .remove_set_element(edge, &query_id.id, &mut tx);
+                    self.computation_graph.persist.backward_edges.remove(
+                        edge,
+                        &query_id.id,
+                        &mut tx,
+                    );
                 }
             }
 
             // set pending backward projection if needed
             if has_pending_backward_projection {
-                self.computation_graph.persist.query_node.put(
-                    query_id.id,
-                    Some(PendingBackwardProjection(
-                        caller_information.timestamp(),
-                    )),
-                    &mut tx,
-                );
+                self.computation_graph
+                    .persist
+                    .pending_backward_projection
+                    .insert(
+                        query_id.id,
+                        PendingBackwardProjection(
+                            caller_information.timestamp(),
+                        ),
+                        &mut tx,
+                    );
             }
 
-            self.computation_graph.persist.query_node.put(
+            self.computation_graph.persist.node_info.insert(
                 query_id.id,
-                Some(node_info),
+                node_info,
                 &mut tx,
             );
 
-            self.computation_graph.persist.query_node.put(
+            self.computation_graph.persist.query_kind.insert(
                 query_id.id,
-                Some(query_kind),
+                query_kind,
                 &mut tx,
             );
 
-            self.computation_graph.persist.query_node.put(
+            self.computation_graph.persist.last_verified.insert(
                 query_id.id,
-                Some(LastVerified(caller_information.timestamp())),
+                LastVerified(caller_information.timestamp()),
                 &mut tx,
             );
 
             for edge in forward_edge_order.0.iter() {
-                self.computation_graph
-                    .persist
-                    .backward_edges
-                    .insert_set_element(edge, query_id.id, &mut tx);
+                self.computation_graph.persist.backward_edges.insert(
+                    *edge,
+                    query_id.id,
+                    &mut tx,
+                );
             }
 
-            self.computation_graph.persist.query_node.put(
+            self.computation_graph.persist.forward_edge_order.insert(
                 query_id.id,
-                Some(forward_edge_order),
+                forward_edge_order,
                 &mut tx,
             );
 
-            self.computation_graph.persist.query_node.put(
+            self.computation_graph.persist.forward_edge_observation.insert(
                 query_id.id,
-                Some(forward_edge_observations),
+                forward_edge_observations,
                 &mut tx,
             );
 
-            self.computation_graph.persist.query_store.put(
+            self.computation_graph.persist.query_store.insert(
                 query_id.id.compact_hash_128(),
-                Some(query_input),
+                query_input,
                 &mut tx,
             );
 
-            self.computation_graph.persist.query_store.put(
+            self.computation_graph.persist.query_store.insert(
                 query_id.id.compact_hash_128(),
-                Some(query_result),
+                query_result,
                 &mut tx,
             );
 
             // Track external input queries by type for refresh support
             if query_kind.is_external_input() {
-                self.computation_graph
-                    .persist
-                    .external_input_queries
-                    .insert_set_element(
-                        &query_id.id.stable_type_id(),
-                        query_id.id.compact_hash_128(),
-                        &mut tx,
-                    );
+                self.computation_graph.persist.external_input_queries.insert(
+                    query_id.id.stable_type_id(),
+                    query_id.id.compact_hash_128(),
+                    &mut tx,
+                );
             }
 
             self.submit_write_buffer(tx);
@@ -725,7 +676,7 @@ impl<C: Config> Engine<C> {
         query_hash_128: Compact128,
         query_value: Q::Value,
         query_value_fingerprint: Compact128,
-        tx: &mut WriteBuffer<C::Database, C::BuildHasher>,
+        tx: &mut WriteTransaction<C>,
         set_input: bool,
         timestamp: Timestamp,
     ) {
@@ -733,7 +684,7 @@ impl<C: Config> Engine<C> {
 
         // if have an existing forward edges, unwire the backward edges
         let existing_forward_edges =
-            unsafe { self.get_forward_edges_order_unchecked(query_id).await };
+            unsafe { self.get_forward_edges_order_unchecked(&query_id).await };
 
         let empty_forward_edges = ForwardEdgeOrder(Arc::from([]));
         let empty_forward_edge_observations = ForwardEdgeObservation::<C>(
@@ -762,51 +713,50 @@ impl<C: Config> Engine<C> {
                     self.computation_graph
                         .persist
                         .backward_edges
-                        .remove_set_element(edge, &query_id, tx);
+                        .insert(*edge, query_id, tx);
                 }
             }
 
             if set_input {
-                self.computation_graph.persist.query_node.put(
+                self.computation_graph.persist.query_kind.insert(
                     query_id,
-                    Some(QueryKind::Input),
+                    QueryKind::Input,
                     tx,
                 );
             }
 
-            self.computation_graph.persist.query_node.put(
+            self.computation_graph.persist.last_verified.insert(
                 query_id,
-                Some(LastVerified(timestamp)),
+                LastVerified(timestamp),
                 tx,
             );
 
-            self.computation_graph.persist.query_node.put(
+            self.computation_graph.persist.forward_edge_order.insert(
                 query_id,
-                Some(empty_forward_edges),
+                empty_forward_edges,
                 tx,
             );
 
-            self.computation_graph.persist.query_node.put(
+            self.computation_graph.persist.forward_edge_observation.insert(
                 query_id,
-                Some(empty_forward_edge_observations),
+                empty_forward_edge_observations,
                 tx,
             );
 
-            self.computation_graph.persist.query_node.put(
-                query_id,
-                Some(node_info),
-                tx,
-            );
+            self.computation_graph
+                .persist
+                .node_info
+                .insert(query_id, node_info, tx);
 
-            self.computation_graph.persist.query_store.put(
+            self.computation_graph.persist.query_store.insert(
                 query_id.compact_hash_128(),
-                Some(query_input),
+                query_input,
                 tx,
             );
 
-            self.computation_graph.persist.query_store.put(
+            self.computation_graph.persist.query_store.insert(
                 query_id.compact_hash_128(),
-                Some(query_result),
+                query_result,
                 tx,
             );
         }
@@ -816,11 +766,11 @@ impl<C: Config> Engine<C> {
         &self,
         from: QueryID,
         to: QueryID,
-        tx: &mut WriteBuffer<C::Database, C::BuildHasher>,
+        tx: &mut WriteTransaction<C>,
     ) {
         let edge = Edge { from, to };
 
-        self.computation_graph.persist.dirty_edge_set.put(edge, Some(Unit), tx);
+        self.computation_graph.persist.dirty_edge_set.insert(edge, Unit, tx);
 
         self.computation_graph.add_dirtied_edge_count();
     }
@@ -828,7 +778,7 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::option_option)]
     pub(super) async fn clean_query(
         &self,
-        query_id: QueryID,
+        query_id: &QueryID,
         clean_edges: &[QueryID],
         new_tfc: Option<Interned<TransitiveFirewallCallees>>,
         caller_information: &CallerInformation,
@@ -846,29 +796,28 @@ impl<C: Config> Engine<C> {
             None
         };
 
-        let mut tx = self.new_write_buffer(caller_information).await;
+        let mut tx = self.new_write_transaction(caller_information).await;
 
         {
             for callee in clean_edges.iter().copied() {
-                let edge = Edge { from: query_id, to: callee };
+                let edge = Edge { from: *query_id, to: callee };
 
                 self.computation_graph
                     .persist
                     .dirty_edge_set
-                    .put::<Unit>(edge, None, &mut tx);
+                    .remove(&edge, &mut tx);
             }
 
             if let Some(node_info) = new_node_info {
-                self.computation_graph.persist.query_node.put(
-                    query_id,
-                    Some(node_info),
-                    &mut tx,
-                );
+                self.computation_graph
+                    .persist
+                    .node_info
+                    .insert(*query_id, node_info, &mut tx);
             }
 
-            self.computation_graph.persist.query_node.put(
-                query_id,
-                Some(LastVerified(caller_information.timestamp())),
+            self.computation_graph.persist.last_verified.insert(
+                *query_id,
+                LastVerified(caller_information.timestamp()),
                 &mut tx,
             );
 
@@ -884,7 +833,7 @@ impl<C: Config> Engine<C> {
         self.computation_graph
             .persist
             .dirty_edge_set
-            .get_normal::<Unit>(Edge { from, to })
+            .get(&Edge { from, to })
             .await
             .is_some()
     }
@@ -895,12 +844,12 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
         backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
     ) {
-        let mut tx = self.new_write_buffer(caller_information).await;
+        let mut tx = self.new_write_transaction(caller_information).await;
 
         self.computation_graph
             .persist
-            .query_node
-            .put::<PendingBackwardProjection>(*query_id, None, &mut tx);
+            .pending_backward_projection
+            .remove(query_id, &mut tx);
 
         backward_projection_lock_guard.done();
 
@@ -923,12 +872,12 @@ impl<C: Config> Engine<C> {
             self.computation_graph
                 .persist
                 .query_store
-                .get_normal::<QueryInput<Q>>(query_id)
+                .get::<QueryInput<Q>>(&query_id)
                 .await,
             self.computation_graph
                 .persist
                 .query_store
-                .get_normal::<QueryResult<Q>>(query_id)
+                .get::<QueryResult<Q>>(&query_id)
                 .await,
         ) else {
             return None;

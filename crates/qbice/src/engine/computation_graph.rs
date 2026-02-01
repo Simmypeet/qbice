@@ -12,7 +12,7 @@ pub(crate) use slow_path::GuardedTrackedEngine;
 
 use crate::{
     Engine, ExecutionStyle, Query,
-    config::{Config, DefaultConfig},
+    config::Config,
     engine::computation_graph::{
         caller::CallerKind,
         fast_path::FastPathResult,
@@ -38,12 +38,6 @@ mod slow_path;
 mod statistic;
 mod tfc_achetype;
 mod visualization;
-
-type Sieve<Col, Con> = qbice_storage::sieve::Sieve<
-    Col,
-    <Con as Config>::Database,
-    <Con as Config>::BuildHasher,
->;
 
 #[derive(
     Debug,
@@ -85,9 +79,9 @@ pub struct ComputationGraph<C: Config> {
 }
 
 impl<C: Config> ComputationGraph<C> {
-    pub fn new(db: Arc<<C as Config>::Database>, shard_amount: usize) -> Self {
+    pub async fn new(db: &C::StorageEngine) -> Self {
         Self {
-            persist: Persist::new(db, shard_amount),
+            persist: Persist::new(db).await,
             dirtied_queries: DashSet::default(),
             statistic: Statistic::default(),
             lock: Lock::new(),
@@ -241,7 +235,7 @@ impl<C: Config> TrackedEngine<C> {
             return self
                 .engine
                 .get_query_result::<Q>(
-                    query_with_id.id.compact_hash_128(),
+                    &query_with_id.id.compact_hash_128(),
                     &self.caller,
                 )
                 .await
@@ -352,28 +346,6 @@ impl<C: Config> TrackedEngine<C> {
         active_computation_guard: Option<ActiveComputationGuard>,
     ) -> Self {
         Self { engine, cache, caller, active_computation_guard }
-    }
-}
-
-static_assertions::assert_impl_all!(TrackedEngine<DefaultConfig>: Send, Sync);
-static_assertions::assert_impl_all!(&TrackedEngine<DefaultConfig>: Send, Sync);
-
-impl<C: Config> Clone for TrackedEngine<C> {
-    fn clone(&self) -> Self {
-        Self {
-            engine: self.engine.clone(),
-            cache: self.cache.clone(),
-            caller: self.caller.clone(),
-            active_computation_guard: if self.active_computation_guard.is_some()
-            {
-                panic!(
-                    "cannot clone TrackedEngine synchronously when active \
-                     computation guard is held"
-                );
-            } else {
-                None
-            },
-        }
     }
 }
 
@@ -505,13 +477,14 @@ impl<C: Config> Engine<C> {
         caller: &CallerInformation,
     ) -> Result<QueryResult<Q::Value>, CyclicError> {
         // register the dependency for the sake of detecting cycles
-        let undo_register = self.register_callee(caller.get_caller(), query.id);
+        let undo_register =
+            self.register_callee(caller.get_caller(), &query.id);
 
         let mut checked = QueryRepairation::UpToDate;
 
         // pulling the value
         let value = loop {
-            let slow_path = match self.fast_path::<Q>(query.id, caller).await {
+            let slow_path = match self.fast_path::<Q>(&query.id, caller).await {
                 // try again
                 Ok(FastPathResult::TryAgain) => {
                     continue;
@@ -550,7 +523,7 @@ impl<C: Config> Engine<C> {
             // be restored to previous state (either computed or absent)
             let Some(guard) = self
                 .get_lock_guard(
-                    query.id,
+                    &query.id,
                     slow_path,
                     caller,
                     std::any::type_name::<Q>(),

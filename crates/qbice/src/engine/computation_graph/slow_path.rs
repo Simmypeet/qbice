@@ -94,7 +94,7 @@ impl<C: Config> Engine<C> {
         drop(guarded_tracked_engine);
 
         let is_in_scc =
-            self.computation_graph.lock.get_lock(query.id).is_in_scc();
+            self.computation_graph.lock.get_lock(&query.id).is_in_scc();
 
         // if `is_in_scc` is `true`, it means that the query is part of
         // a strongly connected component (SCC) and the
@@ -111,9 +111,9 @@ impl<C: Config> Engine<C> {
             }
         };
 
-        let old_kind = self.get_query_kind(query.id, caller_information).await;
+        let old_kind = self.get_query_kind(&query.id, caller_information).await;
         let existing_forward_edges =
-            self.get_forward_edges_order(query.id, caller_information).await;
+            self.get_forward_edges_order(&query.id, caller_information).await;
 
         // if the old node info is a firewall or projection node, we compare
         // the old and new value fingerprints to determine if we need to
@@ -127,7 +127,7 @@ impl<C: Config> Engine<C> {
             && execute_query_for == ExecuteQueryFor::RecomputeQuery
         {
             let old_node_info =
-                self.get_node_info(query.id, caller_information).await.expect(
+                self.get_node_info(&query.id, caller_information).await.expect(
                     "old node info should exist for recomputed firewall or \
                      projection",
                 );
@@ -136,11 +136,11 @@ impl<C: Config> Engine<C> {
             let updated = old_node_info.value_fingerprint() != fingerprint;
 
             let mut write_buffer =
-                self.new_write_buffer(caller_information).await;
+                self.new_write_transaction(caller_information).await;
 
             // if fingerprint has changed, we do dirty propagation
             if updated {
-                let list = self.get_dirty_propagate_list(query.id).await;
+                let list = self.get_dirty_propagate_list(&query.id).await;
 
                 for edge in list {
                     self.mark_dirty_forward_edge(
@@ -160,7 +160,7 @@ impl<C: Config> Engine<C> {
                 old_kind.is_firewall() && updated,
             )
         } else {
-            (self.new_write_buffer(caller_information).await, None, false)
+            (self.new_write_transaction(caller_information).await, None, false)
         };
 
         self.computing_lock_to_computed(
@@ -180,7 +180,7 @@ impl<C: Config> Engine<C> {
             invoke_backward_projection: true
         }) && need_backward_projection_propagation
         {
-            self.try_do_backward_projections(query.id, caller_information)
+            self.try_do_backward_projections(&query.id, caller_information)
                 .await;
         }
     }
@@ -209,7 +209,7 @@ impl<C: Config> Engine<C> {
 
             LockGuard::BackwardProjectionLockGuard(lock_guard) => {
                 self.invoke_backward_projections(
-                    query.id,
+                    &query.id,
                     caller_information,
                     lock_guard,
                 )

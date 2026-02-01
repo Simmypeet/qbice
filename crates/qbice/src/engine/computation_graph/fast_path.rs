@@ -26,9 +26,9 @@ impl<C: Config> Engine<C> {
     fn observe_callee_fingerprint(
         &self,
         callee_info: &NodeInfo,
-        callee_target: QueryID,
+        callee_target: &QueryID,
         callee_kind: QueryKind,
-        caller_source: QueryID,
+        caller_source: &QueryID,
     ) {
         // add dependency for the caller
         let caller_computing =
@@ -44,14 +44,14 @@ impl<C: Config> Engine<C> {
             &caller_computing,
             callee_info,
             callee_kind,
-            callee_target,
+            *callee_target,
         );
     }
 
     /// Exit early if a cyclic dependency is detected.
     fn exit_scc(
         &self,
-        called_from: Option<QueryID>,
+        called_from: Option<&QueryID>,
         running_state: &Computing,
     ) -> Result<(), CyclicError> {
         // if there is no caller, we are at the root.
@@ -75,7 +75,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) async fn fast_path<Q: Query>(
         self: &Arc<Self>,
-        query_id: QueryID,
+        query_id: &QueryID,
         caller: &CallerInformation,
     ) -> Result<FastPathResult<Q::Value>, CyclicError> {
         if let Some((notified_owned, computing)) =
@@ -131,7 +131,7 @@ impl<C: Config> Engine<C> {
             // gets the result
             let query_result = if caller.require_value() {
                 let Some(query_result) = self
-                    .get_query_result::<Q>(query_id.hash_128().into(), caller)
+                    .get_query_result::<Q>(&query_id.hash_128().into(), caller)
                     .await
                 else {
                     return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
@@ -151,7 +151,7 @@ impl<C: Config> Engine<C> {
                     &query_info,
                     query_id,
                     kind,
-                    *caller_requiring_value,
+                    caller_requiring_value,
                 );
             }
 

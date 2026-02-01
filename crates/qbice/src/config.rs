@@ -82,12 +82,9 @@ use std::{
     hash::{BuildHasher, Hash},
 };
 
-use fxhash::FxBuildHasher;
-use qbice_stable_hash::{
-    BuildStableHasher, SeededStableHasherBuilder, Sip128Hasher,
-};
+use qbice_stable_hash::BuildStableHasher;
 use qbice_stable_type_id::Identifiable;
-use qbice_storage::kv_database::{KvDatabase, rocksdb::RocksDB};
+use qbice_storage::storage_engine::StorageEngine;
 
 /// Configuration trait for the QBICE engine.
 ///
@@ -168,7 +165,7 @@ pub trait Config:
     + 'static
 {
     /// The key-value database backend used by the engine.
-    type Database: KvDatabase;
+    type StorageEngine: StorageEngine;
 
     /// The stable hasher builder used by the engine.
     type BuildStableHasher: BuildStableHasher<Hash = u128>
@@ -265,75 +262,92 @@ pub trait Config:
     }
 }
 
-/// The default configuration for the QBICE engine.
-///
-/// This configuration provides sensible defaults suitable for most
-/// applications. It uses:
-///
-/// - **Storage**: 16-byte inline storage (suitable for small to medium keys)
-/// - **Database**: `RocksDB` for persistent storage
-/// - **Stable Hasher**: SipHash-128 for deterministic query identification
-/// - **Standard Hasher**: `FxHash` for fast internal hash maps
-/// - **Cache Capacity**: 262,144 entries (2^18)
-/// - **Writer Threads**: 2 background writers
-///
-/// # When to Use
-///
-/// `DefaultConfig` is appropriate for:
-/// - Quick prototyping and development
-/// - Applications with typical query sizes and workload patterns
-/// - Projects that don't require specialized performance tuning
-///
-/// # When to Customize
-///
-/// Consider implementing a custom [`Config`] if you need:
-/// - Different inline storage sizes for larger/smaller query keys
-/// - Alternative database backends
-/// - Tuned cache capacities for your workload
-/// - Custom thread pool configurations
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::sync::Arc;
-/// use qbice::{DefaultConfig, Engine, serialize::Plugin};
-/// use qbice::stable_hash::{SeededStableHasherBuilder, Sip128Hasher};
-/// use qbice::storage::kv_database::rocksdb::RocksDB;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let temp_dir = tempfile::tempdir()?;
-///
-/// // Create an engine with default configuration
-/// let engine = Engine::<DefaultConfig>::new_with(
-///     Plugin::default(),
-///     RocksDB::factory(temp_dir.path()),
-///     SeededStableHasherBuilder::<Sip128Hasher>::new(0),
-/// )?;
-///
-/// // Ready to use!
-/// # Ok(())
-/// # }
-/// ```
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    Identifiable,
-)]
-#[cfg(feature = "default_config")]
-pub struct DefaultConfig;
+// The default configuration for the QBICE engine.
+//
+// This configuration provides sensible defaults suitable for most
+// applications. It uses:
+//
+// - **Storage**: 16-byte inline storage (suitable for small to medium keys)
+// - **Database**: `RocksDB` for persistent storage
+// - **Stable Hasher**: SipHash-128 for deterministic query identification
+// - **Standard Hasher**: `FxHash` for fast internal hash maps
+// - **Cache Capacity**: 262,144 entries (2^18)
+// - **Writer Threads**: 2 background writers
+//
+// # When to Use
+//
+// `DefaultConfig` is appropriate for:
+// - Quick prototyping and development
+// - Applications with typical query sizes and workload patterns
+// - Projects that don't require specialized performance tuning
+//
+// # When to Customize
+//
+// Consider implementing a custom [`Config`] if you need:
+// - Different inline storage sizes for larger/smaller query keys
+// - Alternative database backends
+// - Tuned cache capacities for your workload
+// - Custom thread pool configurations
+//
+// # Example
+//
+// ```rust,ignore
+// use std::sync::Arc;
+// use qbice::{DefaultConfig, Engine, serialize::Plugin};
+// use qbice::stable_hash::{SeededStableHasherBuilder, Sip128Hasher};
+// use qbice::storage::kv_database::rocksdb::RocksDB;
+//
+// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+// let temp_dir = tempfile::tempdir()?;
+//
+// // Create an engine with default configuration
+// let engine = Engine::<DefaultConfig>::new_with(
+//     Plugin::default(),
+//     RocksDB::factory(temp_dir.path()),
+//     SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+// )?;
+//
+// // Ready to use!
+// # Ok(())
+// # }
+// ```
 
-#[cfg(feature = "default_config")]
-impl Config for DefaultConfig {
-    type Database = RocksDB;
+// #[derive(
+//     Debug,
+//     Clone,
+//     Copy,
+//     PartialEq,
+//     Eq,
+//     PartialOrd,
+//     Ord,
+//     Hash,
+//     Default,
+//     Identifiable,
+// )]
+// #[cfg(feature = "default_config")]
+// pub struct DefaultConfig;
 
-    type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
+// #[cfg(feature = "default_config")]
+// impl Config for DefaultConfig {
+//     type Database = RocksDB;
 
-    type BuildHasher = FxBuildHasher;
-}
+//     type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
+
+//     type BuildHasher = FxBuildHasher;
+// }
+
+/// Type alias for a single map in the storage engine.
+pub type SingleMap<C, K, V> =
+    <<C as Config>::StorageEngine as StorageEngine>::SingleMap<K, V>;
+
+/// Type alias for a dynamic map in the storage engine.
+pub type DynamicMap<C, K> =
+    <<C as Config>::StorageEngine as StorageEngine>::DynamicMap<K>;
+
+/// Type alias for a key-of-set map in the storage engine.
+pub type KeyOfSetMap<C, K, Con> =
+    <<C as Config>::StorageEngine as StorageEngine>::KeyOfSetMap<K, Con>;
+
+/// Type alias for a write transaction in the storage engine.
+pub type WriteTransaction<C> =
+    <<C as Config>::StorageEngine as StorageEngine>::WriteTransaction;

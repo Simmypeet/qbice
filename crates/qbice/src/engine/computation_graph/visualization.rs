@@ -221,8 +221,8 @@ impl<C: Config> Engine<C> {
 
             // Get the query meta
             let (Some(kind), Some(forward_edge)) = (
-                self.get_query_kind(current_id, &caller).await,
-                self.get_forward_edges_order(current_id, &caller).await,
+                self.get_query_kind(&current_id, &caller).await,
+                self.get_forward_edges_order(&current_id, &caller).await,
             ) else {
                 continue;
             };

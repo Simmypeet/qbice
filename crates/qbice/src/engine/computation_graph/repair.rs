@@ -34,11 +34,11 @@ impl<C: Config> Engine<C> {
         let mut cleaned_edges = Vec::new();
 
         let forward_edges = self
-            .get_forward_edges_order(query.id, caller_information)
+            .get_forward_edges_order(&query.id, caller_information)
             .await
             .unwrap();
         let forward_edge_observations = self
-            .get_forward_edge_observations(query.id, caller_information)
+            .get_forward_edge_observations(&query.id, caller_information)
             .await
             .unwrap();
 
@@ -49,7 +49,7 @@ impl<C: Config> Engine<C> {
             }
 
             let kind =
-                self.get_query_kind(*callee, caller_information).await.unwrap();
+                self.get_query_kind(callee, caller_information).await.unwrap();
 
             // NOTE: if the callee is an input (explicitly set), it's impossible
             // to try to repair it, so we'll skip repairing and directly
@@ -63,8 +63,8 @@ impl<C: Config> Engine<C> {
                 let _ = entry
                     .repair_query_from_query_id(
                         self,
-                        callee.compact_hash_128(),
-                        CallerInformation::new(
+                        &callee.compact_hash_128(),
+                        &CallerInformation::new(
                             CallerKind::Query(QueryCaller::new(
                                 query.id,
                                 CallerReason::Repair,
@@ -79,7 +79,7 @@ impl<C: Config> Engine<C> {
             // recompute
             {
                 let callee_node_info = self
-                    .get_node_info(*callee, caller_information)
+                    .get_node_info(callee, caller_information)
                     .await
                     .expect(
                         "callee node info should exist when forward edge \
@@ -129,10 +129,10 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
     ) {
         let node_info =
-            self.get_node_info(query.id, caller_information).await.unwrap();
+            self.get_node_info(&query.id, caller_information).await.unwrap();
 
         let is_current_query_projection = self
-            .get_query_kind(query.id, caller_information)
+            .get_query_kind(&query.id, caller_information)
             .await
             .unwrap()
             .is_projection();
@@ -165,8 +165,8 @@ impl<C: Config> Engine<C> {
                     let _ = executor
                         .repair_query_from_query_id(
                             &engine,
-                            tfc.compact_hash_128(),
-                            CallerInformation::new(
+                            &tfc.compact_hash_128(),
+                            &CallerInformation::new(
                                 CallerKind::RepairFirewall {
                                     // if current query is projection, then
                                     // repairing the firewalls should not invoke
@@ -238,7 +238,7 @@ impl<C: Config> Engine<C> {
 
         if repair_transitive_firewall_callees.not() {
             self.computing_lock_to_clean_query(
-                query.id,
+                &query.id,
                 &cleaned_edges,
                 None,
                 caller_information,
@@ -247,7 +247,7 @@ impl<C: Config> Engine<C> {
             .await;
         } else {
             let forward_edges = self
-                .get_forward_edges_order(query.id, caller_information)
+                .get_forward_edges_order(&query.id, caller_information)
                 .await
                 .unwrap();
 
@@ -260,8 +260,8 @@ impl<C: Config> Engine<C> {
                 let _ = entry
                     .repair_query_from_query_id(
                         self,
-                        callee.compact_hash_128(),
-                        CallerInformation::new(
+                        &callee.compact_hash_128(),
+                        &CallerInformation::new(
                             CallerKind::Query(QueryCaller::new(
                                 query.id,
                                 CallerReason::Repair,
@@ -276,13 +276,13 @@ impl<C: Config> Engine<C> {
 
             for x in forward_edges.iter() {
                 let kind =
-                    self.get_query_kind(*x, caller_information).await.unwrap();
+                    self.get_query_kind(x, caller_information).await.unwrap();
 
                 if kind.is_firewall() {
                     new_tfcs.insert(*x);
                 } else {
                     let callee_info = self
-                        .get_node_info(*x, caller_information)
+                        .get_node_info(x, caller_information)
                         .await
                         .unwrap();
 
@@ -298,7 +298,7 @@ impl<C: Config> Engine<C> {
             let new_tfc = self.create_tfc(new_tfcs);
 
             self.computing_lock_to_clean_query(
-                query.id,
+                &query.id,
                 &cleaned_edges,
                 Some(new_tfc),
                 caller_information,
@@ -335,22 +335,20 @@ impl<C: Config> Engine<C> {
 
     pub(crate) fn repair_query_from_query_id<'x, Q: Query>(
         self: &'x Arc<Self>,
-        query_id: Compact128,
-        called_from: CallerInformation,
+        query_id: &'x Compact128,
+        called_from: &'x CallerInformation,
     ) -> Pin<Box<dyn Future<Output = Result<(), CyclicError>> + Send + 'x>>
     {
         Box::pin(async move {
-            let query_input = self
-                .get_query_input::<Q>(query_id, &called_from)
-                .await
-                .unwrap();
+            let query_input =
+                self.get_query_input::<Q>(query_id, called_from).await.unwrap();
 
             let query_for = QueryWithID {
-                id: QueryID::new::<Q>(query_id),
+                id: QueryID::new::<Q>(*query_id),
                 query: &query_input,
             };
 
-            self.query_for(&query_for, &called_from).await.map(|_| ())
+            self.query_for(&query_for, called_from).await.map(|_| ())
         })
     }
 }

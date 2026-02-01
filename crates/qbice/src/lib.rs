@@ -352,7 +352,7 @@ pub mod executor;
 pub mod program;
 pub mod query;
 
-pub use config::{Config, DefaultConfig};
+pub use config::Config;
 pub use engine::{
     Engine,
     computation_graph::{InputSession, SetInputResult, TrackedEngine},

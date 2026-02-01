@@ -13,9 +13,10 @@ use crate::{
 };
 
 impl<C: Config> Engine<C> {
+    #[allow(clippy::await_holding_lock)]
     pub(super) async fn invoke_backward_projections(
         self: &Arc<Self>,
-        current_query_id: QueryID,
+        current_query_id: &QueryID,
         caller_information: &CallerInformation,
         backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
     ) {
@@ -23,14 +24,14 @@ impl<C: Config> Engine<C> {
             self.get_backward_edges(current_query_id, caller_information).await;
 
         let mut backward_projections = Vec::new();
-        for query_id in &backward_edges {
+        for query_id in backward_edges.0.read().iter() {
             let query_kind = self
-                .get_query_kind(*query_id, caller_information)
+                .get_query_kind(&query_id, caller_information)
                 .await
                 .unwrap();
 
             if query_kind.is_projection() {
-                backward_projections.push(*query_id);
+                backward_projections.push(query_id);
             }
         }
 
@@ -60,8 +61,8 @@ impl<C: Config> Engine<C> {
                     let _ = entry
                         .repair_query_from_query_id(
                             &engine,
-                            query_id.compact_hash_128(),
-                            CallerInformation::new(
+                            &query_id.compact_hash_128(),
+                            &CallerInformation::new(
                                 CallerKind::BackwardProjectionPropagation,
                                 timestamp,
                             ),
@@ -90,7 +91,7 @@ impl<C: Config> Engine<C> {
         }
 
         self.done_backward_projection(
-            &current_query_id,
+            current_query_id,
             caller_information,
             backward_projection_lock_guard,
         )
@@ -98,7 +99,7 @@ impl<C: Config> Engine<C> {
     }
     pub(super) async fn try_do_backward_projections(
         self: &Arc<Self>,
-        query_id: QueryID,
+        query_id: &QueryID,
         caller_information: &CallerInformation,
     ) {
         loop {

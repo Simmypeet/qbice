@@ -42,10 +42,10 @@ use qbice_stable_hash::{
     BuildStableHasher, Compact128, StableHash, StableHasher,
 };
 use qbice_stable_type_id::Identifiable;
-use qbice_storage::{intern::Interner, kv_database::KvDatabaseFactory};
+use qbice_storage::{intern::Interner, storage_engine::StorageEngineFactory};
 
 use crate::{
-    config::{Config, DefaultConfig},
+    config::Config,
     engine::computation_graph::ComputationGraph,
     executor::{Executor, Registry},
     query::Query,
@@ -235,12 +235,10 @@ impl<C: Config> Engine<C> {
     }
 }
 
-static_assertions::assert_impl_all!(&Engine<DefaultConfig>: Send, Sync);
-
 fn default_shard_amount() -> usize {
     static SHARD_AMOUNT: OnceLock<usize> = OnceLock::new();
     *SHARD_AMOUNT.get_or_init(|| {
-        (std::thread::available_parallelism().map_or(1, usize::from) * 8)
+        (std::thread::available_parallelism().map_or(1, usize::from) * 16)
             .next_power_of_two()
     })
 }
@@ -305,7 +303,9 @@ impl<C: Config> Engine<C> {
     /// This method creates the Rayon thread pool specified by
     /// [`Config::rayon_thread_pool_builder()`]. If thread pool creation fails,
     /// this method panics.
-    pub fn new_with<F: KvDatabaseFactory<KvDatabase = C::Database>>(
+    pub async fn new_with<
+        F: StorageEngineFactory<StorageEngine = C::StorageEngine>,
+    >(
         mut serialization_plugin: Plugin,
         database_factory: F,
         stable_hasher: C::BuildStableHasher,
@@ -318,13 +318,10 @@ impl<C: Config> Engine<C> {
             "should have no existing interning pluging installed"
         );
 
-        let database = Arc::new(database_factory.open(serialization_plugin)?);
+        let storage_engine = database_factory.open(serialization_plugin)?;
 
         Ok(Self {
-            computation_graph: ComputationGraph::new(
-                database,
-                default_shard_amount(),
-            ),
+            computation_graph: ComputationGraph::new(&storage_engine).await,
             interner: shared_interner,
             executor_registry: Registry::default(),
             build_stable_hasher: stable_hasher,

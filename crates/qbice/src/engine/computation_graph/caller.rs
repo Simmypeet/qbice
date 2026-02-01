@@ -45,14 +45,14 @@ impl CallerInformation {
         }
     }
 
-    pub const fn get_caller(&self) -> Option<QueryID> {
+    pub const fn get_caller(&self) -> Option<&QueryID> {
         match &self.kind {
             CallerKind::RepairFirewall { .. }
             | CallerKind::BackwardProjectionPropagation
             | CallerKind::Tracing
             | CallerKind::User => None,
 
-            CallerKind::Query(q) => Some(q.query_id),
+            CallerKind::Query(q) => Some(&q.query_id),
         }
     }
 

@@ -15,10 +15,10 @@ pub struct Edge {
 }
 
 impl<C: Config> Engine<C> {
-    #[allow(clippy::manual_async_fn)]
+    #[allow(clippy::manual_async_fn, clippy::await_holding_lock)]
     fn dirty_propagate_async<'a>(
         self: &'a Arc<Self>,
-        query_id: QueryID,
+        query_id: &'a QueryID,
         dirty_list: &'a Arc<Mutex<Vec<Edge>>>,
         bound: &'a Arc<Semaphore>,
     ) -> impl Future<Output = ()> + 'a + Send {
@@ -32,7 +32,8 @@ impl<C: Config> Engine<C> {
                 unsafe { self.get_backward_edges_unchecked(query_id).await };
 
             let mut join_sets = JoinSet::new();
-            for caller in &backward_edges {
+
+            for caller in backward_edges.0.read().iter() {
                 let permit_attempt = bound.clone().try_acquire_owned();
 
                 // can spawn a new task
@@ -40,18 +41,18 @@ impl<C: Config> Engine<C> {
                     let engine = self.clone();
                     let dirty_list = dirty_list.clone();
                     let bound = bound.clone();
-                    let caller = *caller;
+                    let query_id = *query_id;
 
                     join_sets.spawn(async move {
                         let _permit = permit;
 
                         if engine
-                            .stem_child(caller, query_id, &dirty_list)
+                            .stem_child(&caller, &query_id, &dirty_list)
                             .await
                         {
                             engine
                                 .dirty_propagate_async(
-                                    caller,
+                                    &caller,
                                     &dirty_list,
                                     &bound,
                                 )
@@ -60,9 +61,9 @@ impl<C: Config> Engine<C> {
                     });
                 }
                 // has to run in current task
-                else if self.stem_child(*caller, query_id, dirty_list).await {
+                else if self.stem_child(&caller, query_id, dirty_list).await {
                     Box::pin(
-                        self.dirty_propagate_async(*caller, dirty_list, bound),
+                        self.dirty_propagate_async(&caller, dirty_list, bound),
                     )
                     .await;
                 }
@@ -77,11 +78,11 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::similar_names)]
     async fn stem_child(
         self: &Arc<Self>,
-        caller: QueryID,
-        callee: QueryID,
+        caller: &QueryID,
+        callee: &QueryID,
         dirty_list: &Arc<Mutex<Vec<Edge>>>,
     ) -> bool {
-        dirty_list.lock().await.push(Edge { caller, callee });
+        dirty_list.lock().await.push(Edge { caller: *caller, callee: *callee });
 
         let query_kind =
             unsafe { self.get_query_kind_unchecked(caller).await.unwrap() };
@@ -126,14 +127,18 @@ impl<C: Config> Engine<C> {
                         let _permit = permit;
 
                         engine
-                            .dirty_propagate_async(qid, &dirty_list, &semaphore)
+                            .dirty_propagate_async(
+                                &qid,
+                                &dirty_list,
+                                &semaphore,
+                            )
                             .await;
                     });
                 }
                 // has to run in current task
                 Err(_) => {
                     engine
-                        .dirty_propagate_async(qid, &dirty_list, &semaphore)
+                        .dirty_propagate_async(&qid, &dirty_list, &semaphore)
                         .await;
                 }
             }
@@ -150,7 +155,7 @@ impl<C: Config> Engine<C> {
 
     pub(super) async fn get_dirty_propagate_list(
         self: &Arc<Self>,
-        query_id: QueryID,
+        query_id: &QueryID,
     ) -> Vec<Edge> {
         // NOTE: we spawn a join handle here because dirty propagation can't be
         // CANCELLED. If it could be cancelled, then we might leave the
@@ -171,8 +176,8 @@ impl<C: Config> Engine<C> {
             .into_inner()
     }
 
-    pub(super) fn insert_dirty_query(&self, query_id: QueryID) -> bool {
-        self.computation_graph.dirtied_queries.insert(query_id)
+    pub(super) fn insert_dirty_query(&self, query_id: &QueryID) -> bool {
+        self.computation_graph.dirtied_queries.insert(*query_id)
     }
 
     pub(super) fn clear_dirtied_queries(&self) {

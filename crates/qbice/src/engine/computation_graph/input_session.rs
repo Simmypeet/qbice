@@ -3,12 +3,11 @@ use std::{collections::VecDeque, sync::Arc};
 use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
 use qbice_stable_hash::{Compact128, StableHash};
-use qbice_storage::sieve::WriteBuffer;
 use tokio::task::JoinSet;
 
 use crate::{
     Engine, Query, TrackedEngine,
-    config::Config,
+    config::{Config, WriteTransaction},
     engine::computation_graph::{
         ActiveInputSessionGuard,
         caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
@@ -79,7 +78,7 @@ use crate::{
 pub struct InputSession<C: Config> {
     engine: Arc<Engine<C>>,
     dirty_batch: VecDeque<QueryID>,
-    transaction: Option<WriteBuffer<C::Database, C::BuildHasher>>,
+    transaction: Option<WriteTransaction<C>>,
 
     active_input_session_guard: Option<ActiveInputSessionGuard>,
 }
@@ -125,7 +124,7 @@ impl<C: Config> InputSession<C> {
     async fn commit_internal(
         engine: Arc<Engine<C>>,
         dirty_batch: VecDeque<QueryID>,
-        mut transaction: WriteBuffer<C::Database, C::BuildHasher>,
+        mut transaction: WriteTransaction<C>,
     ) {
         engine.computation_graph.reset_statistic();
         engine.clear_dirtied_queries();
@@ -298,7 +297,7 @@ impl<C: Config> InputSession<C> {
         // has prior node infos, check for fingerprint diff
         // also, unwire the backward edges (if any)
         let set_input_result = if let Some(node_info) =
-            unsafe { self.engine.get_node_info_unchecked(query_id).await }
+            unsafe { self.engine.get_node_info_unchecked(&query_id).await }
         {
             let fingerprint_diff =
                 node_info.value_fingerprint() != query_value_fingerprint;
@@ -415,11 +414,11 @@ impl<C: Config> InputSession<C> {
                     let (query, old_node_info) = unsafe {
                         (
                             engine
-                                .get_query_input_unchecked::<Q>(query_hash)
+                                .get_query_input_unchecked::<Q>(&query_hash)
                                 .await
                                 .unwrap(),
                             engine
-                                .get_node_info_unchecked(query_id)
+                                .get_node_info_unchecked(&query_id)
                                 .await
                                 .unwrap(),
                         )

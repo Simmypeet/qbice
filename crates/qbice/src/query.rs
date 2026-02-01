@@ -347,6 +347,15 @@ impl QueryID {
         Self { stable_type_id: stable_type_id.into(), hash_128 }
     }
 
+    /// Constructs a `QueryID` from its component parts.
+    #[must_use]
+    pub const fn from_parts(
+        stable_type_id: Compact128,
+        hash_128: Compact128,
+    ) -> Self {
+        Self { stable_type_id, hash_128 }
+    }
+
     /// Returns the stable type ID of this query.
     ///
     /// The type ID uniquely identifies the query's Rust type.
@@ -370,4 +379,10 @@ impl QueryID {
     /// Returns the compact representation of the 128-bit content hash.
     #[must_use]
     pub const fn compact_hash_128(&self) -> Compact128 { self.hash_128 }
+
+    /// Returns the compact representation of the stable type ID.
+    #[must_use]
+    pub const fn compact_stable_type_id(&self) -> Compact128 {
+        self.stable_type_id
+    }
 }
