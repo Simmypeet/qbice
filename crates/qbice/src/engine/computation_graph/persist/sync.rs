@@ -199,6 +199,8 @@ impl<C: Config> Engine<C> {
 }
 
 impl<C: Config> Engine<C> {
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_forward_edges_order(
         &self,
         query_id: QueryID,
@@ -219,13 +221,15 @@ impl<C: Config> Engine<C> {
                     .query_node
                     .get_normal::<ForwardEdgeOrder>(query_id)
                     .await
-                    .map(|x| x.0.clone());
+                    .map(|x| x.0);
             }
         }
 
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_forward_edge_observations(
         &self,
         query_id: QueryID,
@@ -246,13 +250,15 @@ impl<C: Config> Engine<C> {
                     .query_node
                     .get_normal::<ForwardEdgeObservation<C>>(query_id)
                     .await
-                    .map(|x| x.0.clone());
+                    .map(|x| x.0);
             }
         }
 
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_node_info(
         &self,
         query_id: QueryID,
@@ -272,14 +278,15 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_node
                     .get_normal::<NodeInfo>(query_id)
-                    .await
-                    .map(|x| x.clone());
+                    .await;
             }
         }
 
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_query_kind(
         &self,
         query_id: QueryID,
@@ -299,14 +306,15 @@ impl<C: Config> Engine<C> {
                     .persist
                     .query_node
                     .get_normal::<QueryKind>(query_id)
-                    .await
-                    .map(|x| *x);
+                    .await;
             }
         }
 
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_last_verified(
         &self,
         query_id: QueryID,
@@ -334,6 +342,8 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_backward_edges(
         &self,
         query_id: QueryID,
@@ -353,14 +363,15 @@ impl<C: Config> Engine<C> {
                     .persist
                     .backward_edges
                     .get_set(&query_id)
-                    .await
-                    .clone();
+                    .await;
             }
         }
 
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_query_result<
         Q: Query,
     >(
@@ -383,13 +394,15 @@ impl<C: Config> Engine<C> {
                     .query_store
                     .get_normal::<QueryResult<Q>>(query_input_hash_128)
                     .await
-                    .map(|x| x.0.clone());
+                    .map(|x| x.0);
             }
         }
 
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_pending_backward_projection(
         &self,
         query_id: QueryID,
@@ -417,6 +430,8 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_query_input<
         Q: Query,
     >(
@@ -439,13 +454,15 @@ impl<C: Config> Engine<C> {
                     .query_store
                     .get_normal::<QueryInput<Q>>(query_id)
                     .await
-                    .map(|x| x.0.clone());
+                    .map(|x| x.0);
             }
         }
 
         self.cancel().await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_forward_edges_order_unchecked(
         &self,
         query_id: QueryID,
@@ -455,21 +472,20 @@ impl<C: Config> Engine<C> {
             .query_node
             .get_normal::<ForwardEdgeOrder>(query_id)
             .await
-            .map(|x| x.0.clone())
+            .map(|x| x.0)
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_backward_edges_unchecked(
         &self,
         query_id: QueryID,
     ) -> BackwardEdge<C> {
-        self.computation_graph
-            .persist
-            .backward_edges
-            .get_set(&query_id)
-            .await
-            .clone()
+        self.computation_graph.persist.backward_edges.get_set(&query_id).await
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_query_kind_unchecked(
         &self,
         query_id: QueryID,
@@ -479,9 +495,10 @@ impl<C: Config> Engine<C> {
             .query_node
             .get_normal::<QueryKind>(query_id)
             .await
-            .map(|x| *x)
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_node_info_unchecked(
         &self,
         query_id: QueryID,
@@ -491,9 +508,10 @@ impl<C: Config> Engine<C> {
             .query_node
             .get_normal::<NodeInfo>(query_id)
             .await
-            .map(|x| x.clone())
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_query_input_unchecked<
         Q: Query,
     >(
@@ -505,9 +523,11 @@ impl<C: Config> Engine<C> {
             .query_store
             .get_normal::<QueryInput<Q>>(query_id)
             .await
-            .map(|x| x.0.clone())
+            .map(|x| x.0)
     }
 
+    #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_external_input_queries(
         &self,
         type_id: &StableTypeID,
@@ -517,6 +537,5 @@ impl<C: Config> Engine<C> {
             .external_input_queries
             .get_set(type_id)
             .await
-            .clone()
     }
 }

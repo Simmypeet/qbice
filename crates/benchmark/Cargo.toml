@@ -13,11 +13,11 @@ qbice = { path = "../qbice" }
 tempfile.workspace = true
 criterion.workspace = true
 tokio = { version = "1", features = ["full"] }
+mimalloc = "*"
 
-[[bench]]
+[[bin]]
 name = "firewall"
 path = "benches/firewall.rs"
-harness = false
 
 
 [lints]

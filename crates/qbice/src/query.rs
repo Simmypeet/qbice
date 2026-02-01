@@ -129,7 +129,7 @@ pub trait Query:
 {
     /// The output value type associated with this query.
     ///
-    /// This is the type returned when querying the engine for this query key.
+    /// This is the type returned when fuerying the engine for this query key.
     type Value: 'static
         + Send
         + Sync

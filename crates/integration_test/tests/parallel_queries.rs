@@ -121,7 +121,9 @@ impl<C: Config> Executor<ReadVariableMap, C> for ReadVariableMapExecutor {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::cast_possible_wrap)]
 async fn parallel_read_variable_map() {
-    for _ in 0..1_000 {
+    for i in 0..1_000 {
+        println!("attempting iteration: {i}");
+
         let tempdir = tempdir().unwrap();
         let mut engine = create_test_engine(&tempdir);
 

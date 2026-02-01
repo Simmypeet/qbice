@@ -71,7 +71,6 @@
 use core::fmt;
 use std::{
     any::{Any, TypeId},
-    borrow::Borrow,
     collections::{HashMap, hash_map},
     fmt::Debug,
     hash::{BuildHasher, BuildHasherDefault, Hash},
@@ -88,6 +87,7 @@ use enum_as_inner::EnumAsInner;
 use parking_lot::RwLockUpgradableReadGuard;
 
 use crate::{
+    key_of_set_map::ConcurrentSet,
     kv_database::{KeyOfSetColumn, KvDatabase, WideColumn, WideColumnValue},
     sharded::Sharded,
     sieve::single_flight::SingleFlight,
@@ -178,44 +178,6 @@ pub type WideColumnSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
 /// A sharded sieve cache operating on key-of-set columns data schema.
 pub type KeyOfSetSieve<C, DB, S = BuildHasherDefault<fxhash::FxHasher>> =
     Sieve<KeyOfSetAdaptor<C>, DB, S>;
-
-/// A trait for containers used in key-of-set storage.
-///
-/// This implemented type must be able to clone itself in cheap manner. For
-/// example, `Arc<DashSet<T>>` is a good candidate.
-pub trait ConcurrentSet {
-    /// The type of elements stored in the set.
-    type Element;
-
-    /// Inserts an element into the set.
-    fn insert_element(&self, element: Self::Element);
-
-    /// Removes an element from the set.
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the element was present and removed
-    /// - `false` if the element was not found in the set
-    fn remove_element<Q: Hash + Eq + ?Sized>(&self, element: &Q) -> bool
-    where
-        Self::Element: Borrow<Q>;
-}
-
-impl<T> ConcurrentSet for Arc<DashSet<T>>
-where
-    T: Eq + Hash + Clone,
-{
-    type Element = T;
-
-    fn insert_element(&self, element: Self::Element) { self.insert(element); }
-
-    fn remove_element<Q: Hash + Eq + ?Sized>(&self, element: &Q) -> bool
-    where
-        Self::Element: Borrow<Q>,
-    {
-        self.remove(element).is_some()
-    }
-}
 
 struct StorageEntry<V: ?Sized> {
     visited: AtomicBool,
@@ -839,12 +801,7 @@ impl<C: WideColumn, DB: KvDatabase, S: write_behind::BuildHasher>
 /// ```
 pub trait KeyOfSetContainer: KeyOfSetColumn {
     /// The in-memory container type used to represent the set.
-    type Container: FromIterator<Self::Element>
-        + ConcurrentSet<Element = Self::Element>
-        + Clone
-        + Send
-        + Sync
-        + 'static;
+    type Container: ConcurrentSet<Element = Self::Element>;
 }
 
 impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>

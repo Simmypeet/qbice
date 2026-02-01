@@ -100,8 +100,40 @@
 //! - **Write Efficiency**: Optimized for high-throughput write workloads with
 //!   batching and background writing.
 
+/// A map storage abstraction that supports dynamic value types per key.
+///
+/// This module provides the [`DynamicMap`](dynamic_map::DynamicMap) trait for
+/// key-value storage where the value type can vary dynamically based on a
+/// discriminant.
+pub mod dynamic_map;
 pub mod intern;
+/// A map storage abstraction for key-to-set relationships.
+///
+/// This module provides the [`KeyOfSetMap`](key_of_set_map::KeyOfSetMap) trait
+/// for efficiently storing and managing `HashMap<K, HashSet<V>>` relationships.
+pub mod key_of_set_map;
 pub mod kv_database;
-pub mod sieve;
+// pub mod sieve;
+/// A map storage abstraction for single value types per key.
+///
+/// This module provides the [`SingleMap`](single_map::SingleMap) trait for
+/// key-value storage with a fixed value type.
+pub mod single_map;
+/// The main storage engine abstraction.
+///
+/// This module provides the [`StorageEngine`](storage_engine::StorageEngine)
+/// trait that combines all map types and write management into a unified
+/// storage interface.
+pub mod storage_engine;
+/// Write transaction management.
+///
+/// This module provides the [`WriteManager`](write_manager::WriteManager) trait
+/// for managing write transactions and ensuring atomicity of write operations.
+pub mod write_manager;
+/// Write batch abstractions for atomic operations.
+///
+/// This module provides the [`WriteBatch`](write_batch::WriteBatch) trait for
+/// grouping multiple write operations into atomic batches.
+pub mod write_transaction;
 
 pub(crate) mod sharded;

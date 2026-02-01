@@ -11,6 +11,7 @@ use qbice_stable_type_id::Identifiable;
 
 mod buffer_pool;
 mod default_shard_amount;
+pub mod in_memory;
 
 #[cfg(feature = "fjall")]
 pub mod fjall;

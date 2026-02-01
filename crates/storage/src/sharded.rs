@@ -1,5 +1,16 @@
+use std::sync::OnceLock;
+
 use crossbeam_utils::CachePadded;
 use parking_lot::RwLock;
+
+pub fn default_shard_amount() -> usize {
+    static DEFAULT_SHARD_AMOUNT: OnceLock<usize> = OnceLock::new();
+
+    *DEFAULT_SHARD_AMOUNT.get_or_init(|| {
+        (std::thread::available_parallelism().map_or(1, usize::from) * 8)
+            .next_power_of_two()
+    })
+}
 
 pub(crate) struct Sharded<T> {
     shards: Box<[CachePadded<RwLock<T>>]>,
@@ -41,14 +52,7 @@ impl<T> Sharded<T> {
         &self,
         shard_index: usize,
     ) -> parking_lot::RwLockReadGuard<'_, T> {
-        self.shards[shard_index].read()
-    }
-
-    pub fn upgradable_read_shard(
-        &self,
-        shard_index: usize,
-    ) -> parking_lot::RwLockUpgradableReadGuard<'_, T> {
-        self.shards[shard_index].upgradable_read()
+        self.shards[shard_index].read_recursive()
     }
 
     pub fn write_shard(

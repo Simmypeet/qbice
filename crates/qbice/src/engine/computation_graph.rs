@@ -320,6 +320,25 @@ impl<C: Config> TrackedEngine<C> {
     }
 }
 
+impl<C: Config> Clone for TrackedEngine<C> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            cache: self.cache.clone(),
+            caller: self.caller.clone(),
+            active_computation_guard: if self.active_computation_guard.is_some()
+            {
+                panic!(
+                    "Cannot clone TrackedEngine<DefaultConfig> synchronously. \
+                     Use `clone_async` instead."
+                );
+            } else {
+                None
+            },
+        }
+    }
+}
+
 impl<C: Config> TrackedEngine<C> {
     /// Creates a new `TrackedEngine` with the given engine, cache, and caller
     /// information.
