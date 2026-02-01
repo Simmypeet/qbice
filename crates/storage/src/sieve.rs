@@ -151,7 +151,16 @@ pub enum KeyOfSetEntry<C: KeyOfSetContainer> {
 
     /// The complete set is not stored; instead, a list of operations to apply
     /// is kept.
-    Partial(DashMap<C::Element, Operation>),
+    Partial(Arc<DashMap<C::Element, Operation>>),
+}
+
+impl<C: KeyOfSetContainer> Clone for KeyOfSetEntry<C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Full(container) => Self::Full(container.clone()),
+            Self::Partial(ops) => Self::Partial(ops.clone()),
+        }
+    }
 }
 
 impl<C: KeyOfSetContainer> BackingStorage for KeyOfSetAdaptor<C> {
@@ -321,9 +330,6 @@ impl<K> Policy<K> {
 
                 if let Some(existing_key) = &self.keys[index] {
                     let pending_writes = {
-                        let read_lock =
-                            sharded_storages.read_shard(shard_index);
-
                         let entry = read_lock
                             .get(existing_key)
                             .expect("should exist in storage");
@@ -1000,7 +1006,7 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: BuildHasher>
                         };
 
                         if let Some(partial_ops) = partial {
-                            for entry in partial_ops {
+                            for entry in partial_ops.iter() {
                                 match entry.value() {
                                     Operation::Insert => {
                                         db_value.insert_element(
@@ -1121,27 +1127,34 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
             self,
         );
 
-        {
+        let cloned = {
             let read_shard = self.storages.read_shard(shard_index);
 
-            if let Some(entry) = read_shard.get(key) {
-                match &entry.value {
-                    KeyOfSetEntry::Full(container) => {
-                        container.insert_element(element);
+            read_shard.get(key).map_or_else(
+                || None,
+                |entry| {
+                    if updated {
+                        entry
+                            .pending_writes
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
-                    KeyOfSetEntry::Partial(partial) => {
-                        partial.insert(element, Operation::Insert);
-                    }
-                }
 
-                if updated {
-                    entry
-                        .pending_writes
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
+                    Some(entry.value.clone())
+                },
+            )
+        };
 
-                return;
+        if let Some(value) = cloned {
+            match value {
+                KeyOfSetEntry::Full(container) => {
+                    container.insert_element(element);
+                }
+                KeyOfSetEntry::Partial(partial) => {
+                    partial.insert(element, Operation::Insert);
+                }
             }
+
+            return;
         }
 
         // has to acquire write lock
@@ -1150,7 +1163,16 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
 
         match write_lock.entry(key.clone()) {
             hash_map::Entry::Occupied(mut entry) => {
-                match &mut entry.get_mut().value {
+                let cloned = entry.get_mut().value.clone();
+
+                if updated {
+                    *entry.get_mut().pending_writes.get_mut() += 1;
+                }
+
+                // drop write lock first
+                drop(write_lock);
+
+                match cloned {
                     KeyOfSetEntry::Full(container) => {
                         container.insert_element(element);
                     }
@@ -1158,14 +1180,10 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                         partial.insert(element, Operation::Insert);
                     }
                 }
-
-                if updated {
-                    *entry.get_mut().pending_writes.get_mut() += 1;
-                }
             }
 
             hash_map::Entry::Vacant(entry) => {
-                let partial = DashMap::new();
+                let partial = Arc::new(DashMap::new());
                 partial.insert(element, Operation::Insert);
 
                 entry.insert(StorageEntry {
@@ -1253,55 +1271,68 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
         let updated = write_buffer.key_of_set_writes.put(
             key.clone(),
             element.clone(),
-            Operation::Delete,
+            Operation::Insert,
             self,
         );
 
-        {
+        let cloned = {
             let read_shard = self.storages.read_shard(shard_index);
 
-            if let Some(entry) = read_shard.get(key) {
-                match &entry.value {
-                    KeyOfSetEntry::Full(container) => {
-                        container.remove_element(element);
+            read_shard.get(key).map_or_else(
+                || None,
+                |entry| {
+                    if updated {
+                        entry
+                            .pending_writes
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
-                    KeyOfSetEntry::Partial(partial) => {
-                        partial.insert(element.clone(), Operation::Delete);
-                    }
-                }
 
-                if updated {
-                    entry
-                        .pending_writes
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
+                    Some(entry.value.clone())
+                },
+            )
+        };
 
-                return;
+        if let Some(value) = cloned {
+            match value {
+                KeyOfSetEntry::Full(container) => {
+                    container.remove_element(element);
+                }
+                KeyOfSetEntry::Partial(partial) => {
+                    partial.insert(element.clone(), Operation::Insert);
+                }
             }
+
+            return;
         }
 
         // has to acquire write lock
+
         let mut write_lock = self.storages.write_shard(shard_index);
 
         match write_lock.entry(key.clone()) {
             hash_map::Entry::Occupied(mut entry) => {
-                match &mut entry.get_mut().value {
-                    KeyOfSetEntry::Full(container) => {
-                        container.remove_element(element);
-                    }
-                    KeyOfSetEntry::Partial(partial) => {
-                        partial.insert(element.clone(), Operation::Delete);
-                    }
-                }
+                let cloned = entry.get_mut().value.clone();
 
                 if updated {
                     *entry.get_mut().pending_writes.get_mut() += 1;
                 }
+
+                // drop write lock first
+                drop(write_lock);
+
+                match cloned {
+                    KeyOfSetEntry::Full(container) => {
+                        container.remove_element(element);
+                    }
+                    KeyOfSetEntry::Partial(partial) => {
+                        partial.insert(element.clone(), Operation::Insert);
+                    }
+                }
             }
 
             hash_map::Entry::Vacant(entry) => {
-                let partial = DashMap::new();
-                partial.insert(element.clone(), Operation::Delete);
+                let partial = Arc::new(DashMap::new());
+                partial.insert(element.clone(), Operation::Insert);
 
                 entry.insert(StorageEntry {
                     value: KeyOfSetEntry::Partial(partial),
@@ -1314,6 +1345,8 @@ impl<C: KeyOfSetContainer, DB: KvDatabase, S: write_behind::BuildHasher>
                 let mut policy_lock = self.policies.write_shard(shard_index);
 
                 policy_lock.insert(key.clone(), &self.storages, shard_index);
+
+                drop(policy_lock);
             }
         }
     }
