@@ -14,8 +14,8 @@ use crate::{
     config::{Config, WriteTransaction},
     engine::{
         computation_graph::{
-            CallerInformation, QueryKind, QueryWithID,
-            persist::{NodeInfo, Observation},
+            CallerInformation, QueryKind,
+            persist::{NodeInfo, Observation, Timestamp},
             slow_path::SlowPath,
             tfc_achetype::TransitiveFirewallCallees,
         },
@@ -142,13 +142,13 @@ impl PendingBackwardProjection {
     }
 }
 
-pub struct BackwardProjectionLockGuard<'x, C: Config> {
-    computing_lock: &'x Lock<C>,
+pub struct BackwardProjectionLockGuard<C: Config> {
+    computing_lock: Arc<Lock<C>>,
     query_id: QueryID,
     defused: bool,
 }
 
-impl<C: Config> BackwardProjectionLockGuard<'_, C> {
+impl<C: Config> BackwardProjectionLockGuard<C> {
     pub fn done(mut self) {
         self.defused = true;
 
@@ -166,7 +166,7 @@ impl<C: Config> BackwardProjectionLockGuard<'_, C> {
     }
 }
 
-impl<C: Config> Drop for BackwardProjectionLockGuard<'_, C> {
+impl<C: Config> Drop for BackwardProjectionLockGuard<C> {
     fn drop(&mut self) {
         if self.defused {
             return;
@@ -207,21 +207,21 @@ impl<C: Config> Lock<C> {
     }
 }
 
-pub struct ComputingLockGuard<'a, C: Config> {
-    computing_lock: &'a Lock<C>,
+pub struct ComputingLockGuard<C: Config> {
+    computing_lock: Arc<Lock<C>>,
     query_id: QueryID,
     defused: bool,
     computing_mode: ComputingMode,
 }
 
-impl<C: Config> ComputingLockGuard<'_, C> {
+impl<C: Config> ComputingLockGuard<C> {
     pub const fn computing_mode(&self) -> ComputingMode { self.computing_mode }
 
     /// Don't undo the computing lock when dropped.
     pub fn defuse(mut self) { self.defused = true; }
 }
 
-impl<C: Config> Drop for ComputingLockGuard<'_, C> {
+impl<C: Config> Drop for ComputingLockGuard<C> {
     fn drop(&mut self) {
         if self.defused {
             return;
@@ -268,9 +268,9 @@ impl<C: Config> Lock<C> {
             .clone()
     }
 }
-pub enum LockGuard<'x, C: Config> {
-    ComputingLockGuard(ComputingLockGuard<'x, C>),
-    BackwardProjectionLockGuard(BackwardProjectionLockGuard<'x, C>),
+pub enum LockGuard<C: Config> {
+    ComputingLockGuard(ComputingLockGuard<C>),
+    BackwardProjectionLockGuard(BackwardProjectionLockGuard<C>),
 }
 
 impl<C: Config> Engine<C> {
@@ -279,7 +279,7 @@ impl<C: Config> Engine<C> {
         query_id: &QueryID,
         caller_information: &CallerInformation,
         type_name: &'static str,
-    ) -> Option<ComputingLockGuard<'_, C>> {
+    ) -> Option<ComputingLockGuard<C>> {
         // IMPORTANT: here we move the retrival logic outside the lock guard
         // to avoid holding the lock across await points
 
@@ -328,7 +328,7 @@ impl<C: Config> Engine<C> {
                 vacant_entry.insert(entry);
 
                 Some(ComputingLockGuard {
-                    computing_lock: &self.computation_graph.lock,
+                    computing_lock: self.computation_graph.lock.clone(),
                     query_id: *query_id,
                     defused: false,
                     computing_mode: mode,
@@ -340,7 +340,7 @@ impl<C: Config> Engine<C> {
     pub(super) fn get_backward_projection_lock_guard(
         &self,
         query_id: &QueryID,
-    ) -> Option<BackwardProjectionLockGuard<'_, C>> {
+    ) -> Option<BackwardProjectionLockGuard<C>> {
         match self
             .computation_graph
             .lock
@@ -358,7 +358,7 @@ impl<C: Config> Engine<C> {
                 });
 
                 Some(BackwardProjectionLockGuard {
-                    computing_lock: &self.computation_graph.lock,
+                    computing_lock: self.computation_graph.lock.clone(),
                     query_id: *query_id,
                     defused: false,
                 })
@@ -372,7 +372,7 @@ impl<C: Config> Engine<C> {
         slow_path: SlowPath,
         caller_information: &CallerInformation,
         type_name: &'static str,
-    ) -> Option<LockGuard<'_, C>> {
+    ) -> Option<LockGuard<C>> {
         match slow_path {
             SlowPath::Computing => self
                 .computing_lock_guard(query_id, caller_information, type_name)
@@ -392,7 +392,7 @@ impl<C: Config> Engine<C> {
         clean_edges: &[QueryID],
         new_tfc: Option<Interned<TransitiveFirewallCallees>>,
         caller_information: &CallerInformation,
-        lock_guard: ComputingLockGuard<'_, C>,
+        lock_guard: ComputingLockGuard<C>,
     ) {
         self.clean_query(query_id, clean_edges, new_tfc, caller_information)
             .await;
@@ -462,12 +462,13 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn computing_lock_to_computed<Q: Query>(
         &self,
-        query_id: &QueryWithID<'_, Q>,
+        query: Q,
+        query_id: QueryID,
         value: Q::Value,
         query_value_fingerprint: Option<Compact128>,
-        lock_guard: ComputingLockGuard<'_, C>,
+        lock_guard: ComputingLockGuard<C>,
         has_pending_backward_projection: bool,
-        caller_information: &CallerInformation,
+        current_timestamp: Timestamp,
         existing_forward_edges: Option<&[QueryID]>,
         continuing_tx: WriteTransaction<C>,
     ) {
@@ -478,7 +479,7 @@ impl<C: Config> Engine<C> {
             forward_edges,
             tfc_archetype,
         ) = {
-            let computing = self.computation_graph.lock.get_lock(&query_id.id);
+            let computing = self.computation_graph.lock.get_lock(&query_id);
 
             (
                 computing.notify.clone(),
@@ -501,6 +502,7 @@ impl<C: Config> Engine<C> {
         };
 
         self.set_computed(
+            query,
             query_id,
             value,
             query_value_fingerprint,
@@ -509,7 +511,7 @@ impl<C: Config> Engine<C> {
             forward_edges,
             tfc_archetype,
             has_pending_backward_projection,
-            caller_information,
+            current_timestamp,
             existing_forward_edges,
             continuing_tx,
         );
@@ -517,7 +519,7 @@ impl<C: Config> Engine<C> {
         lock_guard.defuse();
 
         // done, remove the computing lock
-        self.computation_graph.lock.normal_lock.remove(&query_id.id);
+        self.computation_graph.lock.normal_lock.remove(&query_id);
 
         notify.notify_waiters();
     }

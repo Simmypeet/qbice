@@ -73,7 +73,7 @@ impl QueryKind {
 
 pub struct ComputationGraph<C: Config> {
     persist: Persist<C>,
-    lock: Lock<C>,
+    lock: Arc<Lock<C>>,
     dirtied_queries: DashSet<QueryID, C::BuildHasher>,
     statistic: Statistic,
 }
@@ -84,7 +84,7 @@ impl<C: Config> ComputationGraph<C> {
             persist: Persist::new(db).await,
             dirtied_queries: DashSet::default(),
             statistic: Statistic::default(),
-            lock: Lock::new(),
+            lock: Arc::new(Lock::new()),
         }
     }
 }

@@ -18,7 +18,7 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         current_query_id: &QueryID,
         caller_information: &CallerInformation,
-        backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
+        backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
     ) {
         let backward_edges =
             self.get_backward_edges(current_query_id, caller_information).await;

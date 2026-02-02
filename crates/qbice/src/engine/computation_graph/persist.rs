@@ -32,7 +32,7 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::{DashMap, DashSet};
+use dashmap::DashSet;
 use parking_lot::RwLock;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{Compact128, StableHash};
@@ -54,8 +54,7 @@ use crate::{
     Engine, ExecutionStyle, Query,
     config::Config,
     engine::computation_graph::{
-        CallerInformation, QueryKind, QueryWithID,
-        lock::BackwardProjectionLockGuard,
+        CallerInformation, QueryKind, lock::BackwardProjectionLockGuard,
         tfc_achetype::TransitiveFirewallCallees,
     },
     query::QueryID,
@@ -545,9 +544,11 @@ pub struct Observation {
 
 impl<C: Config> Engine<C> {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[inline(never)]
     pub(super) fn set_computed<Q: Query>(
         &self,
-        query_id: &QueryWithID<'_, Q>,
+        query: Q,
+        query_id: QueryID,
         query_value: Q::Value,
         query_value_fingerprint: Option<Compact128>,
         query_kind: QueryKind,
@@ -559,7 +560,7 @@ impl<C: Config> Engine<C> {
         >,
         tfc_achetype: Interned<TransitiveFirewallCallees>,
         has_pending_backward_projection: bool,
-        caller_information: &CallerInformation,
+        current_timestamp: Timestamp,
         existing_forward_edges: Option<&[QueryID]>,
         mut tx: WriteTransaction<C>,
     ) {
@@ -577,18 +578,17 @@ impl<C: Config> Engine<C> {
             tfc_achetype,
         );
 
-        let query_input = QueryInput::<Q>(query_id.query.clone());
+        let query_input = QueryInput::<Q>(query);
         let query_result = QueryResult::<Q>(query_value);
 
         {
             // remove prior backward edges
             if let Some(forward_edges) = existing_forward_edges {
                 for edge in forward_edges {
-                    self.computation_graph.persist.backward_edges.remove(
-                        edge,
-                        &query_id.id,
-                        &mut tx,
-                    );
+                    self.computation_graph
+                        .persist
+                        .backward_edges
+                        .remove(edge, &query_id, &mut tx);
                 }
             }
 
@@ -598,60 +598,55 @@ impl<C: Config> Engine<C> {
                     .persist
                     .pending_backward_projection
                     .insert(
-                        query_id.id,
-                        PendingBackwardProjection(
-                            caller_information.timestamp(),
-                        ),
+                        query_id,
+                        PendingBackwardProjection(current_timestamp),
                         &mut tx,
                     );
             }
 
-            self.computation_graph.persist.node_info.insert(
-                query_id.id,
-                node_info,
-                &mut tx,
-            );
+            self.computation_graph
+                .persist
+                .node_info
+                .insert(query_id, node_info, &mut tx);
 
-            self.computation_graph.persist.query_kind.insert(
-                query_id.id,
-                query_kind,
-                &mut tx,
-            );
+            self.computation_graph
+                .persist
+                .query_kind
+                .insert(query_id, query_kind, &mut tx);
 
             self.computation_graph.persist.last_verified.insert(
-                query_id.id,
-                LastVerified(caller_information.timestamp()),
+                query_id,
+                LastVerified(current_timestamp),
                 &mut tx,
             );
 
             for edge in forward_edge_order.0.iter() {
-                self.computation_graph.persist.backward_edges.insert(
-                    *edge,
-                    query_id.id,
-                    &mut tx,
-                );
+                self.computation_graph
+                    .persist
+                    .backward_edges
+                    .insert(*edge, query_id, &mut tx);
             }
 
             self.computation_graph.persist.forward_edge_order.insert(
-                query_id.id,
+                query_id,
                 forward_edge_order,
                 &mut tx,
             );
 
             self.computation_graph.persist.forward_edge_observation.insert(
-                query_id.id,
+                query_id,
                 forward_edge_observations,
                 &mut tx,
             );
 
             self.computation_graph.persist.query_store.insert(
-                query_id.id.compact_hash_128(),
+                query_id.compact_hash_128(),
                 query_input,
                 &mut tx,
             );
 
             self.computation_graph.persist.query_store.insert(
-                query_id.id.compact_hash_128(),
+                query_id.compact_hash_128(),
                 query_result,
                 &mut tx,
             );
@@ -659,8 +654,8 @@ impl<C: Config> Engine<C> {
             // Track external input queries by type for refresh support
             if query_kind.is_external_input() {
                 self.computation_graph.persist.external_input_queries.insert(
-                    query_id.id.stable_type_id(),
-                    query_id.id.compact_hash_128(),
+                    query_id.stable_type_id(),
+                    query_id.compact_hash_128(),
                     &mut tx,
                 );
             }
@@ -842,7 +837,7 @@ impl<C: Config> Engine<C> {
         &self,
         query_id: &QueryID,
         caller_information: &CallerInformation,
-        backward_projection_lock_guard: BackwardProjectionLockGuard<'_, C>,
+        backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
     ) {
         let mut tx = self.new_write_transaction(caller_information).await;
 

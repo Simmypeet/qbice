@@ -6,10 +6,15 @@ use dashmap::DashSet;
 use crate::{
     Engine, Query, TrackedEngine,
     config::Config,
-    engine::computation_graph::{
-        QueryWithID,
-        caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
-        lock::{ComputingLockGuard, ComputingMode, LockGuard},
+    engine::{
+        computation_graph::{
+            QueryWithID,
+            caller::{
+                CallerInformation, CallerKind, CallerReason, QueryCaller,
+            },
+            lock::{ComputingLockGuard, ComputingMode, LockGuard},
+        },
+        uncancellable_worker::GuardExt,
     },
 };
 
@@ -53,12 +58,13 @@ impl<C: Config> Drop for GuardedTrackedEngine<C> {
 }
 
 impl<C: Config> Engine<C> {
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn execute_query<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
         execute_query_for: ExecuteQueryFor,
-        lock_guard: ComputingLockGuard<'_, C>,
+        lock_guard: ComputingLockGuard<C>,
     ) {
         // create a new tracked engine
         let cache = Arc::new(DashSet::default());
@@ -111,85 +117,112 @@ impl<C: Config> Engine<C> {
             }
         };
 
-        let old_kind = self.get_query_kind(&query.id, caller_information).await;
-        let existing_forward_edges =
-            self.get_forward_edges_order(&query.id, caller_information).await;
+        // TRANSACTIONAL: from now on, we are starting to modify the query's
+        // internal state, so we need to make sure that this whole block is
+        // polled to the completion without being cancelled.
 
-        // if the old node info is a firewall or projection node, we compare
-        // the old and new value fingerprints to determine if we need to
-        // do dirty propagation.
-        let (
-            continuing_tx,
-            query_value_fingerprint,
-            need_backward_projection_propagation,
-        ) = if let Some(old_kind) = old_kind
-            && (old_kind.is_firewall() || old_kind.is_projection())
-            && execute_query_for == ExecuteQueryFor::RecomputeQuery
-        {
-            let old_node_info =
-                self.get_node_info(&query.id, caller_information).await.expect(
-                    "old node info should exist for recomputed firewall or \
-                     projection",
-                );
+        let engine = self.clone();
+        let query_id = query.id;
+        let query = query.query.clone();
+        let timestamp = caller_information.timestamp();
+        let caller_information = caller_information.clone();
 
-            let fingerprint = self.hash(&value);
-            let updated = old_node_info.value_fingerprint() != fingerprint;
-
-            let mut write_buffer =
-                self.new_write_transaction(caller_information).await;
-
-            // if fingerprint has changed, we do dirty propagation
-            if updated {
-                let list = self.get_dirty_propagate_list(&query.id).await;
-
-                for edge in list {
-                    self.mark_dirty_forward_edge(
-                        edge.caller,
-                        edge.callee,
-                        &mut write_buffer,
-                    );
-                }
-            }
-
-            (
-                write_buffer,
-                Some(fingerprint),
-                // if the query is a firewall and its value has changed, it
-                // needs to invoke projection queries in the backward direction
-                // and propagate dirtiness as needed.
-                old_kind.is_firewall() && updated,
-            )
-        } else {
-            (self.new_write_transaction(caller_information).await, None, false)
-        };
-
-        self.computing_lock_to_computed(
-            query,
-            value,
-            query_value_fingerprint,
-            lock_guard,
-            need_backward_projection_propagation,
-            caller_information,
-            existing_forward_edges.as_ref().map(std::convert::AsRef::as_ref),
-            continuing_tx,
-        );
-
-        // if the firewall is being repaired, and it has pending backward
-        // projections, we need to do backward projections now.
-        if matches!(caller_information.kind(), CallerKind::RepairFirewall {
-            invoke_backward_projection: true
-        }) && need_backward_projection_propagation
-        {
-            self.try_do_backward_projections(&query.id, caller_information)
+        async move {
+            let old_kind =
+                engine.get_query_kind(&query_id, &caller_information).await;
+            let existing_forward_edges = engine
+                .get_forward_edges_order(&query_id, &caller_information)
                 .await;
+
+            // if the old node info is a firewall or projection node, we compare
+            // the old and new value fingerprints to determine if we need to
+            // do dirty propagation.
+            let (
+                continuing_tx,
+                query_value_fingerprint,
+                need_backward_projection_propagation,
+            ) = if let Some(old_kind) = old_kind
+                && (old_kind.is_firewall() || old_kind.is_projection())
+                && execute_query_for == ExecuteQueryFor::RecomputeQuery
+            {
+                let old_node_info = engine
+                    .get_node_info(&query_id, &caller_information)
+                    .await
+                    .expect(
+                        "old node info should exist for recomputed firewall \
+                         or projection",
+                    );
+
+                let fingerprint = engine.hash(&value);
+                let updated = old_node_info.value_fingerprint() != fingerprint;
+
+                let mut write_buffer =
+                    engine.new_write_transaction(&caller_information).await;
+
+                // if fingerprint has changed, we do dirty propagation
+                if updated {
+                    let list = engine.get_dirty_propagate_list(&query_id).await;
+
+                    for edge in list {
+                        engine.mark_dirty_forward_edge(
+                            edge.caller,
+                            edge.callee,
+                            &mut write_buffer,
+                        );
+                    }
+                }
+
+                (
+                    write_buffer,
+                    Some(fingerprint),
+                    // if the query is a firewall and its value has changed, it
+                    // needs to invoke projection queries in the backward
+                    // direction and propagate dirtiness as
+                    // needed.
+                    old_kind.is_firewall() && updated,
+                )
+            } else {
+                (
+                    engine.new_write_transaction(&caller_information).await,
+                    None,
+                    false,
+                )
+            };
+
+            engine.computing_lock_to_computed(
+                query,
+                query_id,
+                value,
+                query_value_fingerprint,
+                lock_guard,
+                need_backward_projection_propagation,
+                timestamp,
+                existing_forward_edges
+                    .as_ref()
+                    .map(std::convert::AsRef::as_ref),
+                continuing_tx,
+            );
+
+            // if the firewall is being repaired, and it has pending backward
+            // projections, we need to do backward projections now.
+            if matches!(caller_information.kind(), CallerKind::RepairFirewall {
+                invoke_backward_projection: true
+            }) && need_backward_projection_propagation
+            {
+                engine
+                    .try_do_backward_projections(&query_id, &caller_information)
+                    .await;
+            }
         }
+        .guarded() // make sure the future will eventually complete
+        .await;
     }
 
     pub(super) async fn continuation<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
-        lock_guard: LockGuard<'_, C>,
+        lock_guard: LockGuard<C>,
     ) {
         match lock_guard {
             LockGuard::ComputingLockGuard(lock_guard) => {
