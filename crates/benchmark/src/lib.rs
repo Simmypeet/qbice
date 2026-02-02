@@ -1,20 +1,44 @@
 #![allow(missing_docs)]
 
+use std::hash::BuildHasherDefault;
+
+use fxhash::FxHasher;
 use qbice::{
-    Engine,
-    config::DefaultConfig,
+    Engine, Identifiable, config,
     serialize::Plugin,
     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
-    storage::kv_database::rocksdb::RocksDB,
+    storage::kv_database::in_memory::{InMemory, InMemoryFactory},
 };
-use tempfile::TempDir;
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Identifiable,
+)]
+pub struct Config;
+
+impl config::Config for Config {
+    type StorageEngine = InMemory<BuildHasherDefault<FxHasher>>;
+
+    type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
+
+    type BuildHasher = BuildHasherDefault<FxHasher>;
+}
 
 #[must_use]
-pub fn create_test_engine(tempdir: &TempDir) -> Engine<DefaultConfig> {
-    Engine::<DefaultConfig>::new_with(
+pub async fn create_test_engine() -> Engine<Config> {
+    Engine::<Config>::new_with(
         Plugin::default(),
-        RocksDB::factory(tempdir.path()),
+        InMemoryFactory::new(),
         SeededStableHasherBuilder::<Sip128Hasher>::new(0),
     )
+    .await
     .unwrap()
 }

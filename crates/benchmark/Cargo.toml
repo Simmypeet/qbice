@@ -12,12 +12,14 @@ publish = false
 qbice = { path = "../qbice" }
 tempfile.workspace = true
 criterion.workspace = true
+fxhash.workspace = true
 tokio = { version = "1", features = ["full"] }
 mimalloc = "*"
 
-[[bin]]
+[[bench]]
 name = "firewall"
 path = "benches/firewall.rs"
+harness = false
 
 
 [lints]

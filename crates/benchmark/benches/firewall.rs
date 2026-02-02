@@ -288,45 +288,16 @@ impl Variance {
     async fn algo<C: Config>(&self, tracked_engine: &TrackedEngine<C>) -> i64 {
         let range = tracked_engine.query(&VariableRange).await;
 
-        let expected_par = std::thread::available_parallelism()
-            .map_or_else(|_| 4, |x| x.get() * 4);
-        let chunk_size =
-            (range.end - range.start).div_ceil(expected_par as u64);
-
-        let mut join_handles = vec![];
-        let all_variables = range.clone().collect::<Vec<_>>();
-
-        for chunk in all_variables.chunks(chunk_size as usize) {
-            let tracked_engine = tracked_engine.clone_async().await;
-            let chunk = chunk.to_vec();
-
-            let handle = tokio::task::spawn(async move {
-                let mut local_sum = 0i64;
-                let mut local_count = 0i64;
-
-                for i in chunk {
-                    let var = Variable(i);
-                    let diff_squared =
-                        tracked_engine.query(&DiffSquaredChain2(var)).await;
-
-                    local_sum += diff_squared;
-                    local_count += 1;
-                }
-
-                (local_sum, local_count)
-            });
-
-            join_handles.push(handle);
-        }
-
         let mut sum_squared_diff = 0i64;
         let mut count = 0i64;
 
-        for handle in join_handles {
-            let (local_sum, local_count) = handle.await.unwrap();
+        for i in range {
+            let var = Variable(i);
+            let diff_squared =
+                tracked_engine.query(&DiffSquaredChain2(var)).await;
 
-            sum_squared_diff += local_sum;
-            count += local_count;
+            sum_squared_diff += diff_squared;
+            count += 1;
         }
 
         sum_squared_diff / count
@@ -347,8 +318,7 @@ impl<C: Config> qbice::executor::Executor<Variance, C> for VarianceExecutor {
 }
 
 async fn run(firewall: bool) {
-    let tempdir = tempfile::tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine().await;
 
     // register executors
     if firewall {
@@ -435,4 +405,5 @@ fn bench_compare_firewall(c: &mut criterion::Criterion) {
     group.finish();
 }
 
-fn main() { run_with_tokio(true); }
+criterion::criterion_group!(benches, bench_compare_firewall);
+criterion::criterion_main!(benches);
