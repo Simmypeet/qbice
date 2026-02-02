@@ -207,8 +207,6 @@ impl<C: Config> Engine<C> {
 }
 
 impl<C: Config> Engine<C> {
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_forward_edges_order(
         &self,
         query_id: &QueryID,
@@ -236,8 +234,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_forward_edge_observations(
         &self,
         query_id: &QueryID,
@@ -265,8 +261,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_node_info(
         &self,
         query_id: &QueryID,
@@ -293,8 +287,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_query_kind(
         &self,
         query_id: &QueryID,
@@ -321,8 +313,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_last_verified(
         &self,
         query_id: &QueryID,
@@ -350,8 +340,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_backward_edges(
         &self,
         query_id: &QueryID,
@@ -378,8 +366,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_query_result<
         Q: Query,
     >(
@@ -409,8 +395,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_pending_backward_projection(
         &self,
         query_id: &QueryID,
@@ -438,8 +422,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_query_input<
         Q: Query,
     >(
@@ -469,8 +451,6 @@ impl<C: Config> Engine<C> {
         self.cancel().await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_forward_edges_order_unchecked(
         &self,
         query_id: &QueryID,
@@ -483,8 +463,6 @@ impl<C: Config> Engine<C> {
             .map(|x| x.0)
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_backward_edges_unchecked(
         &self,
         query_id: &QueryID,
@@ -492,8 +470,6 @@ impl<C: Config> Engine<C> {
         self.computation_graph.persist.backward_edges.get(query_id).await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_query_kind_unchecked(
         &self,
         query_id: &QueryID,
@@ -501,8 +477,6 @@ impl<C: Config> Engine<C> {
         self.computation_graph.persist.query_kind.get(query_id).await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_node_info_unchecked(
         &self,
         query_id: &QueryID,
@@ -510,8 +484,6 @@ impl<C: Config> Engine<C> {
         self.computation_graph.persist.node_info.get(query_id).await
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async unsafe fn get_query_input_unchecked<
         Q: Query,
     >(
@@ -526,8 +498,6 @@ impl<C: Config> Engine<C> {
             .map(|x| x.0)
     }
 
-    #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(in crate::engine::computation_graph) async fn get_external_input_queries(
         &self,
         type_id: &StableTypeID,
