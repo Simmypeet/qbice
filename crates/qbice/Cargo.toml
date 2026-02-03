@@ -16,7 +16,6 @@ categories = ["caching", "concurrency", "asynchronous"]
 default = ["default_config"]
 default_config = ["rocksdb"]
 rocksdb = ["qbice_storage/rocksdb"]
-fjall = ["qbice_storage/fjall"]
 
 [dependencies]
 qbice_stable_hash = { version = "0.1.5", path = "../stable_hash" }
