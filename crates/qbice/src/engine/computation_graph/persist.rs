@@ -33,6 +33,7 @@ use std::{
 };
 
 use dashmap::DashSet;
+use ouroboros::self_referencing;
 use parking_lot::RwLock;
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{Compact128, StableHash};
@@ -40,7 +41,7 @@ use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{
     dynamic_map::DynamicMap as _,
     intern::Interned,
-    key_of_set_map::{ConcurrentSet, KeyOfSetMap as _},
+    key_of_set_map::{ClonedDashSetIterator, ConcurrentSet, KeyOfSetMap as _},
     kv_database::{
         DiscriminantEncoding, KeyOfSetColumn, WideColumn, WideColumnValue,
     },
@@ -257,10 +258,15 @@ pub struct CompressedBackwardEdgeSet<S: BuildHasher + Clone>(
     pub Arc<RwLock<TieredStorage<S>>>,
 );
 
-impl<S: BuildHasher + Default + Clone + Send + Sync> ConcurrentSet
+impl<S: BuildHasher + Default + Clone + Send + Sync + 'static> ConcurrentSet
     for CompressedBackwardEdgeSet<S>
 {
     type Element = QueryID;
+
+    type Iterator<'x>
+        = GuardedIterator<'x, S>
+    where
+        Self: 'x;
 
     fn insert_element(&self, element: Self::Element) -> bool {
         let read = self.0.read();
@@ -313,20 +319,40 @@ impl<S: BuildHasher + Default + Clone + Send + Sync> ConcurrentSet
             TieredStorage::Large(set) => set.remove(element).is_some(),
         }
     }
+
+    fn iter(&self) -> Self::Iterator<'_> {
+        GuardedIterator::new(self.0.read(), |x| match &**x {
+            TieredStorage::Small(vec_lock) => {
+                Either::Left(GuardedVecIterator {
+                    guard: vec_lock.read(),
+                    index: 0,
+                })
+            }
+
+            TieredStorage::Large(set) => {
+                Either::Right(ClonedDashSetIterator::new(set.iter()))
+            }
+        })
+    }
 }
 
-impl<S: BuildHasher + Clone> TieredStorage<S> {
-    pub fn iter(&self) -> impl Iterator<Item = QueryID> + '_ {
-        match self {
-            Self::Small(vec_lock) => Either::Left(GuardedVecIterator {
-                guard: vec_lock.read(),
-                index: 0,
-            }),
+#[self_referencing]
+pub struct GuardedIterator<'s, S: BuildHasher + Clone + Send + Sync> {
+    gaurd: parking_lot::RwLockReadGuard<'s, TieredStorage<S>>,
 
-            Self::Large(set) => {
-                Either::Right(set.iter().map(|entry| *entry.key()))
-            }
-        }
+    #[borrows(mut gaurd)]
+    #[not_covariant]
+    iter: Either<
+        GuardedVecIterator<'this, QueryID>,
+        ClonedDashSetIterator<'this, QueryID, S>,
+    >,
+}
+
+impl<S: BuildHasher + Clone + Send + Sync> Iterator for GuardedIterator<'_, S> {
+    type Item = QueryID;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.with_iter_mut(|x| x.next())
     }
 }
 

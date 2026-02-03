@@ -4,6 +4,7 @@ use std::{
 };
 
 use dashmap::DashSet;
+use ouroboros::self_referencing;
 
 use crate::kv_database::KeyOfSetColumn;
 
@@ -14,9 +15,14 @@ pub mod in_memory;
 ///
 /// This implemented type must be able to clone itself in cheap manner. For
 /// example, `Arc<DashSet<T>>` is a good candidate.
-pub trait ConcurrentSet: Clone + Default + Send + Sync {
+pub trait ConcurrentSet: Clone + Default + Send + Sync + 'static {
     /// The type of elements stored in the set.
     type Element;
+
+    /// The iterator type over the elements in the set.
+    type Iterator<'x>: Iterator<Item = Self::Element> + Send
+    where
+        Self: 'x;
 
     /// Inserts an element into the set.
     ///
@@ -33,14 +39,60 @@ pub trait ConcurrentSet: Clone + Default + Send + Sync {
     /// - `true` if the element was present and removed
     /// - `false` if the element was not found in the set
     fn remove_element(&self, element: &Self::Element) -> bool;
+
+    /// Returns an iterator over the elements in the set.
+    fn iter(&self) -> Self::Iterator<'_>;
+}
+
+/// An iterator over a DashSet that yields cloned elements.
+pub struct ClonedDashSetIterator<
+    's,
+    T: Eq + Hash,
+    S: BuildHasher + Clone + Send + Sync,
+> {
+    inner: dashmap::iter_set::Iter<'s, T, S, dashmap::DashMap<T, (), S>>,
+}
+
+impl<T: Clone + Eq + Hash, S: BuildHasher + Clone + Send + Sync> std::fmt::Debug
+    for ClonedDashSetIterator<'_, T, S>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClonedDashSetIterator").finish_non_exhaustive()
+    }
+}
+
+impl<'s, T: Clone + Eq + Hash, S: BuildHasher + Clone + Send + Sync>
+    ClonedDashSetIterator<'s, T, S>
+{
+    /// Creates a new `ClonedDashSetIterator` from a DashSet iterator.
+    #[must_use]
+    pub const fn new(
+        inner: dashmap::iter_set::Iter<'s, T, S, dashmap::DashMap<T, (), S>>,
+    ) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T: Clone + Eq + Hash, S: BuildHasher + Clone + Send + Sync> Iterator
+    for ClonedDashSetIterator<'_, T, S>
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|x| x.key().clone())
+    }
 }
 
 #[allow(clippy::type_repetition_in_bounds)]
-impl<T: Send + Sync, S: Default + BuildHasher + Clone + Send + Sync>
-    ConcurrentSet for Arc<DashSet<T, S>>
+impl<
+    T: Send + Sync + 'static,
+    S: Default + BuildHasher + Clone + Send + Sync + 'static,
+> ConcurrentSet for Arc<DashSet<T, S>>
 where
     T: Eq + Hash + Clone,
 {
+    type Iterator<'x> = ClonedDashSetIterator<'x, T, S>;
+
     type Element = T;
 
     fn insert_element(&self, element: Self::Element) -> bool {
@@ -49,6 +101,11 @@ where
 
     fn remove_element(&self, element: &Self::Element) -> bool {
         self.remove(element).is_some()
+    }
+
+    /// Returns an iterator over the elements in the set.
+    fn iter(&self) -> Self::Iterator<'_> {
+        ClonedDashSetIterator { inner: DashSet::iter(self) }
     }
 }
 
@@ -82,7 +139,10 @@ pub trait KeyOfSetMap<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
     fn get<'s, 'k>(
         &'s self,
         key: &'k K::Key,
-    ) -> impl std::future::Future<Output = C> + use<'s, 'k, Self, K, C> + Send;
+    ) -> impl std::future::Future<
+        Output = impl Iterator<Item = K::Element> + use<'s, 'k, Self, K, C> + Send,
+    > + use<'s, 'k, Self, K, C>
+    + Send;
 
     /// Inserts an element into the set associated with a key.
     ///
@@ -124,4 +184,21 @@ pub trait KeyOfSetMap<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
     ) -> impl std::future::Future<Output = bool>
     + use<'s, 'k, 'e, 't, Self, K, C>
     + Send;
+}
+
+#[self_referencing]
+pub struct OwnedIterator<C: ConcurrentSet + 'static> {
+    owned_iter: C,
+
+    #[borrows(mut owned_iter)]
+    #[not_covariant]
+    iter: C::Iterator<'this>,
+}
+
+impl<C: ConcurrentSet + 'static> Iterator for OwnedIterator<C> {
+    type Item = C::Element;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.with_iter_mut(|iter| iter.next())
+    }
 }

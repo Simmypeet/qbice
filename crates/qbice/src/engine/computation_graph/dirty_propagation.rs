@@ -30,7 +30,7 @@ impl<C: Config> Engine<C> {
 
             let mut join_sets = JoinSet::new();
 
-            for caller in backward_edges.0.read().iter() {
+            for caller in backward_edges {
                 let permit_attempt = bound.clone().try_acquire_owned();
 
                 // can spawn a new task

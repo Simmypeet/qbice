@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{any::Any, cell::RefCell, collections::HashMap, sync::Arc};
 
 // re-export
 pub(crate) use caller::CallerInformation;
@@ -9,6 +9,7 @@ use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};
 use qbice_stable_type_id::Identifiable;
 pub(crate) use slow_path::GuardedTrackedEngine;
+use thread_local::ThreadLocal;
 
 use crate::{
     Engine, ExecutionStyle, Query,
@@ -198,7 +199,7 @@ impl<C: Config> ComputationGraph<C> {
 /// - Clear separation between querying and modification phases
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
-    cache: Arc<DashSet<QueryID>>,
+    cache: ThreadLocal<RefCell<HashMap<QueryID, Box<dyn Any + Send + Sync>>>>,
     caller: CallerInformation,
 }
 
@@ -228,13 +229,14 @@ impl<C: Config> TrackedEngine<C> {
         let query_with_id = self.engine.new_query_with_id(query);
 
         // check local cache
-        if self.cache.contains(&query_with_id.id) {
+        if let Some(val) =
+            self.cache.get_or_default().borrow().get(&query_with_id.id)
+        {
             // directly access repository to avoid double wrapping
-            return self
-                .engine
-                .get_query_result::<Q>(&query_with_id.id.compact_hash_128())
-                .await
-                .expect("should've existed since the cache said it's done");
+            return val
+                .downcast_ref::<Q::Value>()
+                .expect("cached value has incorrect type")
+                .clone();
         }
 
         // run the main process
@@ -245,8 +247,11 @@ impl<C: Config> TrackedEngine<C> {
             .map(QueryResult::unwrap_return);
 
         // cache the result locally
-        if result.is_ok() {
-            self.cache.insert(query_with_id.id);
+        if let Ok(value) = &result {
+            self.cache
+                .get_or_default()
+                .borrow_mut()
+                .insert(query_with_id.id, Box::new(value.clone()));
         }
 
         // panic! with CyclicPanicPayload if cyclic error detected
@@ -296,10 +301,9 @@ impl<C: Config> TrackedEngine<C> {
     /// input queries.
     pub(crate) const fn new(
         engine: Arc<Engine<C>>,
-        cache: Arc<DashSet<QueryID>>,
         caller: CallerInformation,
     ) -> Self {
-        Self { engine, cache, caller }
+        Self { engine, cache: ThreadLocal::new(), caller }
     }
 }
 
@@ -307,7 +311,7 @@ impl<C: Config> Clone for TrackedEngine<C> {
     fn clone(&self) -> Self {
         Self {
             engine: self.engine.clone(),
-            cache: self.cache.clone(),
+            cache: ThreadLocal::new(),
             caller: self.caller.clone(),
         }
     }
@@ -392,7 +396,7 @@ impl<C: Config> Engine<C> {
                 unsafe { self.get_current_timestamp_from_engine().await },
                 Some(self.acquire_active_computation_guard().await),
             ),
-            cache: Arc::new(DashSet::new()),
+            cache: ThreadLocal::new(),
             engine: self,
         }
     }

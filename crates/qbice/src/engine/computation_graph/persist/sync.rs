@@ -6,7 +6,6 @@ use std::{
     },
 };
 
-use dashmap::DashSet;
 use qbice_stable_hash::Compact128;
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{
@@ -24,8 +23,8 @@ use crate::{
     engine::computation_graph::{
         QueryKind,
         persist::{
-            CompressedBackwardEdgeSet, NodeInfo, Observation, QueryInput,
-            QueryResult, SingleMap, Timestamp, WriteTransaction,
+            NodeInfo, Observation, QueryInput, QueryResult, SingleMap,
+            Timestamp, WriteTransaction,
         },
     },
     query::QueryID,
@@ -252,7 +251,7 @@ impl<C: Config> Engine<C> {
     pub(in crate::engine::computation_graph) async fn get_backward_edges(
         &self,
         query_id: &QueryID,
-    ) -> CompressedBackwardEdgeSet<C::BuildHasher> {
+    ) -> impl Iterator<Item = QueryID> {
         self.computation_graph.persist.backward_edges.get(query_id).await
     }
 
@@ -300,7 +299,7 @@ impl<C: Config> Engine<C> {
     pub(in crate::engine::computation_graph) async fn get_external_input_queries(
         &self,
         stable_type_id: &StableTypeID,
-    ) -> Arc<DashSet<Compact128, C::BuildHasher>> {
+    ) -> impl Iterator<Item = Compact128> {
         self.computation_graph
             .persist
             .external_input_queries

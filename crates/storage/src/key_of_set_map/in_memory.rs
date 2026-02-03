@@ -5,7 +5,7 @@ use std::hash::BuildHasher;
 use dashmap::DashMap;
 
 use crate::{
-    key_of_set_map::{ConcurrentSet, KeyOfSetMap},
+    key_of_set_map::{ConcurrentSet, KeyOfSetMap, OwnedIterator},
     kv_database::KeyOfSetColumn,
     sharded::default_shard_amount,
     write_transaction::FauxWriteTransaction,
@@ -65,21 +65,27 @@ impl<
 {
     type WriteBatch = FauxWriteTransaction;
 
-    async fn get(&self, key: &K::Key) -> C {
+    async fn get(&self, key: &K::Key) -> impl Iterator<Item = C::Element> {
         if let Some(set) = self.map.get(key) {
-            return set.clone();
+            let cloned_set = set.clone();
+            drop(set);
+
+            return OwnedIterator::new(cloned_set, |x| x.iter());
         }
 
         match self.map.entry(key.clone()) {
             dashmap::Entry::Occupied(occupied_entry) => {
-                occupied_entry.get().clone()
+                let cloned_set = occupied_entry.get().clone();
+                drop(occupied_entry);
+
+                OwnedIterator::new(cloned_set, |x| x.iter())
             }
 
             dashmap::Entry::Vacant(vacant_entry) => {
                 let new_set = C::default();
                 vacant_entry.insert(new_set.clone());
 
-                new_set
+                OwnedIterator::new(new_set, |x| x.iter())
             }
         }
     }

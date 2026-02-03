@@ -8,9 +8,9 @@ use std::{fmt::Debug, hash::Hash};
 
 use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
+use rayon::iter::ParallelIterator;
 
 mod buffer_pool;
-mod default_shard_amount;
 pub mod in_memory;
 
 #[cfg(feature = "fjall")]
@@ -171,7 +171,7 @@ pub trait KvDatabase: 'static + Send + Sync {
     fn scan_members<'s, C: KeyOfSetColumn>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Iterator<Item = C::Element> + use<'s, Self, C>;
+    ) -> impl ParallelIterator<Item = C::Element> + use<'s, Self, C>;
 
     /// Creates a new write transaction for batching multiple write operations.
     ///
@@ -410,5 +410,13 @@ pub trait KeyOfSetColumn: Identifiable + Send + Sync + 'static {
     type Key: Debug + Encode + Hash + Eq + Clone + 'static + Send + Sync;
 
     /// The type of elements stored in the sets associated with each key.
-    type Element: Encode + Decode + Hash + Eq + Clone + 'static + Send + Sync;
+    type Element: Debug
+        + Encode
+        + Decode
+        + Hash
+        + Eq
+        + Clone
+        + 'static
+        + Send
+        + Sync;
 }

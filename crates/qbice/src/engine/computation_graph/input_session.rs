@@ -1,7 +1,6 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use crossbeam::sync::WaitGroup;
-use dashmap::DashSet;
 use qbice_stable_hash::{Compact128, StableHash};
 use tokio::{sync::RwLock, task::JoinSet};
 
@@ -404,7 +403,7 @@ impl<C: Config> InputSession<C> {
         let timestamp =
             unsafe { self.engine.get_current_timestamp_unchecked() };
 
-        let hashes = external_input_set.iter().map(|x| *x).collect::<Vec<_>>();
+        let hashes = external_input_set.collect::<Vec<_>>();
 
         let expected_parallelism = std::thread::available_parallelism()
             .map_or_else(|_| 1, std::num::NonZero::get)
@@ -435,12 +434,10 @@ impl<C: Config> InputSession<C> {
                     };
 
                     // Create a tracked engine to execute the query
-                    let cache = Arc::new(DashSet::default());
                     let wait_group = WaitGroup::new();
 
                     let tracked_engine = TrackedEngine::new(
                         engine.clone(),
-                        cache,
                         CallerInformation::new(
                             CallerKind::Query(QueryCaller::new_external_input(
                                 query_id, wait_group,

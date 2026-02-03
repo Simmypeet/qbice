@@ -453,6 +453,7 @@ impl<C: Config> Engine<C> {
         self.check_cyclic_internal(running_state, target)
     }
 
+    #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn computing_lock_to_computed<Q: Query>(
         &self,

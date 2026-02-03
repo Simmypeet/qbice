@@ -23,7 +23,7 @@ impl<C: Config> Engine<C> {
         let backward_edges = self.get_backward_edges(current_query_id).await;
 
         let mut backward_projections = Vec::new();
-        for query_id in backward_edges.0.read().iter() {
+        for query_id in backward_edges {
             let query_kind = self.get_query_kind(&query_id).await.unwrap();
 
             if query_kind.is_projection() {

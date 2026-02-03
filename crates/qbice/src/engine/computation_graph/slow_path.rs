@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crossbeam::sync::WaitGroup;
-use dashmap::DashSet;
+use thread_local::ThreadLocal;
 
 use crate::{
     Engine, Query, TrackedEngine,
@@ -66,14 +66,11 @@ impl<C: Config> Engine<C> {
         execute_query_for: ExecuteQueryFor,
         lock_guard: ComputingLockGuard<C>,
     ) {
-        // create a new tracked engine
-        let cache = Arc::new(DashSet::default());
-
         let wait_group = WaitGroup::new();
 
         let tracked_engine = TrackedEngine {
             engine: self.clone(),
-            cache: cache.clone(),
+            cache: ThreadLocal::new(),
             caller: CallerInformation::new(
                 CallerKind::Query(QueryCaller::new(
                     query.id,

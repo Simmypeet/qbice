@@ -33,6 +33,8 @@ fxhash.workspace = true
 rayon.workspace = true
 futures.workspace = true
 crossbeam.workspace = true
+thread_local.workspace = true
+ouroboros.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
