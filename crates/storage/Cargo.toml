@@ -8,7 +8,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-fjall = ["dep:fjall"]
 rocksdb = ["dep:rust-rocksdb"]
 
 [dependencies]
@@ -24,12 +23,12 @@ crossbeam-utils.workspace = true
 crossbeam-channel.workspace = true
 crossbeam-deque.workspace = true
 enum-as-inner.workspace = true
-fjall = { workspace = true, optional = true }
 rust-rocksdb = { workspace = true, optional = true }
 thread_local.workspace = true
 tokio.workspace = true
 rayon.workspace = true
 ouroboros.workspace = true
+bon.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

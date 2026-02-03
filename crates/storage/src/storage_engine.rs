@@ -1,3 +1,8 @@
+//! The main storage engine abstraction.
+//!
+//! This module provides the [`StorageEngine`] trait that combines all map types
+//! and write management into a unified storage interface.
+
 use qbice_serialize::Plugin;
 
 use crate::{
@@ -8,6 +13,21 @@ use crate::{
     write_manager::WriteManager,
 };
 
+/// Database-backed storage engine implementation.
+///
+/// This module provides [`DbBacked`](db_backed::DbBacked), a storage engine
+/// implementation that uses a key-value database backend with caching and
+/// write-behind support.
+pub mod db_backed;
+
+/// In-memory storage engine implementation.
+///
+/// This module provides
+/// [`InMemoryStorageEngine`](in_memory::InMemoryStorageEngine),
+/// a storage engine implementation that stores all data in memory without
+/// persistence.
+pub mod in_memory;
+
 /// A trait defining a complete storage engine with support for multiple map
 /// types.
 ///
@@ -17,7 +37,7 @@ use crate::{
 ///
 /// # Associated Types
 ///
-/// All map types created by this engine share the same [`WriteBatch`] type,
+/// All map types created by this engine share the same `WriteTransaction` type,
 /// allowing coordinated atomic writes across different map instances.
 pub trait StorageEngine {
     /// The write batch type used to group operations across all map types.

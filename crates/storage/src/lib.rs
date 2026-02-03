@@ -9,10 +9,13 @@
 //!   LMDB, in-memory). Features include wide columns for multi-value storage
 //!   and key-of-set mode for efficient set operations.
 //!
-//! - **SIEVE Cache** ([`sieve`]): A high-performance, sharded cache using the
-//!   SIEVE eviction algorithm with write-back support. Provides excellent hit
-//!   rates with significantly lower overhead than LRU, plus built-in support
-//!   for asynchronous background writes.
+//! - **Storage Engine** ([`storage_engine`]): A unified interface for creating
+//!   storage components including single maps, dynamic maps, and key-of-set
+//!   maps with integrated write management.
+//!
+//! - **Write-Behind Caching** ([`write_manager`]): High-performance write-back
+//!   caching with background persistence, supporting asynchronous database
+//!   writes with epoch-based ordering for consistency.
 //!
 //! - **Interning System** ([`intern`]): A thread-safe value interning system
 //!   that deduplicates immutable data using stable hashing. Features
@@ -34,11 +37,11 @@
 //!
 //! ## Caching Strategy
 //!
-//! The [`sieve::Sieve`] cache provides:
+//! The storage system uses Moka-based caching with:
 //! - Transparent lazy loading from the backing database on cache misses
-//! - Sharded architecture to minimize lock contention
-//! - Optional write-back buffering via [`sieve::BackgroundWriter`]
-//! - Protection against cache stampedes through coordinated fetch
+//! - Write-behind buffering via [`write_manager::write_behind::WriteBehind`]
+//! - Epoch-based write ordering for consistency
+//! - Staging layer for uncommitted writes
 //!
 //! ## Value Interning
 //!
@@ -52,10 +55,9 @@
 //! ```ignore
 //! use qbice_storage::{
 //!     kv_database::{WideColumn, WideColumnValue, DiscriminantEncoding},
-//!     sieve::WideColumnSieve,
+//!     storage_engine::{StorageEngine, in_memory::InMemoryStorageEngine},
 //! };
 //! use qbice_stable_type_id::Identifiable;
-//! use std::sync::Arc;
 //!
 //! // Define a wide column
 //! #[derive(Identifiable)]
@@ -77,16 +79,13 @@
 //!     fn discriminant() -> u8 { 0 }
 //! }
 //!
-//! // Create a cache
-//! let cache = WideColumnSieve::<UserDataColumn, _, _>::new(
-//!     1000,                // total capacity
-//!     16,                  // shard count
-//!     Arc::new(db),        // backing database
-//!     Default::default(),  // hasher
-//! );
+//! // Create a storage engine and maps
+//! let engine = InMemoryStorageEngine;
+//! let user_map = engine.new_single_map::<UserDataColumn, UserName>();
 //!
 //! // Retrieve values (automatically fetched from DB on miss)
-//! if let Some(name) = cache.get_normal::<UserName>(user_id) {
+//! let name = user_map.get(&user_id).await;
+//! if let Some(name) = name {
 //!     println!("User: {}", name.0);
 //! }
 //! ```
@@ -100,40 +99,14 @@
 //! - **Write Efficiency**: Optimized for high-throughput write workloads with
 //!   batching and background writing.
 
-/// A map storage abstraction that supports dynamic value types per key.
-///
-/// This module provides the [`DynamicMap`](dynamic_map::DynamicMap) trait for
-/// key-value storage where the value type can vary dynamically based on a
-/// discriminant.
 pub mod dynamic_map;
 pub mod intern;
-/// A map storage abstraction for key-to-set relationships.
-///
-/// This module provides the [`KeyOfSetMap`](key_of_set_map::KeyOfSetMap) trait
-/// for efficiently storing and managing `HashMap<K, HashSet<V>>` relationships.
 pub mod key_of_set_map;
 pub mod kv_database;
-// pub mod sieve;
-/// A map storage abstraction for single value types per key.
-///
-/// This module provides the [`SingleMap`](single_map::SingleMap) trait for
-/// key-value storage with a fixed value type.
 pub mod single_map;
-/// The main storage engine abstraction.
-///
-/// This module provides the [`StorageEngine`](storage_engine::StorageEngine)
-/// trait that combines all map types and write management into a unified
-/// storage interface.
 pub mod storage_engine;
-/// Write transaction management.
-///
-/// This module provides the [`WriteManager`](write_manager::WriteManager) trait
-/// for managing write transactions and ensuring atomicity of write operations.
 pub mod write_manager;
-/// Write batch abstractions for atomic operations.
-///
-/// This module provides the [`WriteBatch`](write_batch::WriteBatch) trait for
-/// grouping multiple write operations into atomic batches.
 pub mod write_transaction;
 
 pub(crate) mod sharded;
+pub(crate) mod wide_column_cache;

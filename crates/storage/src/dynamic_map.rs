@@ -1,3 +1,8 @@
+//! A map storage abstraction that supports dynamic value types per key.
+//!
+//! This module provides the [`DynamicMap`] trait for key-value storage where
+//! the value type can vary dynamically based on a discriminant.
+
 use crate::{
     kv_database::{WideColumn, WideColumnValue},
     write_transaction::WriteTransaction,

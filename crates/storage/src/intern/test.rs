@@ -1,6 +1,4 @@
-// Allow similar names in tests (e.g., hash1/hash2, data1/data2)
 #![allow(clippy::similar_names)]
-// Allow redundant clones in tests for clarity
 #![allow(clippy::redundant_clone)]
 
 use std::{hash::Hash, sync::Arc};

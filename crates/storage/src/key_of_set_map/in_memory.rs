@@ -1,8 +1,7 @@
 //! In-memory implementation of [`KeyOfSetMap`].
 
-use std::hash::BuildHasher;
-
 use dashmap::DashMap;
+use fxhash::FxBuildHasher;
 
 use crate::{
     key_of_set_map::{ConcurrentSet, KeyOfSetMap, OwnedIterator},
@@ -22,46 +21,41 @@ use crate::{
 ///
 /// - `K`: The key-of-set column type that defines the key and element types.
 /// - `C`: The concurrent set type used to store elements.
-/// - `S`: The hash builder type for the underlying [`DashMap`].
 #[derive(Debug)]
 pub struct InMemoryKeyOfSetMap<
     K: KeyOfSetColumn,
     C: ConcurrentSet<Element = K::Element>,
-    S: BuildHasher + Clone,
 > {
-    map: DashMap<K::Key, C, S>,
+    map: DashMap<K::Key, C, FxBuildHasher>,
 }
 
-impl<
-    K: KeyOfSetColumn,
-    C: ConcurrentSet<Element = K::Element>,
-    S: BuildHasher + Clone,
-> InMemoryKeyOfSetMap<K, C, S>
+impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
+    InMemoryKeyOfSetMap<K, C>
 {
     /// Creates a new in-memory key-of-set map.
-    ///
-    /// # Parameters
-    ///
-    /// - `hash_builder`: The hash builder for the underlying [`DashMap`].
     ///
     /// # Returns
     ///
     /// A new instance of `InMemoryKeyOfSetMap`.
-    pub fn new(hash_builder: S) -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             map: DashMap::with_capacity_and_hasher(
                 default_shard_amount(),
-                hash_builder,
+                FxBuildHasher::default(),
             ),
         }
     }
 }
 
-impl<
-    K: KeyOfSetColumn,
-    C: ConcurrentSet<Element = K::Element> + Default,
-    S: std::hash::BuildHasher + Clone + Send + Sync,
-> KeyOfSetMap<K, C> for InMemoryKeyOfSetMap<K, C, S>
+impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>> Default
+    for InMemoryKeyOfSetMap<K, C>
+{
+    fn default() -> Self { Self::new() }
+}
+
+impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + Default>
+    KeyOfSetMap<K, C> for InMemoryKeyOfSetMap<K, C>
 {
     type WriteBatch = FauxWriteTransaction;
 
@@ -95,12 +89,13 @@ impl<
         key: <K as KeyOfSetColumn>::Key,
         element: <K as KeyOfSetColumn>::Element,
         _write_batch: &mut Self::WriteBatch,
-    ) -> bool {
+    ) {
         let set = self.map.get(&key).map(|set| set.clone());
 
         // If the set does not exist, create a new one and insert it.
         if let Some(set) = set {
-            return set.insert_element(element);
+            set.insert_element(element);
+            return;
         }
 
         let new_set = C::default();
@@ -109,14 +104,12 @@ impl<
             dashmap::Entry::Occupied(occupied_entry) => {
                 let set = occupied_entry.get();
 
-                set.insert_element(element)
+                set.insert_element(element);
             }
 
             dashmap::Entry::Vacant(vacant_entry) => {
-                let result = new_set.insert_element(element);
-                vacant_entry.insert(new_set);
-
-                result
+                vacant_entry.insert(new_set.clone());
+                new_set.insert_element(element);
             }
         }
     }
@@ -126,13 +119,11 @@ impl<
         key: &<K as KeyOfSetColumn>::Key,
         element: &<K as KeyOfSetColumn>::Element,
         _write_batch: &mut Self::WriteBatch,
-    ) -> bool {
+    ) {
         let set = self.map.get(key).map(|set| set.clone());
 
         if let Some(set) = set {
-            return set.remove_element(element);
+            set.remove_element(element);
         }
-
-        false
     }
 }

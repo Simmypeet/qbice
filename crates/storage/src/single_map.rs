@@ -1,3 +1,8 @@
+//! A map storage abstraction for single value types per key.
+//!
+//! This module provides the [`SingleMap`] trait for key-value storage with a
+//! fixed value type.
+
 use crate::{
     kv_database::{WideColumn, WideColumnValue},
     write_transaction::WriteTransaction,

@@ -12,7 +12,6 @@
 //! - [`Interned<T>`]: A reference-counted handle providing transparent value
 //!   access
 //! - [`Interner`]: The core deduplication engine with sharded concurrent access
-//! - [`SharedInterner`]: An `Arc`-wrapped interner for easy sharing
 //!
 //! # Benefits of Interning
 //!

@@ -7,6 +7,7 @@
 use std::{path::Path, sync::Arc};
 
 use dashmap::DashMap;
+use ouroboros::self_referencing;
 use parking_lot::Mutex;
 use qbice_serialize::{
     Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
@@ -18,10 +19,12 @@ use rust_rocksdb::{
     IteratorMode, MultiThreaded, Options, SliceTransform,
 };
 
-use crate::kv_database::{
-    DiscriminantEncoding, KeyOfSetColumn, KvDatabase, KvDatabaseFactory,
-    WideColumn, WideColumnValue, WriteBatch, buffer_pool::BufferPool,
-    default_shard_amount::default_shard_amount,
+use crate::{
+    kv_database::{
+        DiscriminantEncoding, KeyOfSetColumn, KvDatabase, KvDatabaseFactory,
+        WideColumn, WideColumnValue, WriteBatch, buffer_pool::BufferPool,
+    },
+    sharded::default_shard_amount,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -47,7 +50,7 @@ enum ColumnKind {
 ///
 /// This implementation is fully thread-safe and can be shared across threads.
 /// Internally uses `DBWithThreadMode<MultiThreaded>`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RocksDB(Arc<Impl>);
 
 #[derive(Debug)]
@@ -56,7 +59,7 @@ struct Impl {
     db: DBWithThreadMode<MultiThreaded>,
 
     /// Serialization plugin used for encoding/decoding keys and values.
-    plugin: Plugin,
+    plugin: Arc<Plugin>,
 
     /// Cache mapping stable type IDs to column family names.
     ///
@@ -85,6 +88,7 @@ impl<P: AsRef<Path>> KvDatabaseFactory for RocksDBFactory<P> {
         RocksDB::open(self.path, serialization_plugin)
     }
 }
+
 fn configure_rocksdb_for_small_kv_high_writes() -> Options {
     let mut opts = Options::default();
 
@@ -148,7 +152,7 @@ impl RocksDB {
 
         Ok(Self(Arc::new(Impl {
             db,
-            plugin,
+            plugin: Arc::new(plugin),
             column_families: DashMap::with_shard_amount(default_shard_amount()),
             buffer_pool: BufferPool::new(),
         })))
@@ -495,6 +499,8 @@ impl WriteBatch for RocksDBWriteTransaction {
 impl KvDatabase for RocksDB {
     type WriteBatch = RocksDBWriteTransaction;
 
+    type ScanMemberIterator<C: KeyOfSetColumn> = ScanMembersIterator<C>;
+
     fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
         &self,
         key: &W::Key,
@@ -526,49 +532,106 @@ impl KvDatabase for RocksDB {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    fn scan_members<'s, C: KeyOfSetColumn>(
-        &'s self,
-        key: &'s C::Key,
-    ) -> impl Iterator<Item = C::Element> {
-        let cf = self.0.get_or_create_cf::<C>(ColumnKind::KeyOfSet);
-        let mut prefix_buffer = self.0.buffer_pool.get_buffer();
-        self.0.encode_value_length_prefixed(key, &mut prefix_buffer);
+    fn scan_members<C: KeyOfSetColumn>(
+        &self,
+        key: &C::Key,
+    ) -> ScanMembersIterator<C> {
+        let ither =
+            OwnedScannedMembersIterator::new(self.0.clone(), move |x| {
+                let mut prefix_buffer = x.buffer_pool.get_buffer();
+                x.encode_value_length_prefixed(key, &mut prefix_buffer);
 
-        let prefix_upper_bound =
-            Impl::prefix_upper_bound(prefix_buffer.as_slice());
+                let prefix_upper_bound =
+                    Impl::prefix_upper_bound(prefix_buffer.as_slice());
 
-        // Use an iterator with prefix seek
-        let mut read_opts = rust_rocksdb::ReadOptions::default();
-        read_opts.set_iterate_upper_bound(prefix_upper_bound);
+                // Use an iterator with prefix seek
+                let mut read_opts = rust_rocksdb::ReadOptions::default();
+                read_opts.set_iterate_upper_bound(prefix_upper_bound);
 
-        let iter = self.0.db.iterator_cf_opt(
-            &cf,
-            read_opts,
-            IteratorMode::From(
-                prefix_buffer.as_slice(),
-                rust_rocksdb::Direction::Forward,
-            ),
-        );
+                x.db.iterator_cf_opt(
+                    &x.get_or_create_cf::<C>(ColumnKind::KeyOfSet),
+                    read_opts,
+                    IteratorMode::From(
+                        prefix_buffer.as_slice(),
+                        rust_rocksdb::Direction::Forward,
+                    ),
+                )
+            });
+
+        let inner = self.0.clone();
 
         // Filter to only include keys that actually start with our prefix.
         // RocksDB's prefix_iterator doesn't guarantee this - it just starts
         // at the prefix position and continues iterating.
-        iter.map(|x| x.expect("RocksDB iteration error")).map(|(key, _)| {
-            let length = u64::from_le_bytes(
-                key[0..8].try_into().expect("length prefix should be 8 bytes"),
-            ) as usize;
-
-            let mut decoder =
-                PostcardDecoder::new(std::io::Cursor::new(&key[8 + length..]));
-
-            decoder
-                .decode::<C::Element>(&self.0.plugin)
-                .expect("decoding should not fail")
-        })
+        ScanMembersIterator::<C> {
+            inner: ither,
+            inner_db: inner,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     fn write_batch(&self) -> Self::WriteBatch {
         RocksDBWriteTransaction::new(self.0.clone())
     }
 }
+
+#[self_referencing]
+struct OwnedScannedMembersIterator {
+    db: Arc<Impl>,
+
+    #[borrows(db)]
+    #[not_covariant]
+    iterator: rust_rocksdb::DBIteratorWithThreadMode<
+        'this,
+        DBWithThreadMode<MultiThreaded>,
+    >,
+}
+
+impl Iterator for OwnedScannedMembersIterator {
+    type Item = Result<(Box<[u8]>, Box<[u8]>), rust_rocksdb::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.with_iterator_mut(|iter| iter.next())
+    }
+}
+
+/// Iterator over members of a key-of-set column in RocksDB.
+pub struct ScanMembersIterator<C: KeyOfSetColumn> {
+    inner: OwnedScannedMembersIterator,
+    inner_db: Arc<Impl>,
+    _marker: std::marker::PhantomData<C>,
+}
+
+impl<C: KeyOfSetColumn> std::fmt::Debug for ScanMembersIterator<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScanMembersIterator")
+            .field("inner", &"<OwnedScannedMembersIterator>")
+            .field("inner_db", &self.inner_db)
+            .finish()
+    }
+}
+
+impl<C: KeyOfSetColumn> Iterator for ScanMembersIterator<C> {
+    type Item = C::Element;
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key, _value) = self.inner.next()?.expect("RocksDB iterator error");
+
+        let length = u64::from_le_bytes(
+            key[0..8].try_into().expect("length prefix should be 8 bytes"),
+        ) as usize;
+
+        let mut decoder =
+            PostcardDecoder::new(std::io::Cursor::new(&key[8 + length..]));
+
+        Some(
+            decoder
+                .decode::<C::Element>(&self.inner_db.plugin)
+                .expect("decoding should not fail"),
+        )
+    }
+}
+
+#[cfg(test)]
+mod test;

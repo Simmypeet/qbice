@@ -1,4 +1,11 @@
+//! Write transaction management.
+//!
+//! This module provides the [`WriteManager`] trait for managing write
+//! transactions and ensuring atomicity of write operations.
+
 use crate::write_transaction::FauxWriteTransaction;
+
+pub mod write_behind;
 
 /// A trait for managing write transactions.
 ///

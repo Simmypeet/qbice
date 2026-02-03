@@ -1,8 +1,7 @@
 //! In-memory implementation of [`SingleMap`].
 
-use std::hash::BuildHasher;
-
 use dashmap::DashMap;
+use fxhash::FxBuildHasher;
 
 use crate::{
     kv_database::{WideColumn, WideColumnValue},
@@ -23,32 +22,33 @@ use crate::{
 /// - `V`: The value type to store.
 /// - `S`: The hash builder type for the underlying [`DashMap`].
 #[derive(Debug)]
-pub struct InMemorySingleMap<K: WideColumn, V, S: BuildHasher + Clone> {
-    map: DashMap<K::Key, V, S>,
+pub struct InMemorySingleMap<K: WideColumn, V> {
+    map: DashMap<K::Key, V, FxBuildHasher>,
 }
 
-impl<K: WideColumn, V, S: BuildHasher + Clone> InMemorySingleMap<K, V, S> {
+impl<K: WideColumn, V> InMemorySingleMap<K, V> {
     /// Creates a new in-memory single map with the specified hash builder.
-    ///
-    /// # Parameters
-    ///
-    /// - `hash_builder`: The hash builder to use for the underlying map.
     ///
     /// # Returns
     ///
     /// A new instance of `InMemorySingleMap`.
-    pub fn new(hash_builder: S) -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             map: DashMap::with_capacity_and_hasher(
                 default_shard_amount(),
-                hash_builder,
+                FxBuildHasher::default(),
             ),
         }
     }
 }
 
-impl<K: WideColumn, V: WideColumnValue<K>, S: BuildHasher + Clone + Send + Sync>
-    SingleMap<K, V> for InMemorySingleMap<K, V, S>
+impl<K: WideColumn, V> Default for InMemorySingleMap<K, V> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<K: WideColumn, V: WideColumnValue<K>> SingleMap<K, V>
+    for InMemorySingleMap<K, V>
 {
     type WriteTransaction = FauxWriteTransaction;
 

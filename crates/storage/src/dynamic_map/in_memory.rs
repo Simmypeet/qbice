@@ -1,8 +1,9 @@
 //! In-memory implementation of [`DynamicMap`].
 
-use std::{any::Any, hash::BuildHasher};
+use std::any::Any;
 
 use dashmap::DashMap;
+use fxhash::FxBuildHasher;
 
 use crate::{
     dynamic_map::DynamicMap,
@@ -17,20 +18,17 @@ use crate::{
 /// This implementation stores all key-value pairs in memory, using type
 /// erasure to support dynamic value types. Values are stored as boxed trait
 /// objects and downcasted on retrieval.
-///
-/// # Type Parameters
-///
-/// - `K`: The wide column type that defines the key type and discriminant.
-/// - `S`: The hash builder type for the underlying [`DashMap`].
 #[derive(Debug)]
 #[allow(clippy::type_complexity)]
-pub struct InMemoryDynamicMap<K: WideColumn, S: BuildHasher + Clone> {
-    map: DashMap<(K::Key, K::Discriminant), Box<dyn Any + Send + Sync>, S>,
+pub struct InMemoryDynamicMap<K: WideColumn> {
+    map: DashMap<
+        (K::Key, K::Discriminant),
+        Box<dyn Any + Send + Sync>,
+        FxBuildHasher,
+    >,
 }
 
-impl<K: WideColumn, S: BuildHasher + Clone + Send + Sync>
-    InMemoryDynamicMap<K, S>
-{
+impl<K: WideColumn> InMemoryDynamicMap<K> {
     /// Creates a new in-memory dynamic map with the specified hash builder.
     ///
     /// # Parameters
@@ -40,19 +38,22 @@ impl<K: WideColumn, S: BuildHasher + Clone + Send + Sync>
     /// # Returns
     ///
     /// A new instance of `InMemoryDynamicMap`.
-    pub fn new(hash_builder: S) -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             map: DashMap::with_capacity_and_hasher(
                 default_shard_amount() * 4,
-                hash_builder,
+                FxBuildHasher::default(),
             ),
         }
     }
 }
 
-impl<K: WideColumn, S: BuildHasher + Clone + Send + Sync> DynamicMap<K>
-    for InMemoryDynamicMap<K, S>
-{
+impl<K: WideColumn> Default for InMemoryDynamicMap<K> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<K: WideColumn> DynamicMap<K> for InMemoryDynamicMap<K> {
     type WriteTransaction = FauxWriteTransaction;
 
     async fn get<V: WideColumnValue<K>>(&self, key: &K::Key) -> Option<V> {

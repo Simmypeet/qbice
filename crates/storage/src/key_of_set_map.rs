@@ -1,3 +1,8 @@
+//! A map storage abstraction for key-to-set relationships.
+//!
+//! This module provides the [`KeyOfSetMap`] trait for efficiently storing and
+//! managing `HashMap<K, HashSet<V>>` relationships.
+
 use std::{
     hash::{BuildHasher, Hash},
     sync::Arc,
@@ -17,7 +22,7 @@ pub mod in_memory;
 /// example, `Arc<DashSet<T>>` is a good candidate.
 pub trait ConcurrentSet: Clone + Default + Send + Sync + 'static {
     /// The type of elements stored in the set.
-    type Element;
+    type Element: Eq + Hash + Send + Sync + 'static;
 
     /// The iterator type over the elements in the set.
     type Iterator<'x>: Iterator<Item = Self::Element> + Send
@@ -39,6 +44,12 @@ pub trait ConcurrentSet: Clone + Default + Send + Sync + 'static {
     /// - `true` if the element was present and removed
     /// - `false` if the element was not found in the set
     fn remove_element(&self, element: &Self::Element) -> bool;
+
+    /// Returns the number of elements in the set.
+    fn len(&self) -> usize;
+
+    /// Checks if the set is empty.
+    fn is_empty(&self) -> bool { self.len() == 0 }
 
     /// Returns an iterator over the elements in the set.
     fn iter(&self) -> Self::Iterator<'_>;
@@ -107,6 +118,8 @@ where
     fn iter(&self) -> Self::Iterator<'_> {
         ClonedDashSetIterator { inner: DashSet::iter(self) }
     }
+
+    fn len(&self) -> usize { DashSet::len(self) }
 }
 
 /// A trait for key-to-set map storage.
@@ -163,7 +176,7 @@ pub trait KeyOfSetMap<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
         key: K::Key,
         element: K::Element,
         write_batch: &'t mut Self::WriteBatch,
-    ) -> impl std::future::Future<Output = bool> + use<'s, 't, Self, K, C> + Send;
+    ) -> impl std::future::Future<Output = ()> + use<'s, 't, Self, K, C> + Send;
 
     /// Removes an element from the set associated with a key.
     ///
@@ -181,9 +194,7 @@ pub trait KeyOfSetMap<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
         key: &'k K::Key,
         element: &'e K::Element,
         write_batch: &'t mut Self::WriteBatch,
-    ) -> impl std::future::Future<Output = bool>
-    + use<'s, 'k, 'e, 't, Self, K, C>
-    + Send;
+    ) -> impl std::future::Future<Output = ()> + use<'s, 'k, 'e, 't, Self, K, C> + Send;
 }
 
 #[self_referencing]

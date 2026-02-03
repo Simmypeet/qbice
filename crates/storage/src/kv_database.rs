@@ -8,13 +8,8 @@ use std::{fmt::Debug, hash::Hash};
 
 use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
-use rayon::iter::ParallelIterator;
 
 mod buffer_pool;
-pub mod in_memory;
-
-#[cfg(feature = "fjall")]
-pub mod fjall;
 
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb;
@@ -138,9 +133,13 @@ pub trait KvDatabaseFactory {
 /// - Atomic application of multiple operations
 /// - Consistent isolation semantics
 /// - Efficient batching for better performance
-pub trait KvDatabase: 'static + Send + Sync {
+pub trait KvDatabase: 'static + Send + Sync + Clone {
     /// The type of write transaction provided by this database implementation.
     type WriteBatch: WriteBatch + Send + Sync;
+
+    /// The iterator type returned when scanning members of a key-of-set column.
+    type ScanMemberIterator<C: KeyOfSetColumn>: Iterator<Item = C::Element>
+        + Send;
 
     /// Retrieves a value from a wide column based on its key.
     fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
@@ -168,10 +167,10 @@ pub trait KvDatabase: 'static + Send + Sync {
     ///     println!("Tag: {}", tag);
     /// }
     /// ```
-    fn scan_members<'s, C: KeyOfSetColumn>(
-        &'s self,
-        key: &'s C::Key,
-    ) -> impl ParallelIterator<Item = C::Element> + use<'s, Self, C>;
+    fn scan_members<C: KeyOfSetColumn>(
+        &self,
+        key: &C::Key,
+    ) -> Self::ScanMemberIterator<C>;
 
     /// Creates a new write transaction for batching multiple write operations.
     ///

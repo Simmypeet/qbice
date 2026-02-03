@@ -1,56 +1,107 @@
+//! Write-behind caching implementation.
+//!
+//! This module provides [`WriteBehind`], an asynchronous background writer
+//! that enables write-back caching. Cache updates are fast (in-memory only)
+//! while persistence happens asynchronously in background worker threads.
+//!
+//! # Key Components
+//!
+//! - [`WriteBehind`]: The main background writer managing worker threads
+//! - [`WriteTransaction`]: A buffer for accumulating write operations
+//! - [`Epoch`]: Monotonic ordering identifier for write transactions
+//!
+//! # Write Pipeline
+//!
+//! 1. Application creates a [`WriteTransaction`] via
+//!    [`WriteBehind::new_write_transaction()`]
+//! 2. Writes accumulate in the transaction (fast, in-memory)
+//! 3. Transaction is submitted via [`WriteBehind::submit_write_transaction()`]
+//! 4. Worker threads process transactions asynchronously
+//! 5. Commit thread ensures epoch ordering and applies writes to database
+
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
     collections::{BinaryHeap, HashMap},
+    pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     thread,
 };
 
 use crossbeam_deque::{Injector, Stealer};
 use crossbeam_utils::Backoff;
+use fxhash::FxBuildHasher;
 use parking_lot::{Condvar, Mutex};
 use thread_local::ThreadLocal;
 
 use crate::{
-    kv_database::{KvDatabase, WideColumn, WideColumnValue, WriteBatch},
-    sieve::{KeyOfSetContainer, KeyOfSetSieve, Operation, WideColumnSieve},
+    kv_database::{
+        KeyOfSetColumn, KvDatabase, WideColumn, WideColumnValue,
+        WriteBatch as _,
+    },
+    write_manager, write_transaction,
 };
 
-pub trait BuildHasher:
-    std::hash::BuildHasher + Default + Send + Sync + 'static
+pub(crate) trait WideColumnCache<
+    K: WideColumn,
+    W: WideColumnValue<K>,
+    Db: KvDatabase,
+>: Send + Sync
 {
+    fn flush<'s: 'x, 'i: 'x, 'x>(
+        &'s self,
+        epoch: Epoch,
+        keys: &'i mut (dyn Iterator<Item = K::Key> + Send),
+    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'x>>;
 }
 
-impl<T> BuildHasher for T where
-    T: std::hash::BuildHasher + Default + Send + Sync + 'static
+pub(crate) trait KeyOfSetCache<K: KeyOfSetColumn, Db: KvDatabase>:
+    Send + Sync
 {
+    fn flush(
+        &self,
+        epoch: Epoch,
+        keys: &mut (dyn Iterator<Item = K::Key> + Send),
+    );
 }
+
+/// A monotonically increasing identifier for write transactions.
+///
+/// Epochs ensure that write transactions are committed in the order they
+/// were submitted. Each new transaction receives the next epoch number,
+/// and the commit thread processes transactions strictly in epoch order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Epoch(pub u64);
 
 struct TypedWideColumnWrites<
     C: WideColumn,
     V: WideColumnValue<C>,
     Db: KvDatabase,
-    S: BuildHasher,
 > {
     /// Map of keys to their corresponding values to write.
     ///
     /// `None` indicates a deletion for that key. `Some(value)` indicates
     /// an insertion or update.
-    writes: HashMap<C::Key, Option<V>, S>,
-    original_sieve: Arc<WideColumnSieve<C, Db, S>>,
+    writes: HashMap<C::Key, Option<V>, FxBuildHasher>,
+    original_cache: Arc<dyn WideColumnCache<C, V, Db>>,
 }
 
-pub trait WriteEntry<Db: KvDatabase>: Any + Send + Sync + 'static {
+enum Task<'s> {
+    Sync,
+    Async(Pin<Box<dyn std::future::Future<Output = ()> + Send + 's>>),
+}
+
+trait WriteEntry<Db: KvDatabase>: Any + Send + Sync + 'static {
     fn write_to_db(&self, tx: &Db::WriteBatch);
-    fn after_commit(&mut self);
+    fn after_commit(&mut self, epoch: Epoch) -> Task<'_>;
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync);
 }
 
-impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase, S: BuildHasher>
-    WriteEntry<Db> for TypedWideColumnWrites<C, V, Db, S>
+impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase> WriteEntry<Db>
+    for TypedWideColumnWrites<C, V, Db>
 {
     fn write_to_db(&self, tx: &<Db as KvDatabase>::WriteBatch) {
         for (key, value_opt) in &self.writes {
@@ -63,18 +114,20 @@ impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase, S: BuildHasher>
         }
     }
 
-    fn after_commit(&mut self) {
-        for (key, _) in self.writes.drain() {
-            self.original_sieve
-                .decrement_pending_write(&(key, V::discriminant()));
-        }
+    fn after_commit(&mut self, epoch: Epoch) -> Task<'_> {
+        Task::Async(Box::pin(async move {
+            let mut drained = self.writes.drain().map(|x| x.0);
+            let original_cache = self.original_cache.clone();
+
+            original_cache.flush(epoch, &mut drained).await;
+        }))
     }
 
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync) { self }
 }
 
-impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase, S: BuildHasher>
-    TypedWideColumnWrites<C, V, Db, S>
+impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase>
+    TypedWideColumnWrites<C, V, Db>
 {
     fn insert(&mut self, key: C::Key, value: Option<V>) -> bool {
         self.writes.insert(key, value).is_none()
@@ -94,18 +147,18 @@ impl WideColumnWritesID {
 }
 
 #[allow(clippy::type_complexity)]
-pub(super) struct WideColumnWrites<Db: KvDatabase, S: BuildHasher> {
-    writes: HashMap<WideColumnWritesID, Box<dyn WriteEntry<Db>>, S>,
+pub(super) struct WideColumnWrites<Db: KvDatabase> {
+    writes: HashMap<WideColumnWritesID, Box<dyn WriteEntry<Db>>, FxBuildHasher>,
 }
 
-impl<Db: KvDatabase, S: BuildHasher> WideColumnWrites<Db, S> {
+impl<Db: KvDatabase> WideColumnWrites<Db> {
     fn new() -> Self { Self { writes: HashMap::default() } }
 
-    pub(super) fn put<C: WideColumn, V: WideColumnValue<C>>(
+    fn put<C: WideColumn, V: WideColumnValue<C>>(
         &mut self,
         key: C::Key,
         value: Option<V>,
-        original_sieve: &Arc<WideColumnSieve<C, Db, S>>,
+        original_cache: Arc<dyn WideColumnCache<C, V, Db>>,
     ) -> bool {
         let id = WideColumnWritesID::of::<C, V>();
 
@@ -114,12 +167,12 @@ impl<Db: KvDatabase, S: BuildHasher> WideColumnWrites<Db, S> {
                 let typed_writes = occupied_entry
                     .get_mut()
                     .as_any_mut()
-                    .downcast_mut::<TypedWideColumnWrites<C, V, Db, S>>()
+                    .downcast_mut::<TypedWideColumnWrites<C, V, Db>>()
                     .expect("type mismatch in WideColumnWrites map");
 
                 assert!(
-                    Arc::ptr_eq(&typed_writes.original_sieve, original_sieve),
-                    "original_sieve mismatch for existing WideColumnWrites \
+                    Arc::ptr_eq(&typed_writes.original_cache, &original_cache),
+                    "original_cache mismatch for existing WideColumnWrites \
                      entry"
                 );
 
@@ -127,9 +180,9 @@ impl<Db: KvDatabase, S: BuildHasher> WideColumnWrites<Db, S> {
             }
 
             std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                let mut typed_writes = TypedWideColumnWrites::<C, V, Db, S> {
-                    writes: HashMap::with_hasher(S::default()),
-                    original_sieve: original_sieve.clone(),
+                let mut typed_writes = TypedWideColumnWrites::<C, V, Db> {
+                    writes: HashMap::default(),
+                    original_cache,
                 };
 
                 let result = typed_writes.insert(key, value);
@@ -147,21 +200,34 @@ impl<Db: KvDatabase, S: BuildHasher> WideColumnWrites<Db, S> {
         }
     }
 
-    pub(super) fn after_commit(&mut self) {
+    pub(super) async fn after_commit(&mut self, epoch: Epoch) {
         for write_entry in self.writes.values_mut() {
-            write_entry.after_commit();
+            match write_entry.after_commit(epoch) {
+                Task::Sync => {}
+                Task::Async(fut) => {
+                    fut.await;
+                }
+            }
         }
     }
 }
 
-struct TypedKeyOfSetWrites<C: KeyOfSetContainer, Db: KvDatabase, S: BuildHasher>
-{
-    writes: HashMap<C::Key, HashMap<C::Element, Operation, S>, S>,
-    original_sieve: Arc<KeyOfSetSieve<C, Db, S>>,
+/// The type of operation to perform on a key-of-set element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Operation {
+    /// Insert an element into the set.
+    Insert,
+    /// Delete an element from the set.
+    Delete,
 }
 
-impl<C: KeyOfSetContainer, Db: KvDatabase, S: BuildHasher> WriteEntry<Db>
-    for TypedKeyOfSetWrites<C, Db, S>
+struct TypedKeyOfSetWrites<C: KeyOfSetColumn, Db: KvDatabase> {
+    writes: HashMap<C::Key, HashMap<C::Element, Operation>, FxBuildHasher>,
+    original_cache: Arc<dyn KeyOfSetCache<C, Db>>,
+}
+
+impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
+    for TypedKeyOfSetWrites<C, Db>
 {
     fn write_to_db(&self, tx: &<Db as KvDatabase>::WriteBatch) {
         for (key, element_map) in &self.writes {
@@ -178,20 +244,17 @@ impl<C: KeyOfSetContainer, Db: KvDatabase, S: BuildHasher> WriteEntry<Db>
         }
     }
 
-    fn after_commit(&mut self) {
-        for (key, element_map) in self.writes.drain() {
-            for (_, _) in element_map {
-                self.original_sieve.decrement_pending_write(&key);
-            }
-        }
+    fn after_commit(&mut self, epoch: Epoch) -> Task<'_> {
+        let mut keys = self.writes.drain().map(|x| x.0);
+        self.original_cache.flush(epoch, &mut keys);
+
+        Task::Sync
     }
 
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync) { self }
 }
 
-impl<C: KeyOfSetContainer, Db: KvDatabase, S: BuildHasher>
-    TypedKeyOfSetWrites<C, Db, S>
-{
+impl<C: KeyOfSetColumn, Db: KvDatabase> TypedKeyOfSetWrites<C, Db> {
     fn insert(
         &mut self,
         key: C::Key,
@@ -205,7 +268,7 @@ impl<C: KeyOfSetContainer, Db: KvDatabase, S: BuildHasher>
             }
 
             std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                let mut element_map = HashMap::with_hasher(S::default());
+                let mut element_map = HashMap::default();
                 element_map.insert(element, op);
                 vacant_entry.insert(element_map);
                 true
@@ -215,40 +278,40 @@ impl<C: KeyOfSetContainer, Db: KvDatabase, S: BuildHasher>
 }
 
 #[allow(clippy::type_complexity)]
-pub(super) struct KeyOfSetWrites<Db: KvDatabase, S: BuildHasher> {
-    writes: HashMap<TypeId, Box<dyn WriteEntry<Db>>, S>,
+pub(super) struct KeyOfSetWrites<Db: KvDatabase> {
+    writes: HashMap<TypeId, Box<dyn WriteEntry<Db>>, FxBuildHasher>,
 }
 
-impl<Db: KvDatabase, S: BuildHasher> KeyOfSetWrites<Db, S> {
+impl<Db: KvDatabase> KeyOfSetWrites<Db> {
     fn new() -> Self { Self { writes: HashMap::default() } }
 
-    pub(super) fn put<C: KeyOfSetContainer>(
+    fn put<C: KeyOfSetColumn>(
         &mut self,
         key: C::Key,
         element: C::Element,
         op: Operation,
-        original_sieve: &Arc<KeyOfSetSieve<C, Db, S>>,
+        original_cache: Arc<dyn KeyOfSetCache<C, Db>>,
     ) -> bool {
         match self.writes.entry(TypeId::of::<C>()) {
             std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
                 let typed_writes = occupied_entry
                     .get_mut()
                     .as_any_mut()
-                    .downcast_mut::<TypedKeyOfSetWrites<C, Db, S>>()
+                    .downcast_mut::<TypedKeyOfSetWrites<C, Db>>()
                     .expect("type mismatch in KeyOfSetWrites map");
 
                 assert!(
-                    Arc::ptr_eq(&typed_writes.original_sieve, original_sieve),
-                    "original_sieve mismatch for existing KeyOfSetWrites entry"
+                    Arc::ptr_eq(&typed_writes.original_cache, &original_cache),
+                    "original_cache mismatch for existing KeyOfSetWrites entry"
                 );
 
                 typed_writes.insert(key, element, op)
             }
 
             std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                let mut typed_writes = TypedKeyOfSetWrites::<C, Db, S> {
-                    writes: HashMap::with_hasher(S::default()),
-                    original_sieve: original_sieve.clone(),
+                let mut typed_writes = TypedKeyOfSetWrites::<C, Db> {
+                    writes: HashMap::default(),
+                    original_cache,
                 };
 
                 let result = typed_writes.insert(key, element, op);
@@ -266,9 +329,14 @@ impl<Db: KvDatabase, S: BuildHasher> KeyOfSetWrites<Db, S> {
         }
     }
 
-    pub(super) fn after_commit(&mut self) {
+    pub(super) async fn after_commit(&mut self, epoch: Epoch) {
         for write_entry in self.writes.values_mut() {
-            write_entry.after_commit();
+            match write_entry.after_commit(epoch) {
+                Task::Sync => {}
+                Task::Async(fut) => {
+                    fut.await;
+                }
+            }
         }
     }
 }
@@ -288,11 +356,10 @@ impl<Db: KvDatabase, S: BuildHasher> KeyOfSetWrites<Db, S> {
 ///
 /// # Lifecycle
 ///
-/// 1. **Creation**: Obtained from [`BackgroundWriter::new_write_buffer()`]
+/// 1. **Creation**: Obtained from [`WriteBehind::new_write_transaction()`]
 /// 2. **Accumulation**: Writes are added via cache `put`, `insert_set_element`,
 ///    `remove_set_element` methods
-/// 3. **Submission**: Buffer is submitted to [`BackgroundWriter`] for async
-///    flushing
+/// 3. **Submission**: Buffer is submitted to [`WriteBehind`] for async flushing
 /// 4. **Processing**: Background thread writes to database and commits
 /// 5. **Recycling**: Buffer is returned to pool for reuse
 ///
@@ -306,7 +373,7 @@ impl<Db: KvDatabase, S: BuildHasher> KeyOfSetWrites<Db, S> {
 /// # Durability
 ///
 /// **Important**: Writes in the buffer are **not durable** until:
-/// 1. Buffer is submitted via `submit_write_buffer()`
+/// 1. Buffer is submitted via `submit_write_transaction()`
 /// 2. Background worker flushes to database
 /// 3. Database commit succeeds
 ///
@@ -323,54 +390,81 @@ impl<Db: KvDatabase, S: BuildHasher> KeyOfSetWrites<Db, S> {
 /// # Example
 ///
 /// ```ignore
-/// let writer = BackgroundWriter::new(4, db.clone());
-/// let cache = Arc::new(WideColumnSieve::new(...));
+/// let writer = WriteBehind::new(4, db.clone());
+/// let cache = engine.new_single_map::<Column, Value>();
 ///
 /// // Create buffer
-/// let mut buffer = writer.new_write_buffer();
+/// let mut buffer = writer.new_write_transaction();
 ///
 /// // Accumulate writes
-/// cache.put::<ValueType>(key1, Some(value1), &mut buffer);
-/// cache.put::<ValueType>(key2, Some(value2), &mut buffer);
+/// cache.insert(key1, value1, &mut buffer).await;
+/// cache.insert(key2, value2, &mut buffer).await;
 ///
 /// // Submit for async persistence
-/// writer.submit_write_buffer(buffer);
+/// writer.submit_write_transaction(buffer);
 /// // Writes will be flushed to database in background
 /// ```
-pub struct WriteBuffer<Db: KvDatabase, S: BuildHasher> {
-    pub(super) wide_column_writes: WideColumnWrites<Db, S>,
-    pub(super) key_of_set_writes: KeyOfSetWrites<Db, S>,
+pub struct WriteTransaction<Db: KvDatabase> {
+    pub(super) wide_column_writes: WideColumnWrites<Db>,
+    pub(super) key_of_set_writes: KeyOfSetWrites<Db>,
     write_batch: Option<Db::WriteBatch>,
-    epoch: usize,
+    epoch: Epoch,
     active: bool,
 }
 
-impl<Db: KvDatabase, S: BuildHasher> Drop for WriteBuffer<Db, S> {
+impl<Db: KvDatabase> write_transaction::WriteTransaction
+    for WriteTransaction<Db>
+{
+}
+
+impl<Db: KvDatabase> Drop for WriteTransaction<Db> {
     fn drop(&mut self) {
         assert!(!self.active, "WriteBuffer dropped while still active");
     }
 }
 
-impl<Db: KvDatabase, S: BuildHasher> std::fmt::Debug for WriteBuffer<Db, S> {
+impl<Db: KvDatabase> std::fmt::Debug for WriteTransaction<Db> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WriteBuffer").finish_non_exhaustive()
     }
 }
 
-impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
+impl<Db: KvDatabase> WriteTransaction<Db> {
     fn write_to_db(&self, tx: &<Db as KvDatabase>::WriteBatch) {
         self.wide_column_writes.write_to_db(tx);
         self.key_of_set_writes.write_to_db(tx);
     }
 
-    fn after_commit(&mut self) {
-        self.wide_column_writes.after_commit();
-        self.key_of_set_writes.after_commit();
+    async fn after_commit(&mut self, epoch: Epoch) {
+        self.wide_column_writes.after_commit(epoch).await;
+        self.key_of_set_writes.after_commit(epoch).await;
     }
+
+    pub(crate) fn put_wide_column<C: WideColumn, V: WideColumnValue<C>>(
+        &mut self,
+        key: C::Key,
+        value: Option<V>,
+        original_cache: Arc<dyn WideColumnCache<C, V, Db>>,
+    ) -> bool {
+        self.wide_column_writes.put::<C, V>(key, value, original_cache)
+    }
+
+    pub(crate) fn put_set<C: KeyOfSetColumn>(
+        &mut self,
+        key: C::Key,
+        element: C::Element,
+        op: Operation,
+        original_cache: Arc<dyn KeyOfSetCache<C, Db>>,
+    ) -> bool {
+        self.key_of_set_writes.put::<C>(key, element, op, original_cache)
+    }
+
+    #[must_use]
+    pub(crate) const fn epoch(&self) -> Epoch { self.epoch }
 }
 
-impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
-    fn new(epoch: usize, active: bool, write_batch: Db::WriteBatch) -> Self {
+impl<Db: KvDatabase> WriteTransaction<Db> {
+    fn new(epoch: Epoch, active: bool, write_batch: Db::WriteBatch) -> Self {
         Self {
             wide_column_writes: WideColumnWrites::new(),
             key_of_set_writes: KeyOfSetWrites::new(),
@@ -381,28 +475,17 @@ impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
     }
 }
 
-impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
-    /// Inserts or updates a value in a wide column.
-    pub fn put<W: WideColumn, C: WideColumnValue<W>>(
-        &self,
-        key: &W::Key,
-        value: &C,
-    ) {
-        self.write_batch.as_ref().unwrap().put::<W, C>(key, value);
-    }
-}
-
 /// An asynchronous background writer enabling write-back caching strategy.
 ///
-/// `BackgroundWriter` manages a pool of worker threads that process write
-/// buffers asynchronously. This enables high-performance write-back caching
-/// where cache updates are fast (in-memory only) and persistence happens in the
-/// background.
+/// `WriteBehind` manages a pool of worker threads that process write
+/// transactions asynchronously. This enables high-performance write-back
+/// caching where cache updates are fast (in-memory only) and persistence
+/// happens in the background.
 ///
 /// # Architecture
 ///
 /// ```text
-///                     WriteBuffer
+///                  WriteTransaction
 ///                          |
 ///                          v
 ///                    Work Stealing
@@ -444,45 +527,62 @@ impl<Db: KvDatabase, S: BuildHasher> WriteBuffer<Db, S> {
 /// # Example
 ///
 /// ```ignore
-/// use std::sync::Arc;
+/// use qbice_storage::{
+///     storage_engine::{StorageEngine, db_backed::DbBacked},
+///     write_manager::WriteManager,
+/// };
 ///
-/// // Create background writer with 4 worker threads
-/// let writer = BackgroundWriter::new(4, Arc::new(database));
-/// let cache = Arc::new(WideColumnSieve::new(...));
+/// // Create storage engine with database backend
+/// let engine = DbBacked::new(database, config);
+/// let write_manager = engine.new_write_manager();
+/// let map = engine.new_single_map::<MyColumn, MyValue>();
 ///
 /// // Application loop
 /// loop {
-///     let mut buffer = writer.new_write_buffer();
+///     let mut tx = write_manager.new_write_transaction();
 ///
 ///     // Accumulate many writes (fast, in-memory)
 ///     for (key, value) in updates {
-///         cache.put::<T>(key, Some(value), &mut buffer);
+///         map.insert(key, value, &mut tx).await;
 ///     }
 ///
 ///     // Submit entire batch for async persistence
-///     writer.submit_write_buffer(buffer);
+///     write_manager.submit_write_transaction(tx);
 ///     // Control returns immediately; writes happen in background
 /// }
 ///
 /// // On shutdown, drop writer to gracefully drain queues
-/// drop(writer);
+/// drop(write_manager);
 /// ```
-pub struct BackgroundWriter<Db: KvDatabase, S: BuildHasher> {
-    registry: Arc<Registry<Db, S>>,
+pub struct WriteBehind<Db: KvDatabase> {
+    registry: Arc<Registry<Db>>,
     write_handles: Vec<thread::JoinHandle<()>>,
     commit_handle: Option<thread::JoinHandle<()>>,
-    pool: Arc<WriteBufferPool<Db, S>>,
+    pool: Arc<WriteBufferPool<Db>>,
 }
 
-impl<Db: KvDatabase, S: BuildHasher> std::fmt::Debug
-    for BackgroundWriter<Db, S>
-{
+impl<Db: KvDatabase> write_manager::WriteManager for WriteBehind<Db> {
+    type WriteTransaction = WriteTransaction<Db>;
+
+    fn new_write_transaction(&self) -> Self::WriteTransaction {
+        Self::new_write_transaction(self)
+    }
+
+    fn submit_write_transaction(
+        &self,
+        write_transaction: Self::WriteTransaction,
+    ) {
+        Self::submit_write_transaction(self, write_transaction);
+    }
+}
+
+impl<Db: KvDatabase> std::fmt::Debug for WriteBehind<Db> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BackgroundWriter").finish_non_exhaustive()
     }
 }
 
-impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
+impl<Db: KvDatabase> WriteBehind<Db> {
     /// Creates a new background writer with the specified number of worker
     /// threads.
     ///
@@ -519,13 +619,13 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
     /// // Shutdown gracefully on drop
     /// drop(writer);
     /// ```
-    pub fn new(num_threads: usize, db: Arc<Db>) -> Self {
+    pub fn new(num_threads: usize, db: Db) -> Self {
         let injector = Injector::new();
         let mut workers = Vec::new();
         let mut stealers = Vec::new();
 
         let (commit_sender, commit_receiver) =
-            crossbeam_channel::unbounded::<CommitTask<Db, S>>();
+            crossbeam_channel::unbounded::<CommitTask<Db>>();
 
         // Create Local Queues
         for _ in 0..num_threads {
@@ -577,7 +677,19 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
                 thread::Builder::new()
                     .name("bg_writer_commit".to_string())
                     .spawn(move || {
-                        Self::commit_worker(&commit_receiver, &pool);
+                        // NOTE: we create a dedicated single-threaded runtime
+                        // here because we don't want comit tasks to be
+                        // interfered with by other async tasks that might be
+                        // spawned in the same thread.
+                        let runtime =
+                            tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .unwrap();
+
+                        runtime.block_on(async {
+                            Self::commit_worker(&commit_receiver, &pool).await;
+                        });
                     })
                     .unwrap()
             }),
@@ -587,12 +699,12 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
 
     /// Creates a new write buffer for accumulating write operations.
     #[must_use]
-    pub fn new_write_buffer(&self) -> WriteBuffer<Db, S> {
+    pub fn new_write_transaction(&self) -> WriteTransaction<Db> {
         self.pool.get_buffer()
     }
 
     /// Submits a write buffer to be processed by the background writer.
-    pub fn submit_write_buffer(&self, write_buffer: WriteBuffer<Db, S>) {
+    pub fn submit_write_transaction(&self, write_buffer: WriteTransaction<Db>) {
         let write_task = WriteTask { write_buffer };
 
         // Push to global queue
@@ -607,11 +719,11 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
         }
     }
 
-    fn commit_worker(
-        receiver: &crossbeam_channel::Receiver<CommitTask<Db, S>>,
-        pool: &WriteBufferPool<Db, S>,
+    async fn commit_worker(
+        receiver: &crossbeam_channel::Receiver<CommitTask<Db>>,
+        pool: &WriteBufferPool<Db>,
     ) {
-        let mut expected_epoch = 0;
+        let mut expected_epoch = Epoch(0);
         let mut pending_commits = BinaryHeap::new();
 
         while let Ok(task) = receiver.recv() {
@@ -621,7 +733,8 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
                 &mut pending_commits,
                 &mut expected_epoch,
                 pool,
-            );
+            )
+            .await;
         }
 
         // Process remaining commits
@@ -629,23 +742,29 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
             &mut pending_commits,
             &mut expected_epoch,
             pool,
-        );
+        )
+        .await;
 
         // should be empty now
         assert!(pending_commits.is_empty());
     }
 
-    fn process_pending_commits(
-        pending_commits: &mut BinaryHeap<CommitTask<Db, S>>,
-        expected_epoch: &mut usize,
-        pool: &WriteBufferPool<Db, S>,
+    async fn process_pending_commits(
+        pending_commits: &mut BinaryHeap<CommitTask<Db>>,
+        expected_epoch: &mut Epoch,
+        pool: &WriteBufferPool<Db>,
     ) {
         while let Some(top) = pending_commits.peek() {
             if top.write_task.write_buffer.epoch == *expected_epoch {
                 let mut task = pending_commits.pop().unwrap();
                 task.write_batch.commit();
-                task.write_task.write_buffer.after_commit();
-                *expected_epoch += 1;
+
+                task.write_task
+                    .write_buffer
+                    .after_commit(task.write_task.write_buffer.epoch)
+                    .await;
+
+                expected_epoch.0 += 1;
 
                 // return write buffer to pool
                 pool.return_buffer(task.write_task.write_buffer);
@@ -656,7 +775,7 @@ impl<Db: KvDatabase, S: BuildHasher> BackgroundWriter<Db, S> {
     }
 }
 
-impl<Db: KvDatabase, S: BuildHasher> Drop for BackgroundWriter<Db, S> {
+impl<Db: KvDatabase> Drop for WriteBehind<Db> {
     fn drop(&mut self) {
         // Signal shutdown
         *self.registry.shutdown.lock() = true;
@@ -673,31 +792,31 @@ impl<Db: KvDatabase, S: BuildHasher> Drop for BackgroundWriter<Db, S> {
     }
 }
 
-struct WriteTask<Db: KvDatabase, S: BuildHasher> {
-    write_buffer: WriteBuffer<Db, S>,
+struct WriteTask<Db: KvDatabase> {
+    write_buffer: WriteTransaction<Db>,
 }
 
-struct CommitTask<Db: KvDatabase, S: BuildHasher> {
-    write_task: WriteTask<Db, S>,
+struct CommitTask<Db: KvDatabase> {
+    write_task: WriteTask<Db>,
     write_batch: Db::WriteBatch,
 }
 
-impl<Db: KvDatabase, S: BuildHasher> PartialEq for CommitTask<Db, S> {
+impl<Db: KvDatabase> PartialEq for CommitTask<Db> {
     fn eq(&self, other: &Self) -> bool {
         self.write_task.write_buffer.epoch
             == other.write_task.write_buffer.epoch
     }
 }
 
-impl<Db: KvDatabase, S: BuildHasher> Eq for CommitTask<Db, S> {}
+impl<Db: KvDatabase> Eq for CommitTask<Db> {}
 
-impl<Db: KvDatabase, S: BuildHasher> PartialOrd for CommitTask<Db, S> {
+impl<Db: KvDatabase> PartialOrd for CommitTask<Db> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<Db: KvDatabase, S: BuildHasher> Ord for CommitTask<Db, S> {
+impl<Db: KvDatabase> Ord for CommitTask<Db> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse order for min-heap behavior
         other
@@ -708,9 +827,10 @@ impl<Db: KvDatabase, S: BuildHasher> Ord for CommitTask<Db, S> {
     }
 }
 
-pub struct Registry<Db: KvDatabase, S: BuildHasher> {
-    injector: Injector<WriteTask<Db, S>>,
-    stealers: Vec<Stealer<WriteTask<Db, S>>>,
+#[derive(Debug)]
+struct Registry<Db: KvDatabase> {
+    injector: Injector<WriteTask<Db>>,
+    stealers: Vec<Stealer<WriteTask<Db>>>,
 
     jobs_event_counter: AtomicUsize,
     sleeping_threads: AtomicUsize,
@@ -719,13 +839,13 @@ pub struct Registry<Db: KvDatabase, S: BuildHasher> {
     condvar: Condvar,
 }
 
-struct WorkerThread<Db: KvDatabase, S: BuildHasher> {
-    local: crossbeam_deque::Worker<WriteTask<Db, S>>,
-    registry: Arc<Registry<Db, S>>,
-    sender: crossbeam_channel::Sender<CommitTask<Db, S>>,
+struct WorkerThread<Db: KvDatabase> {
+    local: crossbeam_deque::Worker<WriteTask<Db>>,
+    registry: Arc<Registry<Db>>,
+    sender: crossbeam_channel::Sender<CommitTask<Db>>,
 }
 
-impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
+impl<Db: KvDatabase> WorkerThread<Db> {
     fn run(&self) {
         // Init the backoff strategy (Rayon uses this for spinning)
         let backoff = Backoff::new();
@@ -767,7 +887,7 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
         }
     }
 
-    fn process_task(&self, mut task: WriteTask<Db, S>) {
+    fn process_task(&self, mut task: WriteTask<Db>) {
         let write_batch =
             task.write_buffer.write_batch.take().expect(
                 "Write batch should've been set when retrieved from pool",
@@ -781,7 +901,7 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
             .expect("failed to send CommitTask to commit channel");
     }
 
-    fn find_work(&self) -> Option<WriteTask<Db, S>> {
+    fn find_work(&self) -> Option<WriteTask<Db>> {
         // 1. Pop Local
         self.local
             .pop()
@@ -838,28 +958,34 @@ impl<Db: KvDatabase, S: BuildHasher> WorkerThread<Db, S> {
     }
 }
 
-struct WriteBufferPool<Db: KvDatabase, S: BuildHasher> {
-    pool: ThreadLocal<RefCell<Vec<WriteBuffer<Db, S>>>>,
-    db: Arc<Db>,
-    epoch: AtomicUsize,
+struct WriteBufferPool<Db: KvDatabase> {
+    pool: ThreadLocal<RefCell<Vec<WriteTransaction<Db>>>>,
+    db: Db,
+    epoch: AtomicU64,
 }
 
-impl<Db: KvDatabase, S: BuildHasher> WriteBufferPool<Db, S> {
+impl<Db: KvDatabase> WriteBufferPool<Db> {
     #[must_use]
-    pub const fn new(db: Arc<Db>) -> Self {
-        Self { pool: ThreadLocal::new(), db, epoch: AtomicUsize::new(0) }
+    pub const fn new(db: Db) -> Self {
+        Self { pool: ThreadLocal::new(), db, epoch: AtomicU64::new(0) }
     }
 
-    pub fn get_buffer(&self) -> WriteBuffer<Db, S> {
+    pub fn get_buffer(&self) -> WriteTransaction<Db> {
         let curr_epoch = self.epoch.fetch_add(1, Ordering::SeqCst);
         let curr_pool = self.pool.get_or(|| RefCell::new(Vec::new()));
 
         let mut pool = curr_pool.borrow_mut();
 
         pool.pop().map_or_else(
-            || WriteBuffer::new(curr_epoch, true, self.db.write_batch()),
+            || {
+                WriteTransaction::new(
+                    Epoch(curr_epoch),
+                    true,
+                    self.db.write_batch(),
+                )
+            },
             |mut buffer| {
-                buffer.epoch = curr_epoch;
+                buffer.epoch = Epoch(curr_epoch);
                 buffer.active = true;
                 buffer.write_batch = Some(self.db.write_batch());
 
@@ -868,7 +994,7 @@ impl<Db: KvDatabase, S: BuildHasher> WriteBufferPool<Db, S> {
         )
     }
 
-    pub fn return_buffer(&self, mut buffer: WriteBuffer<Db, S>) {
+    pub fn return_buffer(&self, mut buffer: WriteTransaction<Db>) {
         buffer.active = false;
 
         self.pool.get_or(|| RefCell::new(Vec::new())).borrow_mut().push(buffer);
