@@ -53,9 +53,12 @@ pub(crate) use sync::ActiveInputSessionGuard;
 use crate::{
     Engine, ExecutionStyle, Query,
     config::Config,
-    engine::computation_graph::{
-        CallerInformation, QueryKind, lock::BackwardProjectionLockGuard,
-        tfc_achetype::TransitiveFirewallCallees,
+    engine::{
+        computation_graph::{
+            CallerInformation, QueryKind, lock::BackwardProjectionLockGuard,
+            tfc_achetype::TransitiveFirewallCallees,
+        },
+        guard::GuardExt,
     },
     query::QueryID,
 };
@@ -785,9 +788,9 @@ impl<C: Config> Engine<C> {
 
     #[allow(clippy::option_option)]
     pub(super) async fn clean_query(
-        &self,
+        self: &Arc<Self>,
         query_id: &QueryID,
-        clean_edges: &[QueryID],
+        clean_edges: Vec<QueryID>,
         new_tfc: Option<Interned<TransitiveFirewallCallees>>,
         caller_information: &CallerInformation,
     ) {
@@ -805,12 +808,19 @@ impl<C: Config> Engine<C> {
         };
 
         let mut tx = self.new_write_transaction();
+        let caller_information = caller_information.clone();
+        let engine = self.clone();
+        let query_id = *query_id;
 
-        {
+        // TRANSACTIONAL: all operations within this async block must be polled
+        // to completion
+
+        async move {
             for callee in clean_edges.iter().copied() {
-                let edge = Edge { from: *query_id, to: callee };
+                let edge = Edge { from: query_id, to: callee };
 
-                self.computation_graph
+                engine
+                    .computation_graph
                     .persist
                     .dirty_edge_set
                     .remove(&edge, &mut tx)
@@ -818,25 +828,29 @@ impl<C: Config> Engine<C> {
             }
 
             if let Some(node_info) = new_node_info {
-                self.computation_graph
+                engine
+                    .computation_graph
                     .persist
                     .node_info
-                    .insert(*query_id, node_info, &mut tx)
+                    .insert(query_id, node_info, &mut tx)
                     .await;
             }
 
-            self.computation_graph
+            engine
+                .computation_graph
                 .persist
                 .last_verified
                 .insert(
-                    *query_id,
+                    query_id,
                     LastVerified(caller_information.timestamp()),
                     &mut tx,
                 )
                 .await;
 
-            self.submit_write_buffer(tx);
+            engine.submit_write_buffer(tx);
         }
+        .guarded() // ensure the future is eventually polled to completion
+        .await;
     }
 
     pub(super) async fn is_edge_dirty(

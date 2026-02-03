@@ -157,17 +157,12 @@ impl<C: Config> Engine<C> {
 
                 // if fingerprint has changed, we do dirty propagation
                 if updated {
-                    let list = engine.get_dirty_propagate_list(&query_id).await;
-
-                    for edge in list {
-                        engine
-                            .mark_dirty_forward_edge(
-                                edge.caller,
-                                edge.callee,
-                                &mut write_buffer,
-                            )
-                            .await;
-                    }
+                    write_buffer = engine
+                        .dirty_propagate_from_batch(
+                            std::iter::once(query_id),
+                            write_buffer,
+                        )
+                        .await;
                 }
 
                 (

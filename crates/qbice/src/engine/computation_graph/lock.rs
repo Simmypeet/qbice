@@ -381,9 +381,9 @@ impl<C: Config> Engine<C> {
 
     #[allow(clippy::option_option)]
     pub(super) async fn computing_lock_to_clean_query(
-        &self,
+        self: &Arc<Self>,
         query_id: &QueryID,
-        clean_edges: &[QueryID],
+        clean_edges: Vec<QueryID>,
         new_tfc: Option<Interned<TransitiveFirewallCallees>>,
         caller_information: &CallerInformation,
         lock_guard: ComputingLockGuard<C>,

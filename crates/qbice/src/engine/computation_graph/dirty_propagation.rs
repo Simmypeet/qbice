@@ -1,26 +1,24 @@
 use std::sync::Arc;
 
-use futures::lock::Mutex;
-use tokio::{sync::Semaphore, task::JoinSet};
-
-use crate::{
-    Engine, ExecutionStyle, config::Config,
-    engine::computation_graph::QueryKind, query::QueryID,
+use tokio::{
+    sync::{Mutex, Semaphore},
+    task::JoinSet,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Edge {
-    pub caller: QueryID,
-    pub callee: QueryID,
-}
+use crate::{
+    Engine, ExecutionStyle,
+    config::{Config, WriteTransaction},
+    engine::computation_graph::QueryKind,
+    query::QueryID,
+};
 
 impl<C: Config> Engine<C> {
     #[allow(clippy::manual_async_fn, clippy::await_holding_lock)]
     fn dirty_propagate_async<'a>(
         self: &'a Arc<Self>,
         query_id: &'a QueryID,
-        dirty_list: &'a Arc<Mutex<Vec<Edge>>>,
         bound: &'a Arc<Semaphore>,
+        tx: &'a Arc<Mutex<WriteTransaction<C>>>,
     ) -> impl Future<Output = ()> + 'a + Send {
         async move {
             // has already been marked dirty
@@ -38,33 +36,24 @@ impl<C: Config> Engine<C> {
                 // can spawn a new task
                 if let Ok(permit) = permit_attempt {
                     let engine = self.clone();
-                    let dirty_list = dirty_list.clone();
                     let bound = bound.clone();
                     let query_id = *query_id;
+                    let tx = tx.clone();
 
                     join_sets.spawn(async move {
                         let _permit = permit;
 
-                        if engine
-                            .stem_child(&caller, &query_id, &dirty_list)
-                            .await
-                        {
+                        if engine.stem_child(&caller, &query_id, &tx).await {
                             engine
-                                .dirty_propagate_async(
-                                    &caller,
-                                    &dirty_list,
-                                    &bound,
-                                )
+                                .dirty_propagate_async(&caller, &bound, &tx)
                                 .await;
                         }
                     });
                 }
                 // has to run in current task
-                else if self.stem_child(&caller, query_id, dirty_list).await {
-                    Box::pin(
-                        self.dirty_propagate_async(&caller, dirty_list, bound),
-                    )
-                    .await;
+                else if self.stem_child(&caller, query_id, tx).await {
+                    Box::pin(self.dirty_propagate_async(&caller, bound, tx))
+                        .await;
                 }
             }
 
@@ -79,9 +68,10 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         caller: &QueryID,
         callee: &QueryID,
-        dirty_list: &Arc<Mutex<Vec<Edge>>>,
+        tx: &Arc<Mutex<WriteTransaction<C>>>,
     ) -> bool {
-        dirty_list.lock().await.push(Edge { caller: *caller, callee: *callee });
+        self.mark_dirty_forward_edge(*caller, *callee, &mut *tx.lock().await)
+            .await;
 
         let query_kind = self.get_query_kind(caller).await.unwrap();
 
@@ -95,10 +85,11 @@ impl<C: Config> Engine<C> {
         )
     }
 
-    pub(super) async fn get_dirty_propagate_list_from_batch(
+    pub(super) async fn dirty_propagate_from_batch(
         self: &Arc<Self>,
         query_id: impl IntoIterator<Item = QueryID>,
-    ) -> Vec<Edge> {
+        trasnaction: WriteTransaction<C>,
+    ) -> WriteTransaction<C> {
         // NOTE: we spawn a join handle here because dirty propagation can't be
         // CANCELLED. If it could be cancelled, then we might leave the
         // computation graph in an inconsistent state.
@@ -107,9 +98,9 @@ impl<C: Config> Engine<C> {
             .unwrap_or(8)
             * 8;
 
+        let tx = Arc::new(Mutex::new(trasnaction));
         let engine = self.clone();
         let semaphore = Arc::new(Semaphore::new(bound));
-        let dirty_list = Arc::new(Mutex::new(Vec::new()));
 
         let mut join_set = JoinSet::new();
 
@@ -118,26 +109,20 @@ impl<C: Config> Engine<C> {
                 // can spawn a new task
                 Ok(permit) => {
                     let engine = engine.clone();
-                    let dirty_list = dirty_list.clone();
                     let semaphore = semaphore.clone();
+                    let tx = tx.clone();
 
                     join_set.spawn(async move {
                         let _permit = permit;
 
                         engine
-                            .dirty_propagate_async(
-                                &qid,
-                                &dirty_list,
-                                &semaphore,
-                            )
+                            .dirty_propagate_async(&qid, &semaphore, &tx)
                             .await;
                     });
                 }
                 // has to run in current task
                 Err(_) => {
-                    engine
-                        .dirty_propagate_async(&qid, &dirty_list, &semaphore)
-                        .await;
+                    engine.dirty_propagate_async(&qid, &semaphore, &tx).await;
                 }
             }
         }
@@ -146,31 +131,10 @@ impl<C: Config> Engine<C> {
             res.expect("Task panicked during dirty propagation");
         }
 
-        Arc::try_unwrap(dirty_list)
-            .expect("No other references to dirty_list exist")
-            .into_inner()
-    }
-
-    pub(super) async fn get_dirty_propagate_list(
-        self: &Arc<Self>,
-        query_id: &QueryID,
-    ) -> Vec<Edge> {
-        // NOTE: we spawn a join handle here because dirty propagation can't be
-        // CANCELLED. If it could be cancelled, then we might leave the
-        // computation graph in an inconsistent state.
-        let bound = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(8)
-            * 8;
-
-        let engine = self.clone();
-        let semaphore = Arc::new(Semaphore::new(bound));
-        let dirty_list = Arc::new(Mutex::new(Vec::new()));
-
-        engine.dirty_propagate_async(query_id, &dirty_list, &semaphore).await;
-
-        Arc::try_unwrap(dirty_list)
-            .expect("No other references to dirty_list exist")
+        Arc::try_unwrap(tx)
+            .unwrap_or_else(|_| {
+                panic!("the transaction is still held elsewhere")
+            })
             .into_inner()
     }
 

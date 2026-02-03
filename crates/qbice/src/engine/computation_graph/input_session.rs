@@ -136,19 +136,9 @@ impl<C: Config> InputSession<C> {
         engine.computation_graph.reset_statistic();
         engine.clear_dirtied_queries();
 
-        let dirty_list = engine
-            .get_dirty_propagate_list_from_batch(dirty_batch.into_iter())
+        transaction = engine
+            .dirty_propagate_from_batch(dirty_batch.into_iter(), transaction)
             .await;
-
-        for query_id in dirty_list {
-            engine
-                .mark_dirty_forward_edge(
-                    query_id.caller,
-                    query_id.callee,
-                    &mut transaction,
-                )
-                .await;
-        }
 
         engine.submit_write_buffer(transaction);
     }

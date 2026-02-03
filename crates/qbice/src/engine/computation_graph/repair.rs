@@ -230,7 +230,7 @@ impl<C: Config> Engine<C> {
         if repair_transitive_firewall_callees.not() {
             self.computing_lock_to_clean_query(
                 &query.id,
-                &cleaned_edges,
+                cleaned_edges,
                 None,
                 caller_information,
                 lock_guard,
@@ -285,7 +285,7 @@ impl<C: Config> Engine<C> {
 
             self.computing_lock_to_clean_query(
                 &query.id,
-                &cleaned_edges,
+                cleaned_edges,
                 Some(new_tfc),
                 caller_information,
                 lock_guard,
