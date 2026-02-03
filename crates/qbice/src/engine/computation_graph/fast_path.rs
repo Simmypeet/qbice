@@ -90,8 +90,8 @@ impl<C: Config> Engine<C> {
         } else {
             // check if we have the existing query info
             let (Some(query_info), Some(last_verified)) = (
-                self.get_node_info(query_id, caller).await,
-                self.get_last_verified(query_id, caller).await,
+                self.get_node_info(query_id).await,
+                self.get_last_verified(query_id).await,
             ) else {
                 return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
             };
@@ -118,7 +118,7 @@ impl<C: Config> Engine<C> {
 
                     return Ok(FastPathResult::TryAgain);
                 } else if self
-                    .get_pending_backward_projection(query_id, caller)
+                    .get_pending_backward_projection(query_id)
                     .await
                     .is_some_and(|x| x == caller.timestamp())
                 {
@@ -131,7 +131,7 @@ impl<C: Config> Engine<C> {
             // gets the result
             let query_result = if caller.require_value() {
                 let Some(query_result) = self
-                    .get_query_result::<Q>(&query_id.hash_128().into(), caller)
+                    .get_query_result::<Q>(&query_id.hash_128().into())
                     .await
                 else {
                     return Ok(FastPathResult::ToSlowPath(SlowPath::Computing));
@@ -145,7 +145,7 @@ impl<C: Config> Engine<C> {
             if let Some(caller_requiring_value) =
                 caller.has_a_caller_requiring_value()
             {
-                let kind = self.get_query_kind(query_id, caller).await.unwrap();
+                let kind = self.get_query_kind(query_id).await.unwrap();
 
                 self.observe_callee_fingerprint(
                     &query_info,

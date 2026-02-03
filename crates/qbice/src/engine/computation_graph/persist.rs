@@ -545,7 +545,7 @@ pub struct Observation {
 impl<C: Config> Engine<C> {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     #[inline(never)]
-    pub(super) fn set_computed<Q: Query>(
+    pub(super) async fn set_computed<Q: Query>(
         &self,
         query: Q,
         query_id: QueryID,
@@ -588,7 +588,8 @@ impl<C: Config> Engine<C> {
                     self.computation_graph
                         .persist
                         .backward_edges
-                        .remove(edge, &query_id, &mut tx);
+                        .remove(edge, &query_id, &mut tx)
+                        .await;
                 }
             }
 
@@ -601,63 +602,71 @@ impl<C: Config> Engine<C> {
                         query_id,
                         PendingBackwardProjection(current_timestamp),
                         &mut tx,
-                    );
+                    )
+                    .await;
             }
 
             self.computation_graph
                 .persist
                 .node_info
-                .insert(query_id, node_info, &mut tx);
+                .insert(query_id, node_info, &mut tx)
+                .await;
 
             self.computation_graph
                 .persist
                 .query_kind
-                .insert(query_id, query_kind, &mut tx);
+                .insert(query_id, query_kind, &mut tx)
+                .await;
 
-            self.computation_graph.persist.last_verified.insert(
-                query_id,
-                LastVerified(current_timestamp),
-                &mut tx,
-            );
+            self.computation_graph
+                .persist
+                .last_verified
+                .insert(query_id, LastVerified(current_timestamp), &mut tx)
+                .await;
 
             for edge in forward_edge_order.0.iter() {
                 self.computation_graph
                     .persist
                     .backward_edges
-                    .insert(*edge, query_id, &mut tx);
+                    .insert(*edge, query_id, &mut tx)
+                    .await;
             }
 
-            self.computation_graph.persist.forward_edge_order.insert(
-                query_id,
-                forward_edge_order,
-                &mut tx,
-            );
+            self.computation_graph
+                .persist
+                .forward_edge_order
+                .insert(query_id, forward_edge_order, &mut tx)
+                .await;
 
-            self.computation_graph.persist.forward_edge_observation.insert(
-                query_id,
-                forward_edge_observations,
-                &mut tx,
-            );
+            self.computation_graph
+                .persist
+                .forward_edge_observation
+                .insert(query_id, forward_edge_observations, &mut tx)
+                .await;
 
-            self.computation_graph.persist.query_store.insert(
-                query_id.compact_hash_128(),
-                query_input,
-                &mut tx,
-            );
+            self.computation_graph
+                .persist
+                .query_store
+                .insert(query_id.compact_hash_128(), query_input, &mut tx)
+                .await;
 
-            self.computation_graph.persist.query_store.insert(
-                query_id.compact_hash_128(),
-                query_result,
-                &mut tx,
-            );
+            self.computation_graph
+                .persist
+                .query_store
+                .insert(query_id.compact_hash_128(), query_result, &mut tx)
+                .await;
 
             // Track external input queries by type for refresh support
             if query_kind.is_external_input() {
-                self.computation_graph.persist.external_input_queries.insert(
-                    query_id.stable_type_id(),
-                    query_id.compact_hash_128(),
-                    &mut tx,
-                );
+                self.computation_graph
+                    .persist
+                    .external_input_queries
+                    .insert(
+                        query_id.stable_type_id(),
+                        query_id.compact_hash_128(),
+                        &mut tx,
+                    )
+                    .await;
             }
 
             self.submit_write_buffer(tx);
@@ -679,7 +688,7 @@ impl<C: Config> Engine<C> {
 
         // if have an existing forward edges, unwire the backward edges
         let existing_forward_edges =
-            unsafe { self.get_forward_edges_order_unchecked(&query_id).await };
+            self.get_forward_edges_order(&query_id).await;
 
         let empty_forward_edges = ForwardEdgeOrder(Arc::from([]));
         let empty_forward_edge_observations = ForwardEdgeObservation::<C>(
@@ -700,64 +709,64 @@ impl<C: Config> Engine<C> {
         let query_input = QueryInput::<Q>(query);
         let query_result = QueryResult::<Q>(query_value);
 
-        // NOTE: No more async points below here, to ensure atomicity
-
         {
             if let Some(forward_edges) = existing_forward_edges {
                 for edge in forward_edges.iter() {
                     self.computation_graph
                         .persist
                         .backward_edges
-                        .insert(*edge, query_id, tx);
+                        .remove(edge, &query_id, tx)
+                        .await;
                 }
             }
 
             if set_input {
-                self.computation_graph.persist.query_kind.insert(
-                    query_id,
-                    QueryKind::Input,
-                    tx,
-                );
+                self.computation_graph
+                    .persist
+                    .query_kind
+                    .insert(query_id, QueryKind::Input, tx)
+                    .await;
             }
 
-            self.computation_graph.persist.last_verified.insert(
-                query_id,
-                LastVerified(timestamp),
-                tx,
-            );
+            self.computation_graph
+                .persist
+                .last_verified
+                .insert(query_id, LastVerified(timestamp), tx)
+                .await;
 
-            self.computation_graph.persist.forward_edge_order.insert(
-                query_id,
-                empty_forward_edges,
-                tx,
-            );
+            self.computation_graph
+                .persist
+                .forward_edge_order
+                .insert(query_id, empty_forward_edges, tx)
+                .await;
 
-            self.computation_graph.persist.forward_edge_observation.insert(
-                query_id,
-                empty_forward_edge_observations,
-                tx,
-            );
+            self.computation_graph
+                .persist
+                .forward_edge_observation
+                .insert(query_id, empty_forward_edge_observations, tx)
+                .await;
 
             self.computation_graph
                 .persist
                 .node_info
-                .insert(query_id, node_info, tx);
+                .insert(query_id, node_info, tx)
+                .await;
 
-            self.computation_graph.persist.query_store.insert(
-                query_id.compact_hash_128(),
-                query_input,
-                tx,
-            );
+            self.computation_graph
+                .persist
+                .query_store
+                .insert(query_id.compact_hash_128(), query_input, tx)
+                .await;
 
-            self.computation_graph.persist.query_store.insert(
-                query_id.compact_hash_128(),
-                query_result,
-                tx,
-            );
+            self.computation_graph
+                .persist
+                .query_store
+                .insert(query_id.compact_hash_128(), query_result, tx)
+                .await;
         }
     }
 
-    pub(super) fn mark_dirty_forward_edge(
+    pub(super) async fn mark_dirty_forward_edge(
         &self,
         from: QueryID,
         to: QueryID,
@@ -765,7 +774,11 @@ impl<C: Config> Engine<C> {
     ) {
         let edge = Edge { from, to };
 
-        self.computation_graph.persist.dirty_edge_set.insert(edge, Unit, tx);
+        self.computation_graph
+            .persist
+            .dirty_edge_set
+            .insert(edge, Unit, tx)
+            .await;
 
         self.computation_graph.add_dirtied_edge_count();
     }
@@ -780,7 +793,7 @@ impl<C: Config> Engine<C> {
     ) {
         let new_node_info = if let Some(x) = new_tfc {
             let mut current_node_info =
-                self.get_node_info(query_id, caller_information).await.unwrap();
+                self.get_node_info(query_id).await.unwrap();
 
             current_node_info.transitive_firewall_callees = x;
             current_node_info.transitive_firewall_callees_fingerprint =
@@ -791,7 +804,7 @@ impl<C: Config> Engine<C> {
             None
         };
 
-        let mut tx = self.new_write_transaction(caller_information).await;
+        let mut tx = self.new_write_transaction();
 
         {
             for callee in clean_edges.iter().copied() {
@@ -800,21 +813,27 @@ impl<C: Config> Engine<C> {
                 self.computation_graph
                     .persist
                     .dirty_edge_set
-                    .remove(&edge, &mut tx);
+                    .remove(&edge, &mut tx)
+                    .await;
             }
 
             if let Some(node_info) = new_node_info {
                 self.computation_graph
                     .persist
                     .node_info
-                    .insert(*query_id, node_info, &mut tx);
+                    .insert(*query_id, node_info, &mut tx)
+                    .await;
             }
 
-            self.computation_graph.persist.last_verified.insert(
-                *query_id,
-                LastVerified(caller_information.timestamp()),
-                &mut tx,
-            );
+            self.computation_graph
+                .persist
+                .last_verified
+                .insert(
+                    *query_id,
+                    LastVerified(caller_information.timestamp()),
+                    &mut tx,
+                )
+                .await;
 
             self.submit_write_buffer(tx);
         }
@@ -836,15 +855,15 @@ impl<C: Config> Engine<C> {
     pub(super) async fn done_backward_projection(
         &self,
         query_id: &QueryID,
-        caller_information: &CallerInformation,
         backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
     ) {
-        let mut tx = self.new_write_transaction(caller_information).await;
+        let mut tx = self.new_write_transaction();
 
         self.computation_graph
             .persist
             .pending_backward_projection
-            .remove(query_id, &mut tx);
+            .remove(query_id, &mut tx)
+            .await;
 
         backward_projection_lock_guard.done();
 

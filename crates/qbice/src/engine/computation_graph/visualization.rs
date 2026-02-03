@@ -199,9 +199,11 @@ impl<C: Config> Engine<C> {
     /// ```
     #[must_use]
     async fn snapshot_graph_from<Q: Query>(&self, query: &Q) -> GraphSnapshot {
-        let caller = CallerInformation::new(CallerKind::Tracing, unsafe {
-            self.get_current_timestamp_from_engine().await
-        });
+        let _caller = CallerInformation::new(
+            CallerKind::Tracing,
+            unsafe { self.get_current_timestamp_from_engine().await },
+            Some(self.acquire_active_computation_guard().await),
+        );
 
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -221,8 +223,8 @@ impl<C: Config> Engine<C> {
 
             // Get the query meta
             let (Some(kind), Some(forward_edge)) = (
-                self.get_query_kind(&current_id, &caller).await,
-                self.get_forward_edges_order(&current_id, &caller).await,
+                self.get_query_kind(&current_id).await,
+                self.get_forward_edges_order(&current_id).await,
             ) else {
                 continue;
             };

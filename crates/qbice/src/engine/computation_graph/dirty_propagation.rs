@@ -28,8 +28,7 @@ impl<C: Config> Engine<C> {
                 return;
             }
 
-            let backward_edges =
-                unsafe { self.get_backward_edges_unchecked(query_id).await };
+            let backward_edges = self.get_backward_edges(query_id).await;
 
             let mut join_sets = JoinSet::new();
 
@@ -84,8 +83,7 @@ impl<C: Config> Engine<C> {
     ) -> bool {
         dirty_list.lock().await.push(Edge { caller: *caller, callee: *callee });
 
-        let query_kind =
-            unsafe { self.get_query_kind_unchecked(caller).await.unwrap() };
+        let query_kind = self.get_query_kind(caller).await.unwrap();
 
         // if this is a firewall node or projection node, then we stop
         // propagation here.

@@ -1,6 +1,9 @@
 use crossbeam::sync::WaitGroup;
 
-use crate::{engine::computation_graph::persist::Timestamp, query::QueryID};
+use crate::{
+    engine::computation_graph::{ActiveComputationGuard, persist::Timestamp},
+    query::QueryID,
+};
 
 #[derive(Debug, Clone)]
 pub enum CallerReason {
@@ -24,11 +27,23 @@ impl QueryCaller {
 pub struct CallerInformation {
     kind: CallerKind,
     timestamp: Timestamp,
+    active_computation_guard: Option<ActiveComputationGuard>,
 }
 
 impl CallerInformation {
-    pub const fn new(kind: CallerKind, timestamp: Timestamp) -> Self {
-        Self { kind, timestamp }
+    pub const fn new(
+        kind: CallerKind,
+        timestamp: Timestamp,
+        active_computation_guard: Option<ActiveComputationGuard>,
+    ) -> Self {
+        Self { kind, timestamp, active_computation_guard }
+    }
+
+    #[must_use]
+    pub fn clone_active_computation_guard(
+        &self,
+    ) -> Option<ActiveComputationGuard> {
+        self.active_computation_guard.clone()
     }
 
     pub const fn get_wait_group(&mut self) -> Option<WaitGroup> {

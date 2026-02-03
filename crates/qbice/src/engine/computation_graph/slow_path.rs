@@ -14,7 +14,7 @@ use crate::{
             },
             lock::{ComputingLockGuard, ComputingMode, LockGuard},
         },
-        uncancellable_worker::GuardExt,
+        guard::GuardExt,
     },
 };
 
@@ -80,10 +80,8 @@ impl<C: Config> Engine<C> {
                     CallerReason::RequireValue(Some(wait_group)),
                 )),
                 caller_information.timestamp(),
+                caller_information.clone_active_computation_guard(),
             ),
-            // NOTE: the parent tracked engine have already hold the active
-            // computation guard for us
-            active_computation_guard: None,
         };
         let guarded_tracked_engine = GuardedTrackedEngine { tracked_engine };
 
@@ -120,6 +118,9 @@ impl<C: Config> Engine<C> {
         // TRANSACTIONAL: from now on, we are starting to modify the query's
         // internal state, so we need to make sure that this whole block is
         // polled to the completion without being cancelled.
+        //
+        // We must also hold `caller_information` alive until the end of this
+        // async block, because it's needed to hold `ActiveComputationGuard`
 
         let engine = self.clone();
         let query_id = query.id;
@@ -128,11 +129,9 @@ impl<C: Config> Engine<C> {
         let caller_information = caller_information.clone();
 
         async move {
-            let old_kind =
-                engine.get_query_kind(&query_id, &caller_information).await;
-            let existing_forward_edges = engine
-                .get_forward_edges_order(&query_id, &caller_information)
-                .await;
+            let old_kind = engine.get_query_kind(&query_id).await;
+            let existing_forward_edges =
+                engine.get_forward_edges_order(&query_id).await;
 
             // if the old node info is a firewall or projection node, we compare
             // the old and new value fingerprints to determine if we need to
@@ -145,10 +144,8 @@ impl<C: Config> Engine<C> {
                 && (old_kind.is_firewall() || old_kind.is_projection())
                 && execute_query_for == ExecuteQueryFor::RecomputeQuery
             {
-                let old_node_info = engine
-                    .get_node_info(&query_id, &caller_information)
-                    .await
-                    .expect(
+                let old_node_info =
+                    engine.get_node_info(&query_id).await.expect(
                         "old node info should exist for recomputed firewall \
                          or projection",
                     );
@@ -156,19 +153,20 @@ impl<C: Config> Engine<C> {
                 let fingerprint = engine.hash(&value);
                 let updated = old_node_info.value_fingerprint() != fingerprint;
 
-                let mut write_buffer =
-                    engine.new_write_transaction(&caller_information).await;
+                let mut write_buffer = engine.new_write_transaction();
 
                 // if fingerprint has changed, we do dirty propagation
                 if updated {
                     let list = engine.get_dirty_propagate_list(&query_id).await;
 
                     for edge in list {
-                        engine.mark_dirty_forward_edge(
-                            edge.caller,
-                            edge.callee,
-                            &mut write_buffer,
-                        );
+                        engine
+                            .mark_dirty_forward_edge(
+                                edge.caller,
+                                edge.callee,
+                                &mut write_buffer,
+                            )
+                            .await;
                     }
                 }
 
@@ -182,26 +180,24 @@ impl<C: Config> Engine<C> {
                     old_kind.is_firewall() && updated,
                 )
             } else {
-                (
-                    engine.new_write_transaction(&caller_information).await,
-                    None,
-                    false,
-                )
+                (engine.new_write_transaction(), None, false)
             };
 
-            engine.computing_lock_to_computed(
-                query,
-                query_id,
-                value,
-                query_value_fingerprint,
-                lock_guard,
-                need_backward_projection_propagation,
-                timestamp,
-                existing_forward_edges
-                    .as_ref()
-                    .map(std::convert::AsRef::as_ref),
-                continuing_tx,
-            );
+            engine
+                .computing_lock_to_computed(
+                    query,
+                    query_id,
+                    value,
+                    query_value_fingerprint,
+                    lock_guard,
+                    need_backward_projection_propagation,
+                    timestamp,
+                    existing_forward_edges
+                        .as_ref()
+                        .map(std::convert::AsRef::as_ref),
+                    continuing_tx,
+                )
+                .await;
 
             // if the firewall is being repaired, and it has pending backward
             // projections, we need to do backward projections now.

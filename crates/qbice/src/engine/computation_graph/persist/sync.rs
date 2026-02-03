@@ -22,7 +22,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use crate::{
     Config, Engine, Query,
     engine::computation_graph::{
-        CallerInformation, QueryKind,
+        QueryKind,
         persist::{
             CompressedBackwardEdgeSet, NodeInfo, Observation, QueryInput,
             QueryResult, SingleMap, Timestamp, WriteTransaction,
@@ -57,11 +57,15 @@ pub struct Sync<C: Config> {
     write_manager: <C::StorageEngine as StorageEngine>::WriteManager,
 }
 
-#[derive(Debug)]
-pub struct ActiveComputationGuard(#[allow(unused)] OwnedRwLockReadGuard<()>);
+#[derive(Debug, Clone)]
+pub struct ActiveComputationGuard(
+    #[allow(unused)] Arc<OwnedRwLockReadGuard<()>>,
+);
 
 #[derive(Debug)]
-pub struct ActiveInputSessionGuard(#[allow(unused)] OwnedRwLockWriteGuard<()>);
+pub struct ActiveInputSessionGuard(
+    #[allow(unused)] Arc<OwnedRwLockWriteGuard<()>>,
+);
 
 impl<C: Config> Sync<C> {
     pub async fn new(db: &C::StorageEngine) -> Self {
@@ -70,15 +74,17 @@ impl<C: Config> Sync<C> {
 
         let timestamp = timestamp_map.get(&()).await;
 
-        let timestamp = timestamp.unwrap_or_else(|| {
+        let timestamp = if let Some(timestamp) = timestamp {
+            timestamp
+        } else {
             let mut tx = write_manager.new_write_transaction();
 
-            timestamp_map.insert((), Timestamp(0), &mut tx);
+            timestamp_map.insert((), Timestamp(0), &mut tx).await;
 
             write_manager.submit_write_transaction(tx);
 
             Timestamp(0)
-        });
+        };
 
         Self {
             timestamp: AtomicU64::new(timestamp.0),
@@ -90,30 +96,15 @@ impl<C: Config> Sync<C> {
 }
 
 impl<C: Config> Engine<C> {
-    pub(in crate::engine::computation_graph) async fn new_write_transaction(
+    pub(in crate::engine::computation_graph) fn new_write_transaction(
         &'_ self,
-        caller_information: &CallerInformation,
     ) -> WriteTransaction<C> {
         // the guard must be dropped here to make the future Send
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .sync
-                    .write_manager
-                    .new_write_transaction();
-            }
-        }
-
-        self.cancel().await
+        self.computation_graph
+            .persist
+            .sync
+            .write_manager
+            .new_write_transaction()
     }
 
     pub(in crate::engine::computation_graph) async fn acquire_active_computation_guard(
@@ -128,7 +119,7 @@ impl<C: Config> Engine<C> {
             .read_owned()
             .await;
 
-        ActiveComputationGuard(guard)
+        ActiveComputationGuard(Arc::new(guard))
     }
 
     pub(in crate::engine::computation_graph) async fn acquire_active_input_session_guard(
@@ -149,11 +140,12 @@ impl<C: Config> Engine<C> {
             .fetch_add(1, Ordering::SeqCst);
         let new_timestamp = prev + 1;
 
-        self.computation_graph.persist.sync.timestamp_map.insert(
-            (),
-            Timestamp(new_timestamp),
-            &mut write_buffer,
-        );
+        self.computation_graph
+            .persist
+            .sync
+            .timestamp_map
+            .insert((), Timestamp(new_timestamp), &mut write_buffer)
+            .await;
 
         let guard = self
             .computation_graph
@@ -164,7 +156,7 @@ impl<C: Config> Engine<C> {
             .write_owned()
             .await;
 
-        (write_buffer, ActiveInputSessionGuard(guard))
+        (write_buffer, ActiveInputSessionGuard(Arc::new(guard)))
     }
 
     pub(in crate::engine::computation_graph) fn submit_write_buffer(
@@ -210,250 +202,6 @@ impl<C: Config> Engine<C> {
     pub(in crate::engine::computation_graph) async fn get_forward_edges_order(
         &self,
         query_id: &QueryID,
-        caller_information: &CallerInformation,
-    ) -> Option<Arc<[QueryID]>> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .forward_edge_order
-                    .get(query_id)
-                    .await
-                    .map(|x| x.0);
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async fn get_forward_edge_observations(
-        &self,
-        query_id: &QueryID,
-        caller_information: &CallerInformation,
-    ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .forward_edge_observation
-                    .get(query_id)
-                    .await
-                    .map(|x| x.0);
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async fn get_node_info(
-        &self,
-        query_id: &QueryID,
-        caller_information: &CallerInformation,
-    ) -> Option<NodeInfo> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .node_info
-                    .get(query_id)
-                    .await;
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async fn get_query_kind(
-        &self,
-        query_id: &QueryID,
-        caller_information: &CallerInformation,
-    ) -> Option<QueryKind> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .query_kind
-                    .get(query_id)
-                    .await;
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async fn get_last_verified(
-        &self,
-        query_id: &QueryID,
-        caller_information: &CallerInformation,
-    ) -> Option<Timestamp> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .last_verified
-                    .get(query_id)
-                    .await
-                    .map(|x| x.0);
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async fn get_backward_edges(
-        &self,
-        query_id: &QueryID,
-        caller_information: &CallerInformation,
-    ) -> CompressedBackwardEdgeSet<C::BuildHasher> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .backward_edges
-                    .get(query_id)
-                    .await;
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async fn get_query_result<
-        Q: Query,
-    >(
-        &self,
-        query_input_hash_128: &Compact128,
-        caller_information: &CallerInformation,
-    ) -> Option<Q::Value> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .query_store
-                    .get::<QueryResult<Q>>(query_input_hash_128)
-                    .await
-                    .map(|x| x.0);
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async fn get_pending_backward_projection(
-        &self,
-        query_id: &QueryID,
-        caller_information: &CallerInformation,
-    ) -> Option<Timestamp> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .pending_backward_projection
-                    .get(query_id)
-                    .await
-                    .map(|x| x.0);
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async fn get_query_input<
-        Q: Query,
-    >(
-        &self,
-        query_id: &Compact128,
-        caller_information: &CallerInformation,
-    ) -> Option<Q> {
-        {
-            if self
-                .computation_graph
-                .persist
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst)
-                == caller_information.timestamp().0
-            {
-                return self
-                    .computation_graph
-                    .persist
-                    .query_store
-                    .get::<QueryInput<Q>>(query_id)
-                    .await
-                    .map(|x| x.0);
-            }
-        }
-
-        self.cancel().await
-    }
-
-    pub(in crate::engine::computation_graph) async unsafe fn get_forward_edges_order_unchecked(
-        &self,
-        query_id: &QueryID,
     ) -> Option<Arc<[QueryID]>> {
         self.computation_graph
             .persist
@@ -463,28 +211,79 @@ impl<C: Config> Engine<C> {
             .map(|x| x.0)
     }
 
-    pub(in crate::engine::computation_graph) async unsafe fn get_backward_edges_unchecked(
+    pub(in crate::engine::computation_graph) async fn get_forward_edge_observations(
         &self,
         query_id: &QueryID,
-    ) -> CompressedBackwardEdgeSet<C::BuildHasher> {
-        self.computation_graph.persist.backward_edges.get(query_id).await
+    ) -> Option<Arc<HashMap<QueryID, Observation, C::BuildHasher>>> {
+        self.computation_graph
+            .persist
+            .forward_edge_observation
+            .get(query_id)
+            .await
+            .map(|x| x.0)
     }
 
-    pub(in crate::engine::computation_graph) async unsafe fn get_query_kind_unchecked(
-        &self,
-        query_id: &QueryID,
-    ) -> Option<QueryKind> {
-        self.computation_graph.persist.query_kind.get(query_id).await
-    }
-
-    pub(in crate::engine::computation_graph) async unsafe fn get_node_info_unchecked(
+    pub(in crate::engine::computation_graph) async fn get_node_info(
         &self,
         query_id: &QueryID,
     ) -> Option<NodeInfo> {
         self.computation_graph.persist.node_info.get(query_id).await
     }
 
-    pub(in crate::engine::computation_graph) async unsafe fn get_query_input_unchecked<
+    pub(in crate::engine::computation_graph) async fn get_query_kind(
+        &self,
+        query_id: &QueryID,
+    ) -> Option<QueryKind> {
+        self.computation_graph.persist.query_kind.get(query_id).await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_last_verified(
+        &self,
+        query_id: &QueryID,
+    ) -> Option<Timestamp> {
+        self.computation_graph
+            .persist
+            .last_verified
+            .get(query_id)
+            .await
+            .map(|x| x.0)
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_backward_edges(
+        &self,
+        query_id: &QueryID,
+    ) -> CompressedBackwardEdgeSet<C::BuildHasher> {
+        self.computation_graph.persist.backward_edges.get(query_id).await
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_query_result<
+        Q: Query,
+    >(
+        &self,
+        query_input_hash_128: &Compact128,
+    ) -> Option<Q::Value> {
+        self.computation_graph
+            .persist
+            .query_store
+            .get::<QueryResult<Q>>(query_input_hash_128)
+            .await
+            .map(|x| x.0)
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_pending_backward_projection(
+        &self,
+        query_id: &QueryID,
+    ) -> Option<Timestamp> {
+        return self
+            .computation_graph
+            .persist
+            .pending_backward_projection
+            .get(query_id)
+            .await
+            .map(|x| x.0);
+    }
+
+    pub(in crate::engine::computation_graph) async fn get_query_input<
         Q: Query,
     >(
         &self,
@@ -500,8 +299,12 @@ impl<C: Config> Engine<C> {
 
     pub(in crate::engine::computation_graph) async fn get_external_input_queries(
         &self,
-        type_id: &StableTypeID,
+        stable_type_id: &StableTypeID,
     ) -> Arc<DashSet<Compact128, C::BuildHasher>> {
-        self.computation_graph.persist.external_input_queries.get(type_id).await
+        self.computation_graph
+            .persist
+            .external_input_queries
+            .get(stable_type_id)
+            .await
     }
 }

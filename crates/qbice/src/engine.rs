@@ -52,7 +52,7 @@ use crate::{
 };
 
 pub(super) mod computation_graph;
-pub(super) mod uncancellable_worker;
+pub(super) mod guard;
 
 /// The central query database engine.
 ///

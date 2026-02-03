@@ -26,7 +26,6 @@ use crate::{
 
 mod backward_projection;
 mod caller;
-mod cancel;
 mod dirty_propagation;
 mod fast_path;
 mod input_session;
@@ -201,7 +200,6 @@ pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: Arc<DashSet<QueryID>>,
     caller: CallerInformation,
-    active_computation_guard: Option<ActiveComputationGuard>,
 }
 
 impl<C: Config> TrackedEngine<C> {
@@ -234,10 +232,7 @@ impl<C: Config> TrackedEngine<C> {
             // directly access repository to avoid double wrapping
             return self
                 .engine
-                .get_query_result::<Q>(
-                    &query_with_id.id.compact_hash_128(),
-                    &self.caller,
-                )
+                .get_query_result::<Q>(&query_with_id.id.compact_hash_128())
                 .await
                 .expect("should've existed since the cache said it's done");
         }
@@ -294,46 +289,6 @@ impl<C: Config> TrackedEngine<C> {
 }
 
 impl<C: Config> TrackedEngine<C> {
-    /// Clones the `TrackedEngine`, sharing the same underlying engine and
-    /// local cache.
-    ///
-    /// This is intended to be analogous to [`Clone`], but has to be async in
-    /// order to acquire the necessary active computation guard from the engine.
-    pub async fn clone_async(&self) -> Self {
-        Self {
-            engine: self.engine.clone(),
-            cache: self.cache.clone(),
-            caller: self.caller.clone(),
-            active_computation_guard: if self.active_computation_guard.is_some()
-            {
-                Some(self.engine.acquire_active_computation_guard().await)
-            } else {
-                None
-            },
-        }
-    }
-}
-
-impl<C: Config> Clone for TrackedEngine<C> {
-    fn clone(&self) -> Self {
-        Self {
-            engine: self.engine.clone(),
-            cache: self.cache.clone(),
-            caller: self.caller.clone(),
-            active_computation_guard: if self.active_computation_guard.is_some()
-            {
-                panic!(
-                    "Cannot clone TrackedEngine<DefaultConfig> synchronously. \
-                     Use `clone_async` instead."
-                );
-            } else {
-                None
-            },
-        }
-    }
-}
-
-impl<C: Config> TrackedEngine<C> {
     /// Creates a new `TrackedEngine` with the given engine, cache, and caller
     /// information.
     ///
@@ -343,9 +298,18 @@ impl<C: Config> TrackedEngine<C> {
         engine: Arc<Engine<C>>,
         cache: Arc<DashSet<QueryID>>,
         caller: CallerInformation,
-        active_computation_guard: Option<ActiveComputationGuard>,
     ) -> Self {
-        Self { engine, cache, caller, active_computation_guard }
+        Self { engine, cache, caller }
+    }
+}
+
+impl<C: Config> Clone for TrackedEngine<C> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            cache: self.cache.clone(),
+            caller: self.caller.clone(),
+        }
     }
 }
 
@@ -423,11 +387,10 @@ impl<C: Config> Engine<C> {
     #[allow(clippy::unused_async)]
     pub async fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
         TrackedEngine {
-            caller: CallerInformation::new(CallerKind::User, unsafe {
-                self.get_current_timestamp_from_engine().await
-            }),
-            active_computation_guard: Some(
-                self.acquire_active_computation_guard().await,
+            caller: CallerInformation::new(
+                CallerKind::User,
+                unsafe { self.get_current_timestamp_from_engine().await },
+                Some(self.acquire_active_computation_guard().await),
             ),
             cache: Arc::new(DashSet::new()),
             engine: self,
@@ -525,7 +488,6 @@ impl<C: Config> Engine<C> {
                 .get_lock_guard(
                     &query.id,
                     slow_path,
-                    caller,
                     std::any::type_name::<Q>(),
                 )
                 .await

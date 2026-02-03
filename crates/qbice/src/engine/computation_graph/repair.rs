@@ -33,14 +33,10 @@ impl<C: Config> Engine<C> {
         let mut repair_transitive_firewall_callees = false;
         let mut cleaned_edges = Vec::new();
 
-        let forward_edges = self
-            .get_forward_edges_order(&query.id, caller_information)
-            .await
-            .unwrap();
-        let forward_edge_observations = self
-            .get_forward_edge_observations(&query.id, caller_information)
-            .await
-            .unwrap();
+        let forward_edges =
+            self.get_forward_edges_order(&query.id).await.unwrap();
+        let forward_edge_observations =
+            self.get_forward_edge_observations(&query.id).await.unwrap();
 
         for callee in forward_edges.iter() {
             // skip if not dirty
@@ -48,8 +44,7 @@ impl<C: Config> Engine<C> {
                 continue;
             }
 
-            let kind =
-                self.get_query_kind(callee, caller_information).await.unwrap();
+            let kind = self.get_query_kind(callee).await.unwrap();
 
             // NOTE: if the callee is an input (explicitly set), it's impossible
             // to try to repair it, so we'll skip repairing and directly
@@ -70,6 +65,7 @@ impl<C: Config> Engine<C> {
                                 CallerReason::Repair,
                             )),
                             caller_information.timestamp(),
+                            caller_information.clone_active_computation_guard(),
                         ),
                     )
                     .await;
@@ -78,13 +74,9 @@ impl<C: Config> Engine<C> {
             // after repairing, compare the fingerprints to see if we need to
             // recompute
             {
-                let callee_node_info = self
-                    .get_node_info(callee, caller_information)
-                    .await
-                    .expect(
-                        "callee node info should exist when forward edge \
-                         exists",
-                    );
+                let callee_node_info = self.get_node_info(callee).await.expect(
+                    "callee node info should exist when forward edge exists",
+                );
 
                 let value_fingerprint_diff = callee_node_info
                     .value_fingerprint()
@@ -128,14 +120,10 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
     ) {
-        let node_info =
-            self.get_node_info(&query.id, caller_information).await.unwrap();
+        let node_info = self.get_node_info(&query.id).await.unwrap();
 
-        let is_current_query_projection = self
-            .get_query_kind(&query.id, caller_information)
-            .await
-            .unwrap()
-            .is_projection();
+        let is_current_query_projection =
+            self.get_query_kind(&query.id).await.unwrap().is_projection();
 
         let tfcs = node_info.transitive_firewall_callees();
         let tfcs = tfcs.iter().copied().collect::<Vec<_>>();
@@ -155,6 +143,8 @@ impl<C: Config> Engine<C> {
 
         for tfc_chunk in tfcs.chunks(chunk_size).map(<[_]>::to_vec) {
             let engine = Arc::clone(self);
+            let active_computation_guard =
+                caller_information.clone_active_computation_guard();
 
             handles.push(tokio::spawn(async move {
                 for tfc in tfc_chunk {
@@ -178,6 +168,7 @@ impl<C: Config> Engine<C> {
                                         !is_current_query_projection,
                                 },
                                 timestamp,
+                                active_computation_guard.clone(),
                             ),
                         )
                         .await;
@@ -246,10 +237,8 @@ impl<C: Config> Engine<C> {
             )
             .await;
         } else {
-            let forward_edges = self
-                .get_forward_edges_order(&query.id, caller_information)
-                .await
-                .unwrap();
+            let forward_edges =
+                self.get_forward_edges_order(&query.id).await.unwrap();
 
             // repair all callees
             for callee in forward_edges.iter() {
@@ -267,6 +256,7 @@ impl<C: Config> Engine<C> {
                                 CallerReason::Repair,
                             )),
                             caller_information.timestamp(),
+                            caller_information.clone_active_computation_guard(),
                         ),
                     )
                     .await;
@@ -275,16 +265,12 @@ impl<C: Config> Engine<C> {
             let mut new_tfcs = FxHashSet::default();
 
             for x in forward_edges.iter() {
-                let kind =
-                    self.get_query_kind(x, caller_information).await.unwrap();
+                let kind = self.get_query_kind(x).await.unwrap();
 
                 if kind.is_firewall() {
                     new_tfcs.insert(*x);
                 } else {
-                    let callee_info = self
-                        .get_node_info(x, caller_information)
-                        .await
-                        .unwrap();
+                    let callee_info = self.get_node_info(x).await.unwrap();
 
                     new_tfcs.extend(
                         callee_info
@@ -341,7 +327,7 @@ impl<C: Config> Engine<C> {
     {
         Box::pin(async move {
             let query_input =
-                self.get_query_input::<Q>(query_id, called_from).await.unwrap();
+                self.get_query_input::<Q>(query_id).await.unwrap();
 
             let query_for = QueryWithID {
                 id: QueryID::new::<Q>(*query_id),

@@ -277,20 +277,15 @@ impl<C: Config> Engine<C> {
     async fn computing_lock_guard(
         &self,
         query_id: &QueryID,
-        caller_information: &CallerInformation,
         type_name: &'static str,
     ) -> Option<ComputingLockGuard<C>> {
         // IMPORTANT: here we move the retrival logic outside the lock guard
         // to avoid holding the lock across await points
 
-        let last_verified =
-            self.get_last_verified(query_id, caller_information).await;
+        let last_verified = self.get_last_verified(query_id).await;
 
         let (mode, query_kind) = if last_verified.is_some() {
-            let kind = self
-                .get_query_kind(query_id, caller_information)
-                .await
-                .unwrap();
+            let kind = self.get_query_kind(query_id).await.unwrap();
 
             (ComputingMode::Repair, kind)
         } else {
@@ -370,12 +365,11 @@ impl<C: Config> Engine<C> {
         &self,
         query_id: &QueryID,
         slow_path: SlowPath,
-        caller_information: &CallerInformation,
         type_name: &'static str,
     ) -> Option<LockGuard<C>> {
         match slow_path {
             SlowPath::Computing => self
-                .computing_lock_guard(query_id, caller_information, type_name)
+                .computing_lock_guard(query_id, type_name)
                 .await
                 .map(LockGuard::ComputingLockGuard),
 
@@ -460,7 +454,7 @@ impl<C: Config> Engine<C> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn computing_lock_to_computed<Q: Query>(
+    pub(super) async fn computing_lock_to_computed<Q: Query>(
         &self,
         query: Q,
         query_id: QueryID,
@@ -514,7 +508,8 @@ impl<C: Config> Engine<C> {
             current_timestamp,
             existing_forward_edges,
             continuing_tx,
-        );
+        )
+        .await;
 
         lock_guard.defuse();
 

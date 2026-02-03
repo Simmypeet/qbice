@@ -3,16 +3,21 @@ use std::{collections::VecDeque, sync::Arc};
 use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
 use qbice_stable_hash::{Compact128, StableHash};
-use tokio::task::JoinSet;
+use tokio::{sync::RwLock, task::JoinSet};
 
 use crate::{
     Engine, Query, TrackedEngine,
     config::{Config, WriteTransaction},
-    engine::computation_graph::{
-        ActiveInputSessionGuard,
-        caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
-        persist::NodeInfo,
-        slow_path::GuardedTrackedEngine,
+    engine::{
+        computation_graph::{
+            ActiveInputSessionGuard,
+            caller::{
+                CallerInformation, CallerKind, CallerReason, QueryCaller,
+            },
+            persist::NodeInfo,
+            slow_path::GuardedTrackedEngine,
+        },
+        guard::GuardExt,
     },
     query::QueryID,
 };
@@ -77,28 +82,30 @@ use crate::{
 /// ```
 pub struct InputSession<C: Config> {
     engine: Arc<Engine<C>>,
-    dirty_batch: VecDeque<QueryID>,
-    transaction: Option<WriteTransaction<C>>,
+    dirty_batch: Arc<RwLock<VecDeque<QueryID>>>,
 
-    active_input_session_guard: Option<ActiveInputSessionGuard>,
+    #[allow(clippy::type_complexity)]
+    transaction:
+        Arc<RwLock<Option<(WriteTransaction<C>, ActiveInputSessionGuard)>>>,
 }
 
 impl<C: Config> Drop for InputSession<C> {
     // NOTE: the commit needs to always happen, even if the user forgets to call
     // `commit()`. Thus, we perform the commit in the `Drop` impl.
     fn drop(&mut self) {
-        let (Some(transaction), Some(guard)) =
-            (self.transaction.take(), self.active_input_session_guard.take())
-        else {
-            // the transaction has already been committed
-            return;
-        };
-
+        let transaction = self.transaction.clone();
+        let dirty_batch = self.dirty_batch.clone();
         let engine = self.engine.clone();
-        let dirty_batch = std::mem::take(&mut self.dirty_batch);
 
         tokio::spawn(async move {
-            let _guard = guard;
+            let Some((transaction, _guard)) = transaction.write().await.take()
+            else {
+                // the transaction has already been committed
+                return;
+            };
+
+            let dirty_batch = std::mem::take(&mut *dirty_batch.write().await);
+
             Self::commit_internal(engine, dirty_batch, transaction).await;
         });
     }
@@ -107,18 +114,18 @@ impl<C: Config> Drop for InputSession<C> {
 impl<C: Config> InputSession<C> {
     /// Commits the input session, performing dirty propagation and submitting
     /// the write buffer.
-    pub async fn commit(mut self) {
+    pub async fn commit(self) {
         let engine = self.engine.clone();
-        let dirty_batch = std::mem::take(&mut self.dirty_batch);
-        let transaction = self.transaction.take().unwrap();
-        let guard = self.active_input_session_guard.take().unwrap();
+        let dirty_batch = std::mem::take(&mut *self.dirty_batch.write().await);
+        let (transaction, guard) =
+            self.transaction.write().await.take().unwrap();
 
-        tokio::spawn(async move {
+        async move {
             let _guard = guard;
             Self::commit_internal(engine, dirty_batch, transaction).await;
-        })
-        .await
-        .unwrap();
+        }
+        .guarded()
+        .await;
     }
 
     async fn commit_internal(
@@ -134,11 +141,13 @@ impl<C: Config> InputSession<C> {
             .await;
 
         for query_id in dirty_list {
-            engine.mark_dirty_forward_edge(
-                query_id.caller,
-                query_id.callee,
-                &mut transaction,
-            );
+            engine
+                .mark_dirty_forward_edge(
+                    query_id.caller,
+                    query_id.callee,
+                    &mut transaction,
+                )
+                .await;
         }
 
         engine.submit_write_buffer(transaction);
@@ -214,10 +223,12 @@ impl<C: Config> Engine<C> {
             self.acquire_active_input_session_guard().await;
 
         InputSession {
-            dirty_batch: VecDeque::new(),
+            dirty_batch: Arc::new(RwLock::new(VecDeque::new())),
             engine: self.clone(),
-            transaction: Some(write_buffer_with_lock),
-            active_input_session_guard: Some(active_input_session_guard),
+            transaction: Arc::new(RwLock::new(Some((
+                write_buffer_with_lock,
+                active_input_session_guard,
+            )))),
         }
     }
 }
@@ -296,39 +307,53 @@ impl<C: Config> InputSession<C> {
 
         // has prior node infos, check for fingerprint diff
         // also, unwire the backward edges (if any)
-        let set_input_result = if let Some(node_info) =
-            unsafe { self.engine.get_node_info_unchecked(&query_id).await }
-        {
-            let fingerprint_diff =
-                node_info.value_fingerprint() != query_value_fingerprint;
+        let set_input_result = (self.engine.get_node_info(&query_id).await)
+            .map_or(SetInputResult::Fresh, |node_info| {
+                let fingerprint_diff =
+                    node_info.value_fingerprint() != query_value_fingerprint;
 
-            // only dirty propagate if the fingerprint differs
-            if fingerprint_diff {
-                self.dirty_batch.push_back(query_id);
-                SetInputResult::Updated
-            } else {
-                SetInputResult::Unchanged
-            }
-        } else {
-            SetInputResult::Fresh
-        };
+                // only dirty propagate if the fingerprint differs
+                if fingerprint_diff {
+                    SetInputResult::Updated
+                } else {
+                    SetInputResult::Unchanged
+                }
+            });
 
         // should be safe since we're holding input session phase guard
         let ts = unsafe { self.engine.get_current_timestamp_unchecked() };
 
-        self.engine
-            .set_computed_input(
-                query,
-                query_hash,
-                new_value,
-                query_value_fingerprint,
-                self.transaction.as_mut().unwrap(),
-                true,
-                ts,
-            )
-            .await;
+        let engine = self.engine.clone();
+        let transaction = self.transaction.clone();
+        let dirty_batch = self.dirty_batch.clone();
 
-        set_input_result
+        async move {
+            if set_input_result == SetInputResult::Updated {
+                dirty_batch.write().await.push_back(query_id);
+            }
+
+            let mut transaction = transaction.write().await;
+
+            let Some((write_buffer, _guard)) = transaction.as_mut() else {
+                panic!("InputSession transaction has already been committed");
+            };
+
+            engine
+                .set_computed_input(
+                    query,
+                    query_hash,
+                    new_value,
+                    query_value_fingerprint,
+                    write_buffer,
+                    true,
+                    ts,
+                )
+                .await;
+
+            set_input_result
+        }
+        .guarded()
+        .await
     }
 
     /// Refreshes all external input queries of type `Q`.
@@ -411,16 +436,13 @@ impl<C: Config> InputSession<C> {
                 for query_hash in chunk.iter().copied() {
                     let query_id = QueryID::new::<Q>(query_hash);
 
-                    let (query, old_node_info) = unsafe {
+                    let (query, old_node_info) = {
                         (
                             engine
-                                .get_query_input_unchecked::<Q>(&query_hash)
+                                .get_query_input::<Q>(&query_hash)
                                 .await
                                 .unwrap(),
-                            engine
-                                .get_node_info_unchecked(&query_id)
-                                .await
-                                .unwrap(),
+                            engine.get_node_info(&query_id).await.unwrap(),
                         )
                     };
 
@@ -437,8 +459,8 @@ impl<C: Config> InputSession<C> {
                                 CallerReason::RequireValue(Some(wait_group)),
                             )),
                             timestamp,
+                            None,
                         ),
-                        None,
                     );
                     let guarded_tracked_engine =
                         GuardedTrackedEngine::new(tracked_engine);
@@ -473,46 +495,64 @@ impl<C: Config> InputSession<C> {
             });
         }
 
-        while let Some(res) = join_set.join_next().await {
-            match res {
-                Ok(results) => {
-                    for refresh_result in results {
-                        let fingerprint_diff =
-                            refresh_result.old_node_info.value_fingerprint()
+        let dirty_batch = self.dirty_batch.clone();
+        let engine = self.engine.clone();
+        let transaction = self.transaction.clone();
+
+        async move {
+            let mut dirty_batch = dirty_batch.write().await;
+            let mut transaction = transaction.write().await;
+
+            let Some((transaction, _guard)) = transaction.as_mut() else {
+                panic!("InputSession transaction has already been committed");
+            };
+
+            while let Some(res) = join_set.join_next().await {
+                match res {
+                    Ok(results) => {
+                        for refresh_result in results {
+                            let fingerprint_diff = refresh_result
+                                .old_node_info
+                                .value_fingerprint()
                                 != refresh_result.query_result_hash;
 
-                        if fingerprint_diff {
-                            let query_id = QueryID::new::<Q>(
-                                refresh_result.query_input_hash,
-                            );
+                            if fingerprint_diff {
+                                let query_id = QueryID::new::<Q>(
+                                    refresh_result.query_input_hash,
+                                );
 
-                            self.dirty_batch.push_back(query_id);
+                                dirty_batch.push_back(query_id);
+                            }
+
+                            engine
+                                .set_computed_input(
+                                    refresh_result.query_input,
+                                    refresh_result.query_input_hash,
+                                    refresh_result.new_value,
+                                    refresh_result.query_result_hash,
+                                    transaction,
+                                    false,
+                                    timestamp,
+                                )
+                                .await;
                         }
-
-                        self.engine
-                            .set_computed_input(
-                                refresh_result.query_input,
-                                refresh_result.query_input_hash,
-                                refresh_result.new_value,
-                                refresh_result.query_result_hash,
-                                self.transaction.as_mut().unwrap(),
-                                false,
-                                timestamp,
-                            )
-                            .await;
                     }
+
+                    Err(er) => match er.try_into_panic() {
+                        Ok(panic_reason) => {
+                            std::panic::resume_unwind(panic_reason);
+                        }
+                        Err(er) => {
+                            panic!(
+                                "Failed to refresh external input query: {er}"
+                            );
+                        }
+                    },
                 }
-
-                Err(er) => match er.try_into_panic() {
-                    Ok(panic_reason) => {
-                        std::panic::resume_unwind(panic_reason);
-                    }
-                    Err(er) => {
-                        panic!("Failed to refresh external input query: {er}");
-                    }
-                },
             }
         }
+        .guarded()
+        .await;
     }
 
     /// Interns a value, returning a reference-counted handle to the shared

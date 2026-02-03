@@ -20,15 +20,11 @@ impl<C: Config> Engine<C> {
         caller_information: &CallerInformation,
         backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
     ) {
-        let backward_edges =
-            self.get_backward_edges(current_query_id, caller_information).await;
+        let backward_edges = self.get_backward_edges(current_query_id).await;
 
         let mut backward_projections = Vec::new();
         for query_id in backward_edges.0.read().iter() {
-            let query_kind = self
-                .get_query_kind(&query_id, caller_information)
-                .await
-                .unwrap();
+            let query_kind = self.get_query_kind(&query_id).await.unwrap();
 
             if query_kind.is_projection() {
                 backward_projections.push(query_id);
@@ -50,6 +46,8 @@ impl<C: Config> Engine<C> {
         for chunk in backward_projections.chunks(chunk_size) {
             let engine = Arc::clone(self);
             let chunk = chunk.to_vec();
+            let active_computation_graph =
+                caller_information.clone_active_computation_guard();
 
             join_set.spawn(async move {
                 for query_id in chunk {
@@ -65,6 +63,7 @@ impl<C: Config> Engine<C> {
                             &CallerInformation::new(
                                 CallerKind::BackwardProjectionPropagation,
                                 timestamp,
+                                active_computation_graph.clone(),
                             ),
                         )
                         .await;
@@ -92,7 +91,6 @@ impl<C: Config> Engine<C> {
 
         self.done_backward_projection(
             current_query_id,
-            caller_information,
             backward_projection_lock_guard,
         )
         .await;
@@ -105,7 +103,7 @@ impl<C: Config> Engine<C> {
         loop {
             // no more pending backward projection
             if self
-                .get_pending_backward_projection(query_id, caller_information)
+                .get_pending_backward_projection(query_id)
                 .await
                 .is_none_or(|x| x != caller_information.timestamp())
             {
