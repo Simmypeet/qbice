@@ -320,6 +320,13 @@ impl<S: BuildHasher + Default + Clone + Send + Sync + 'static> ConcurrentSet
         }
     }
 
+    fn len(&self) -> usize {
+        match &*self.0.read() {
+            TieredStorage::Small(vec_lock) => vec_lock.read().len(),
+            TieredStorage::Large(set) => set.len(),
+        }
+    }
+
     fn iter(&self) -> Self::Iterator<'_> {
         GuardedIterator::new(self.0.read(), |x| match &**x {
             TieredStorage::Small(vec_lock) => {
