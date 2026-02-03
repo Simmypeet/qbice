@@ -197,7 +197,7 @@ impl<C: Config> Executor<NetworkRequest, C> for NetworkRequestExecutor {
 #[tokio::test]
 async fn external_input_basic_execution() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     file_executor.set_file_content(1, "hello world".to_string());
@@ -221,7 +221,7 @@ async fn external_input_basic_execution() {
 #[tokio::test]
 async fn refresh_re_executes_external_input() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     file_executor.set_file_content(1, "initial content".to_string());
@@ -262,7 +262,7 @@ async fn refresh_re_executes_external_input() {
 #[tokio::test]
 async fn refresh_only_dirties_if_result_changed() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     let upper_executor = Arc::new(UpperCaseExecutor::default());
@@ -305,7 +305,7 @@ async fn refresh_only_dirties_if_result_changed() {
 #[tokio::test]
 async fn refresh_propagates_when_result_changes() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     let upper_executor = Arc::new(UpperCaseExecutor::default());
@@ -350,7 +350,7 @@ async fn refresh_propagates_when_result_changes() {
 #[tokio::test]
 async fn refresh_multiple_queries_of_same_type() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
 
@@ -397,7 +397,7 @@ async fn refresh_multiple_queries_of_same_type() {
 #[tokio::test]
 async fn refresh_different_query_types_independent() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     let network_executor = Arc::new(NetworkRequestExecutor::new());
@@ -443,7 +443,7 @@ async fn refresh_different_query_types_independent() {
 #[tokio::test]
 async fn refresh_with_no_previous_queries() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     engine.register_executor(file_executor.clone());
@@ -463,7 +463,7 @@ async fn refresh_with_no_previous_queries() {
 #[tokio::test]
 async fn external_input_not_affected_by_normal_refresh() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     let upper_executor = Arc::new(UpperCaseExecutor::default());
@@ -502,7 +502,7 @@ async fn external_input_not_affected_by_normal_refresh() {
 #[tokio::test]
 async fn refresh_multiple_times() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     file_executor.set_file_content(1, "v1".to_string());
@@ -553,7 +553,7 @@ async fn refresh_multiple_times() {
 #[tokio::test]
 async fn refresh_in_same_session_as_other_inputs() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let file_executor = Arc::new(FileReadExecutor::new());
     file_executor.set_file_content(1, "file".to_string());

@@ -7,8 +7,12 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::missing_const_for_fn)]
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::{
+    hash::BuildHasherDefault,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
+use fxhash::FxHasher;
 use qbice::{
     Decode, Encode, Engine, Identifiable, StableHash, TrackedEngine,
     config::Config,
@@ -16,7 +20,10 @@ use qbice::{
     query::Query,
     serialize::Plugin,
     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
-    storage::kv_database::rocksdb::RocksDB,
+    storage::{
+        kv_database::rocksdb::RocksDB,
+        storage_engine::db_backed::{Configuration, DbBacked, DbBackedFactory},
+    },
 };
 use tempfile::TempDir;
 
@@ -316,25 +323,23 @@ impl<C: Config> Executor<SlowQuery, C> for SlowExecutor {
 pub struct TestingConfig;
 
 impl Config for TestingConfig {
-    type Database = RocksDB;
+    type StorageEngine = DbBacked<RocksDB>;
 
     type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
 
-    type BuildHasher = std::collections::hash_map::RandomState;
-
-    // set the cache entry small for stress testing the cache eviction
-    fn cache_entry_capacity() -> usize { 4 }
-
-    fn rayon_thread_pool_builder() -> rayon::ThreadPoolBuilder {
-        rayon::ThreadPoolBuilder::new()
-    }
+    type BuildHasher = BuildHasherDefault<FxHasher>;
 }
 
-pub fn create_test_engine(tempdir: &TempDir) -> Engine<TestingConfig> {
+pub async fn create_test_engine(tempdir: &TempDir) -> Engine<TestingConfig> {
     Engine::<TestingConfig>::new_with(
         Plugin::default(),
-        RocksDB::factory(tempdir.path()),
+        DbBackedFactory::builder()
+            // we use low cache capacity to stress test cache eviction
+            .coniguration(Configuration::builder().cache_capacity(4).build())
+            .db_factory(RocksDB::factory(tempdir.path()))
+            .build(),
         SeededStableHasherBuilder::<Sip128Hasher>::new(0),
     )
+    .await
     .unwrap()
 }

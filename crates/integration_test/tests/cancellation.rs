@@ -25,7 +25,7 @@ use tokio::task::yield_now;
 #[tokio::test]
 async fn cancellation_safety() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let slow_executor = Arc::new(SlowExecutor::default());
 
@@ -44,7 +44,7 @@ async fn cancellation_safety() {
     // Now, set the executor to make it stuck
     slow_executor.make_it_stuck.store(true, Ordering::Relaxed);
 
-    let tracked_engine_clone = tracked_engine.clone_async().await;
+    let tracked_engine_clone = tracked_engine.clone();
 
     // Spawn a task to run the slow query
     tokio::select! {
@@ -159,7 +159,7 @@ impl<C: Config> Executor<CancellableChainB, C> for CancellableChainBExecutor {
 #[tokio::test]
 async fn cancellation_with_dependency_chain() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let executor_a = Arc::new(CancellableChainAExecutor::default());
     let executor_b = Arc::new(CancellableChainBExecutor::default());
@@ -179,7 +179,7 @@ async fn cancellation_with_dependency_chain() {
     // Set executor A to get stuck after querying B
     executor_a.should_cancel.store(true, Ordering::Relaxed);
 
-    let tracked_engine_clone = tracked_engine.clone_async().await;
+    let tracked_engine_clone = tracked_engine.clone();
 
     // Try to query A, which will query B first, then get stuck
     tokio::select! {
@@ -267,7 +267,7 @@ impl<C: Config> Executor<ParallelCancellableQuery, C>
 #[tokio::test]
 async fn parallel_queries_with_cancellation() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let executor = Arc::new(ParallelCancellableExecutor::default());
     executor.delay_ms.store(200, Ordering::Relaxed);
@@ -398,7 +398,7 @@ impl<C: Config> Executor<MultiDependencyQuery, C> for MultiDependencyExecutor {
 #[tokio::test]
 async fn cancellation_with_partial_dependencies() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let executor = Arc::new(MultiDependencyExecutor::default());
     engine.register_executor(executor.clone());
@@ -506,7 +506,7 @@ impl<C: Config> Executor<RepairableCancellableQuery, C>
 #[tokio::test]
 async fn cancellation_during_repair() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let executor = Arc::new(RepairableCancellableExecutor::default());
     engine.register_executor(executor.clone());
@@ -540,7 +540,7 @@ async fn cancellation_during_repair() {
     // Set executor to hang during repair
     executor.should_hang.store(true, Ordering::Relaxed);
 
-    let tracked_engine_clone = tracked_engine.clone_async().await;
+    let tracked_engine_clone = tracked_engine.clone();
 
     // Try to query, which will trigger repair, but cancel it
     tokio::select! {
@@ -668,7 +668,7 @@ impl<C: Config> Executor<NestedCancellableInner, C>
 #[tokio::test]
 async fn cancellation_at_different_nesting_levels() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let outer_executor = Arc::new(NestedCancellableOuterExecutor::default());
     let inner_executor = Arc::new(NestedCancellableInnerExecutor::default());
@@ -688,7 +688,7 @@ async fn cancellation_at_different_nesting_levels() {
         let tracked_engine = engine.clone().tracked().await;
         outer_executor.hang_before_inner.store(true, Ordering::Relaxed);
 
-        let tracked_engine_clone = tracked_engine.clone_async().await;
+        let tracked_engine_clone = tracked_engine.clone();
 
         tokio::select! {
             () = tokio::time::sleep(Duration::from_millis(100)) => {}
@@ -708,7 +708,7 @@ async fn cancellation_at_different_nesting_levels() {
         let tracked_engine = engine.clone().tracked().await;
         outer_executor.hang_after_inner.store(true, Ordering::Relaxed);
 
-        let tracked_engine_clone = tracked_engine.clone_async().await;
+        let tracked_engine_clone = tracked_engine.clone();
 
         tokio::select! {
             () = tokio::time::sleep(Duration::from_millis(100)) => {}

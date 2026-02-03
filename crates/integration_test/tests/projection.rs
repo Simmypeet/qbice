@@ -116,7 +116,7 @@ impl<C: Config> Executor<CollectDoubledSquareVariables, C>
 
         let mut join_handles = Vec::new();
         for var in target_vars.iter().copied() {
-            let engine = engine.clone_async().await;
+            let engine = engine.clone();
 
             join_handles.push(tokio::spawn(async move {
                 let square = engine.query(&SlowSquare(var)).await;
@@ -223,7 +223,7 @@ impl<C: Config> Executor<SumAllDoubleSquares, C>
         let mut handles = Vec::new();
 
         for var in target_vars.iter().copied() {
-            let engine = engine.clone_async().await;
+            let engine = engine.clone();
 
             handles.push(tokio::spawn(async move {
                 let double_square = engine.query(&DoubleSquare(var)).await;
@@ -243,7 +243,7 @@ impl<C: Config> Executor<SumAllDoubleSquares, C>
 #[tokio::test(flavor = "multi_thread")]
 async fn double_square_summing() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let slow_square_ex = Arc::new(SlowSquareExecutor::default());
     let collect_doubled_ex =
@@ -350,7 +350,7 @@ async fn double_square_summing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn multiple_projections_single_firewall() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let slow_square_ex = Arc::new(SlowSquareExecutor::default());
     let collect_doubled_ex =
@@ -610,7 +610,7 @@ impl<C: Config> Executor<DiamondCombiner, C> for DiamondCombinerExecutor {
 #[tokio::test(flavor = "multi_thread")]
 async fn diamond_projection_pattern() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
     let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
@@ -839,7 +839,7 @@ impl<C: Config> Executor<SumConsumer, C> for SumConsumerExecutor {
 #[tokio::test(flavor = "multi_thread")]
 async fn firewall_same_output_no_propagation() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let firewall_ex = Arc::new(SumFirewallExecutor::default());
     let proj_ex = Arc::new(SumProjectionExecutor::default());
@@ -922,7 +922,7 @@ async fn firewall_same_output_no_propagation() {
 async fn concurrent_projection_access() {
     for _ in 0..500 {
         let tempdir = tempdir().unwrap();
-        let mut engine = create_test_engine(&tempdir);
+        let mut engine = create_test_engine(&tempdir).await;
 
         let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
         let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
@@ -1140,7 +1140,7 @@ impl<C: Config> Executor<NestedConsumer, C> for NestedConsumerExecutor {
 #[tokio::test(flavor = "multi_thread")]
 async fn nested_firewall_with_projection() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let outer_ex = Arc::new(OuterFirewallExecutor::default());
     let inner_ex = Arc::new(InnerFirewallExecutor::default());
@@ -1400,7 +1400,7 @@ impl<C: Config> Executor<DualFirewallConsumer, C>
 #[allow(clippy::similar_names)]
 async fn projection_with_two_firewalls() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let firewall_a_ex = Arc::new(FirewallAExecutor::default());
     let firewall_b_ex = Arc::new(FirewallBExecutor::default());

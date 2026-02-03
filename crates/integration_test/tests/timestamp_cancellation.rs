@@ -63,7 +63,6 @@ impl<C: Config> Executor<HangingQuery, C> for HangingQueryExecutor {
     }
 }
 
-#[ignore = "we'll re re-enabling this test later"]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "timestamp cancellation has been updated, test needs to be fixed"]
 async fn basic_timestamp_cancellation() {
@@ -76,7 +75,7 @@ async fn basic_timestamp_cancellation() {
     let (query_done_sender, mut query_done_recv) =
         tokio::sync::mpsc::unbounded_channel();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let hanging_executor = Arc::new(HangingQueryExecutor {
         query_start_sender,
@@ -164,7 +163,6 @@ async fn basic_timestamp_cancellation() {
     assert_eq!(tracked_engine.query(&HangingQuery(Variable(0))).await, 6);
 }
 
-#[ignore = "we'll re re-enabling this test later"]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "timestamp cancellation has been updated, test needs to be fixed"]
 async fn multiple_concurrent_queries_cancelled() {
@@ -177,7 +175,7 @@ async fn multiple_concurrent_queries_cancelled() {
     let (query_done_sender, mut query_done_recv) =
         tokio::sync::mpsc::unbounded_channel();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let hanging_executor = Arc::new(HangingQueryExecutor {
         query_start_sender,
@@ -244,7 +242,7 @@ async fn multiple_concurrent_queries_cancelled() {
     // start multiple concurrent queries
     let mut handles = Vec::new();
     for i in 0..3 {
-        let tracked_engine = tracked_engine.clone_async().await;
+        let tracked_engine = tracked_engine.clone();
         let cancellation_token = cancellation_token.clone();
         let variable = HangingQuery(Variable(i));
 
@@ -276,7 +274,6 @@ async fn multiple_concurrent_queries_cancelled() {
     assert_eq!(tracked_engine.query(&HangingQuery(Variable(0))).await, 10);
 }
 
-#[ignore = "we'll re re-enabling this test later"]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "timestamp cancellation has been updated, test needs to be fixed"]
 async fn rapid_timestamp_increments() {
@@ -289,7 +286,7 @@ async fn rapid_timestamp_increments() {
     let (query_done_sender, mut query_done_recv) =
         tokio::sync::mpsc::unbounded_channel();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let hanging_executor = Arc::new(HangingQueryExecutor {
         query_start_sender,
@@ -354,7 +351,6 @@ async fn rapid_timestamp_increments() {
     let _ = increment_handle.await;
 }
 
-#[ignore = "we'll re re-enabling this test later"]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "timestamp cancellation has been updated, test needs to be fixed"]
 async fn stale_tracked_engine_queries_timeout() {
@@ -367,7 +363,7 @@ async fn stale_tracked_engine_queries_timeout() {
     let (query_done_sender, _query_done_recv) =
         tokio::sync::mpsc::unbounded_channel();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let hanging_executor = Arc::new(HangingQueryExecutor {
         query_start_sender,
@@ -390,7 +386,7 @@ async fn stale_tracked_engine_queries_timeout() {
     let stale_tracked_engine = engine.clone().tracked().await;
 
     let _stale_query_handle = tokio::spawn({
-        let stale_tracked_engine = stale_tracked_engine.clone_async().await;
+        let stale_tracked_engine = stale_tracked_engine.clone();
         async move { stale_tracked_engine.query(&HangingQuery(Variable(0))).await }
     });
 

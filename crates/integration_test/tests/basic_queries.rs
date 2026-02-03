@@ -12,7 +12,7 @@ use tempfile::tempdir;
 async fn safe_division_basic() {
     let tempdir = tempdir().unwrap();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let division_ex = Arc::new(DivisionExecutor::default());
     let safe_division_ex = Arc::new(SafeDivisionExecutor::default());

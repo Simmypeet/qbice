@@ -125,7 +125,7 @@ async fn parallel_read_variable_map() {
         println!("attempting iteration: {i}");
 
         let tempdir = tempdir().unwrap();
-        let mut engine = create_test_engine(&tempdir);
+        let mut engine = create_test_engine(&tempdir).await;
 
         let collect_ex = Arc::new(CollectVariablesExecutor::default());
         let read_map_ex = Arc::new(ReadVariableMapExecutor::default());
@@ -147,7 +147,7 @@ async fn parallel_read_variable_map() {
 
         let mut handles = Vec::new();
         for var in 0..100 {
-            let tracked_engine = tracked_engine.clone_async().await;
+            let tracked_engine = tracked_engine.clone();
 
             handles.push(tokio::spawn(async move {
                 tracked_engine.query(&ReadVariableMap::new(Variable(var))).await

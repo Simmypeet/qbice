@@ -166,7 +166,7 @@ impl<C: Config> Executor<DependentQuery, C> for DependentExecutor {
 async fn cyclic_dependency_returns_default_values() {
     let tempdir = tempdir().unwrap();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let executor_a = Arc::new(CyclicExecutorA::default());
     let executor_b = Arc::new(CyclicExecutorB::default());
@@ -201,7 +201,7 @@ async fn cyclic_dependency_returns_default_values() {
 async fn dependent_query_uses_cyclic_default_values() {
     let tempdir = tempdir().unwrap();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let executor_a = Arc::new(CyclicExecutorA::default());
     let executor_b = Arc::new(CyclicExecutorB::default());
@@ -425,7 +425,7 @@ impl<C: Config> Executor<DependentQuery, C> for ConditionalDependentExecutor {
 async fn conditional_cyclic_dependency() {
     let tempdir = tempdir().unwrap();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let executor_a = Arc::new(ConditionalCyclicExecutorA::default());
     let executor_b = Arc::new(ConditionalCyclicExecutorB::default());
@@ -539,7 +539,7 @@ async fn conditional_cyclic_dependency() {
 async fn conditional_cyclic_with_dependent_query() {
     let tempdir = tempdir().unwrap();
 
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let executor_a = Arc::new(ConditionalCyclicExecutorA::default());
     let executor_b = Arc::new(ConditionalCyclicExecutorB::default());

@@ -130,7 +130,7 @@ impl<C: Config> Executor<NegativeSquareToString, C>
 #[tokio::test]
 async fn firewall() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let square_ex = Arc::new(SquareExecutor::default());
     let negative_square_ex = Arc::new(NegativeSquareExecutor::default());
@@ -346,7 +346,7 @@ impl<C: Config> Executor<DoubleClampedValue, C> for DoubleClampedValueExecutor {
 #[tokio::test]
 async fn chained_firewalls() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let abs_ex = Arc::new(AbsoluteFirewallExecutor::default());
     let clamp_ex = Arc::new(ClampFirewallExecutor::default());
@@ -543,7 +543,7 @@ impl<C: Config> Executor<SumOfSquares, C> for SumOfSquaresExecutor {
 #[tokio::test]
 async fn diamond_dependency_with_firewalls() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let square_ex = Arc::new(SquareExecutor::default());
     let sum_ex = Arc::new(SumOfSquaresExecutor::default());
@@ -728,7 +728,7 @@ impl<C: Config> Executor<SquarePlusOne, C> for SquarePlusOneExecutor {
 #[tokio::test]
 async fn firewall_multiple_callers() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let square_ex = Arc::new(SquareExecutor::default());
     let times_two_ex = Arc::new(SquareTimesTwoExecutor::default());
@@ -862,7 +862,7 @@ impl<C: Config> Executor<ConditionalSquare, C> for ConditionalSquareExecutor {
 #[tokio::test]
 async fn firewall_conditional_dependency() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let square_ex = Arc::new(SquareExecutor::default());
     let conditional_ex = Arc::new(ConditionalSquareExecutor::default());
@@ -989,7 +989,7 @@ async fn firewall_conditional_dependency() {
 #[tokio::test]
 async fn firewall_dirty_propagation_on_change() {
     let tempdir = tempdir().unwrap();
-    let mut engine = create_test_engine(&tempdir);
+    let mut engine = create_test_engine(&tempdir).await;
 
     let square_ex = Arc::new(SquareExecutor::default());
     let negative_square_ex = Arc::new(NegativeSquareExecutor::default());

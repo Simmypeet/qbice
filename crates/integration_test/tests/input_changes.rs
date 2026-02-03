@@ -16,7 +16,7 @@ async fn division_input_change() {
 
     // session 1: initial inputs and query
     {
-        let mut engine = create_test_engine(&tempdir);
+        let mut engine = create_test_engine(&tempdir).await;
 
         engine.register_executor(division_ex.clone());
 
@@ -39,19 +39,16 @@ async fn division_input_change() {
         );
 
         assert_eq!(division_ex.0.load(std::sync::atomic::Ordering::Relaxed), 1);
-    }
 
-    // session 2: change input and re-query
-    {
-        let mut engine = create_test_engine(&tempdir);
+        drop(tracked_engine);
 
-        engine.register_executor(division_ex.clone());
-
-        let engine = Arc::new(engine);
+        // session 2: change input and re-query
 
         {
             let mut input_session = engine.input_session().await;
             input_session.set_input(Variable(1), 2).await;
+
+            input_session.commit().await;
         }
 
         let tracked_engine = engine.tracked().await;
@@ -76,7 +73,7 @@ async fn safe_division_input_changes() {
 
     // session 1: initial inputs and query
     {
-        let mut engine = create_test_engine(&tempdir);
+        let mut engine = create_test_engine(&tempdir).await;
 
         engine.register_executor(division_ex.clone());
         engine.register_executor(safe_division_ex.clone());
@@ -104,23 +101,16 @@ async fn safe_division_input_changes() {
             safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-    }
 
-    // session 2: divide by zero
-    {
-        let mut engine = create_test_engine(&tempdir);
-
-        engine.register_executor(division_ex.clone());
-        engine.register_executor(safe_division_ex.clone());
-
-        let engine = Arc::new(engine);
+        // session 2: divide by zero
+        drop(tracked_engine);
 
         {
             let mut input_session = engine.input_session().await;
             input_session.set_input(Variable(1), 0).await;
         }
 
-        let tracked_engine = engine.tracked().await;
+        let tracked_engine = engine.clone().tracked().await;
 
         assert_eq!(
             tracked_engine
@@ -136,16 +126,9 @@ async fn safe_division_input_changes() {
             safe_division_ex.0.load(std::sync::atomic::Ordering::Relaxed),
             2
         );
-    }
 
-    // session 3: restore to original inputs
-    {
-        let mut engine = create_test_engine(&tempdir);
-
-        engine.register_executor(division_ex.clone());
-        engine.register_executor(safe_division_ex.clone());
-
-        let engine = Arc::new(engine);
+        // session 3: restore to original inputs
+        drop(tracked_engine);
 
         {
             let mut input_session = engine.input_session().await;
@@ -180,7 +163,7 @@ async fn add_two_absolutes_sign_change() {
 
     // session 1: initial inputs and query
     {
-        let mut engine = create_test_engine(&tempdir);
+        let mut engine = create_test_engine(&tempdir).await;
 
         engine.register_executor(absolute_ex.clone());
         engine.register_executor(add_two_absolutes_ex.clone());
@@ -210,16 +193,9 @@ async fn add_two_absolutes_sign_change() {
             add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-    }
 
-    // session 2: change sign of inputs
-    {
-        let mut engine = create_test_engine(&tempdir);
-
-        engine.register_executor(absolute_ex.clone());
-        engine.register_executor(add_two_absolutes_ex.clone());
-
-        let engine = Arc::new(engine);
+        // session 2: change sign of inputs
+        drop(tracked_engine);
 
         // Change Variable(0) from 200 to -200
         {
@@ -227,7 +203,7 @@ async fn add_two_absolutes_sign_change() {
             input_session.set_input(Variable(0), -200).await;
         }
 
-        let tracked_engine = engine.tracked().await;
+        let tracked_engine = engine.clone().tracked().await;
 
         // Result should still be 350: abs(-200) + abs(150) = 200 + 150 = 350
         assert_eq!(
@@ -245,16 +221,9 @@ async fn add_two_absolutes_sign_change() {
             add_two_absolutes_ex.0.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-    }
 
-    // session 3: change sign of other input
-    {
-        let mut engine = create_test_engine(&tempdir);
-
-        engine.register_executor(absolute_ex.clone());
-        engine.register_executor(add_two_absolutes_ex.clone());
-
-        let engine = Arc::new(engine);
+        // session 3: change sign of other input
+        drop(tracked_engine);
 
         // Change Variable(1) from 150 to -150
         {
