@@ -1,58 +1,56 @@
+use std::sync::Arc;
+
 use crate::{
-    Engine, ExecutionStyle, config::Config,
-    engine::computation_graph::ComputationGraph, query::QueryID,
+    Engine, ExecutionStyle,
+    config::Config,
+    engine::computation_graph::{CallerInformation, lock::Computing},
+    query::QueryID,
 };
 
 /// A drop guard for undoing the registration of a callee query.
 ///
 /// This aims to ensure cancelation safety in case of the task being yielded and
 /// canceled mid query.
-pub struct UndoRegisterCallee<'d, C: Config> {
-    graph: &'d ComputationGraph<C>,
-    caller_source: Option<QueryID>,
+pub struct UndoRegisterCallee {
+    caller_computing: Arc<Computing>,
     callee_target: QueryID,
     defused: bool,
 }
 
-impl<'d, C: Config> UndoRegisterCallee<'d, C> {
+impl UndoRegisterCallee {
     /// Creates a new [`UndoRegisterCallee`] instance.
     pub const fn new(
-        graph: &'d ComputationGraph<C>,
-        caller_source: Option<QueryID>,
+        caller_computing: Arc<Computing>,
         callee_target: QueryID,
     ) -> Self {
-        Self { graph, caller_source, callee_target, defused: false }
+        Self { caller_computing, callee_target, defused: false }
     }
 
     /// Don't undo the registration when dropped.
     pub fn defuse(mut self) { self.defused = true; }
 }
 
-impl<C: Config> Drop for UndoRegisterCallee<'_, C> {
+impl Drop for UndoRegisterCallee {
     fn drop(&mut self) {
         if self.defused {
             return;
         }
 
-        if let Some(caller) = self.caller_source.as_ref() {
-            let caller_meta = self.graph.lock.get_lock(caller);
-
-            caller_meta.abort_callee(&self.callee_target);
-        }
+        self.caller_computing.abort_callee(&self.callee_target);
     }
 }
 impl<C: Config> Engine<C> {
     pub(super) fn register_callee(
         &self,
-        caller_source: Option<&QueryID>,
+        caller: &CallerInformation,
         calee_target: &QueryID,
-    ) -> Option<UndoRegisterCallee<'_, C>> {
+    ) -> Option<UndoRegisterCallee> {
         // record the dependency first, don't necessary need to figure out
         // the observed value fingerprint yet
-        caller_source.map_or_else(
+        caller.get_query_caller().map_or_else(
             || None,
             |caller| {
-                let computing = self.computation_graph.lock.get_lock(caller);
+                let computing = caller.computing();
 
                 assert!(
                     !computing.query_kind().is_external_input(),
@@ -78,11 +76,7 @@ impl<C: Config> Engine<C> {
 
                 computing.register_calee(calee_target);
 
-                Some(UndoRegisterCallee::new(
-                    &self.computation_graph,
-                    Some(*caller),
-                    *calee_target,
-                ))
+                Some(UndoRegisterCallee::new(computing.clone(), *calee_target))
             },
         )
     }

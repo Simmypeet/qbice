@@ -118,6 +118,7 @@ pub enum ComputingMode {
     Repair,
 }
 
+#[derive(Debug)]
 pub struct Computing {
     notify: Arc<Notify>,
     callee_info: ComputingForwardEdges,
@@ -209,6 +210,7 @@ impl<C: Config> Lock<C> {
 
 pub struct ComputingLockGuard<C: Config> {
     computing_lock: Arc<Lock<C>>,
+    this_computing: Arc<Computing>,
     query_id: QueryID,
     defused: bool,
     computing_mode: ComputingMode,
@@ -216,6 +218,8 @@ pub struct ComputingLockGuard<C: Config> {
 
 impl<C: Config> ComputingLockGuard<C> {
     pub const fn computing_mode(&self) -> ComputingMode { self.computing_mode }
+
+    pub const fn computing(&self) -> &Arc<Computing> { &self.this_computing }
 
     /// Don't undo the computing lock when dropped.
     pub fn defuse(mut self) { self.defused = true; }
@@ -260,14 +264,8 @@ impl<C: Config> Lock<C> {
     ) -> Option<Ref<'_, QueryID, PendingBackwardProjection>> {
         self.backward_projection_lock.get(query_id)
     }
-
-    pub fn get_lock(&self, query_id: &QueryID) -> Arc<Computing> {
-        self.normal_lock
-            .get(query_id)
-            .expect("computing lock should exist")
-            .clone()
-    }
 }
+
 pub enum LockGuard<C: Config> {
     ComputingLockGuard(ComputingLockGuard<C>),
     BackwardProjectionLockGuard(BackwardProjectionLockGuard<C>),
@@ -320,13 +318,14 @@ impl<C: Config> Engine<C> {
             }
 
             dashmap::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(entry);
+                vacant_entry.insert(entry.clone());
 
                 Some(ComputingLockGuard {
                     computing_lock: self.computation_graph.lock.clone(),
                     query_id: *query_id,
                     defused: false,
                     computing_mode: mode,
+                    this_computing: entry,
                 })
             }
         }
@@ -336,6 +335,9 @@ impl<C: Config> Engine<C> {
         &self,
         query_id: &QueryID,
     ) -> Option<BackwardProjectionLockGuard<C>> {
+        let pending_backward_projection =
+            PendingBackwardProjection { notify: Arc::new(Notify::new()) };
+
         match self
             .computation_graph
             .lock
@@ -348,9 +350,7 @@ impl<C: Config> Engine<C> {
             }
 
             dashmap::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(PendingBackwardProjection {
-                    notify: Arc::new(Notify::new()),
-                });
+                vacant_entry.insert(pending_backward_projection);
 
                 Some(BackwardProjectionLockGuard {
                     computing_lock: self.computation_graph.lock.clone(),
@@ -473,15 +473,18 @@ impl<C: Config> Engine<C> {
             forward_edges,
             tfc_archetype,
         ) = {
-            let computing = self.computation_graph.lock.get_lock(&query_id);
-
             (
-                computing.notify.clone(),
-                computing.query_kind,
+                lock_guard.this_computing.notify.clone(),
+                lock_guard.this_computing.query_kind,
                 std::mem::take(
-                    &mut *computing.callee_info.callee_order.write(),
+                    &mut *lock_guard
+                        .this_computing
+                        .callee_info
+                        .callee_order
+                        .write(),
                 ),
-                computing
+                lock_guard
+                    .this_computing
                     .callee_info
                     .callee_queries
                     .iter()
@@ -490,7 +493,7 @@ impl<C: Config> Engine<C> {
                     .filter_map(|x| x.value().map(|v| (*x.key(), v)))
                     .collect(),
                 self.create_tfc_from_iter(
-                    computing.tfc.iter().map(|x| *x.key()),
+                    lock_guard.this_computing.tfc.iter().map(|x| *x.key()),
                 ),
             )
         };
@@ -527,7 +530,13 @@ impl<C: Config> Engine<C> {
             return Ok(());
         };
 
-        let computing_lock = self.computation_graph.lock.get_lock(called_from);
+        let computing_lock = self
+            .computation_graph
+            .lock
+            .normal_lock
+            .get(called_from)
+            .expect("computing lock should exist for caller")
+            .clone();
 
         if computing_lock.is_in_scc() {
             return Err(CyclicError);

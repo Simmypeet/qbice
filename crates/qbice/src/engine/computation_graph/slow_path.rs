@@ -78,6 +78,7 @@ impl<C: Config> Engine<C> {
                 CallerKind::Query(QueryCaller::new(
                     query.id,
                     CallerReason::RequireValue(Some(wait_group)),
+                    lock_guard.computing().clone(),
                 )),
                 caller_information.timestamp(),
                 caller_information.clone_active_computation_guard(),
@@ -97,8 +98,7 @@ impl<C: Config> Engine<C> {
         // modify the query's state.
         drop(guarded_tracked_engine);
 
-        let is_in_scc =
-            self.computation_graph.lock.get_lock(&query.id).is_in_scc();
+        let is_in_scc = lock_guard.computing().is_in_scc();
 
         // if `is_in_scc` is `true`, it means that the query is part of
         // a strongly connected component (SCC) and the

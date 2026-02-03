@@ -95,6 +95,7 @@ impl<C: Config> Engine<C> {
         )
         .await;
     }
+
     pub(super) async fn try_do_backward_projections(
         self: &Arc<Self>,
         query_id: &QueryID,

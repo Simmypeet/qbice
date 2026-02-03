@@ -29,6 +29,7 @@ impl<C: Config> Engine<C> {
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
         caller_information: &CallerInformation,
+        computing_lock_guard: &ComputingLockGuard<C>,
     ) -> RepairDecision {
         let mut repair_transitive_firewall_callees = false;
         let mut cleaned_edges = Vec::new();
@@ -63,6 +64,7 @@ impl<C: Config> Engine<C> {
                             CallerKind::Query(QueryCaller::new(
                                 query.id,
                                 CallerReason::Repair,
+                                computing_lock_guard.computing().clone(),
                             )),
                             caller_information.timestamp(),
                             caller_information.clone_active_computation_guard(),
@@ -215,6 +217,7 @@ impl<C: Config> Engine<C> {
             .recompute_decision_based_on_forward_edges(
                 query,
                 caller_information,
+                &lock_guard,
             )
             .await;
 
@@ -254,6 +257,7 @@ impl<C: Config> Engine<C> {
                             CallerKind::Query(QueryCaller::new(
                                 query.id,
                                 CallerReason::Repair,
+                                lock_guard.computing().clone(),
                             )),
                             caller_information.timestamp(),
                             caller_information.clone_active_computation_guard(),

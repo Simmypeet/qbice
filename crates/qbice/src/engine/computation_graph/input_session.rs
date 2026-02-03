@@ -11,9 +11,7 @@ use crate::{
     engine::{
         computation_graph::{
             ActiveInputSessionGuard,
-            caller::{
-                CallerInformation, CallerKind, CallerReason, QueryCaller,
-            },
+            caller::{CallerInformation, CallerKind, QueryCaller},
             persist::NodeInfo,
             slow_path::GuardedTrackedEngine,
         },
@@ -444,9 +442,8 @@ impl<C: Config> InputSession<C> {
                         engine.clone(),
                         cache,
                         CallerInformation::new(
-                            CallerKind::Query(QueryCaller::new(
-                                query_id,
-                                CallerReason::RequireValue(Some(wait_group)),
+                            CallerKind::Query(QueryCaller::new_external_input(
+                                query_id, wait_group,
                             )),
                             timestamp,
                             None,

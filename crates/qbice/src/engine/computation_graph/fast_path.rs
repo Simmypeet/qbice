@@ -5,7 +5,7 @@ use crate::{
     config::Config,
     engine::computation_graph::{
         QueryKind,
-        caller::{CallerInformation, CallerKind},
+        caller::{CallerInformation, CallerKind, QueryCaller},
         lock::Computing,
         persist::NodeInfo,
         slow_path::SlowPath,
@@ -24,24 +24,20 @@ pub enum FastPathResult<V> {
 impl<C: Config> Engine<C> {
     /// Add both forward and backward dependencies for both caller and callee.
     fn observe_callee_fingerprint(
-        &self,
         callee_info: &NodeInfo,
         callee_target: &QueryID,
         callee_kind: QueryKind,
-        caller_source: &QueryID,
+        query_caller: &QueryCaller,
     ) {
         // add dependency for the caller
-        let caller_computing =
-            self.computation_graph.lock.get_lock(caller_source);
-
-        caller_computing.observe_callee(
+        query_caller.computing().observe_callee(
             callee_target,
             callee_info.value_fingerprint(),
             callee_info.transitive_firewall_callees_fingerprint(),
         );
 
         Self::caller_observe_tfc_callees(
-            &caller_computing,
+            query_caller.computing(),
             callee_info,
             callee_kind,
             *callee_target,
@@ -51,20 +47,20 @@ impl<C: Config> Engine<C> {
     /// Exit early if a cyclic dependency is detected.
     fn exit_scc(
         &self,
-        called_from: Option<&QueryID>,
+        caller_information: &CallerInformation,
         running_state: &Computing,
     ) -> Result<(), CyclicError> {
         // if there is no caller, we are at the root.
-        let Some(called_from) = called_from else {
+        let Some(query_caller) = caller_information.get_query_caller() else {
             return Ok(());
         };
 
-        let is_in_scc = self.check_cyclic(running_state, called_from);
+        let is_in_scc =
+            self.check_cyclic(running_state, &query_caller.query_id());
 
         // mark the caller as being in scc
         if is_in_scc {
-            let computing = self.computation_graph.lock.get_lock(called_from);
-
+            let computing = query_caller.computing();
             computing.mark_scc();
 
             return Err(CyclicError);
@@ -82,7 +78,7 @@ impl<C: Config> Engine<C> {
             self.computation_graph.lock.try_get_lock_for_fast_path(query_id)
         {
             // exit out of the scc query to avoid circular waits
-            self.exit_scc(caller.get_caller(), &computing)?;
+            self.exit_scc(caller, &computing)?;
 
             notified_owned.await;
 
@@ -142,16 +138,16 @@ impl<C: Config> Engine<C> {
                 None
             };
 
-            if let Some(caller_requiring_value) =
-                caller.has_a_caller_requiring_value()
+            if let Some(query_caller) = caller.get_query_caller()
+                && query_caller.require_value()
             {
                 let kind = self.get_query_kind(query_id).await.unwrap();
 
-                self.observe_callee_fingerprint(
+                Self::observe_callee_fingerprint(
                     &query_info,
                     query_id,
                     kind,
-                    caller_requiring_value,
+                    query_caller,
                 );
             }
 

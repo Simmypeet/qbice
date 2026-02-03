@@ -440,8 +440,7 @@ impl<C: Config> Engine<C> {
         caller: &CallerInformation,
     ) -> Result<QueryResult<Q::Value>, CyclicError> {
         // register the dependency for the sake of detecting cycles
-        let undo_register =
-            self.register_callee(caller.get_caller(), &query.id);
+        let undo_register = self.register_callee(caller, &query.id);
 
         let mut checked = QueryRepairation::UpToDate;
 

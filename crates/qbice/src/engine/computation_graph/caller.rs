@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
 use crossbeam::sync::WaitGroup;
 
 use crate::{
-    engine::computation_graph::{ActiveComputationGuard, persist::Timestamp},
+    engine::computation_graph::{
+        ActiveComputationGuard, lock::Computing, persist::Timestamp,
+    },
     query::QueryID,
 };
 
@@ -14,12 +18,43 @@ pub enum CallerReason {
 #[derive(Debug, Clone)]
 pub struct QueryCaller {
     query_id: QueryID,
+    computing: Option<Arc<Computing>>,
     reason: CallerReason,
 }
 
 impl QueryCaller {
-    pub const fn new(query_id: QueryID, reason: CallerReason) -> Self {
-        Self { query_id, reason }
+    pub const fn new(
+        query_id: QueryID,
+        reason: CallerReason,
+        computing: Arc<Computing>,
+    ) -> Self {
+        Self { query_id, computing: Some(computing), reason }
+    }
+
+    pub const fn new_external_input(
+        query_id: QueryID,
+        wait_group: WaitGroup,
+    ) -> Self {
+        Self {
+            query_id,
+            computing: None,
+            reason: CallerReason::RequireValue(Some(wait_group)),
+        }
+    }
+
+    #[must_use]
+    pub const fn computing(&self) -> &Arc<Computing> {
+        self.computing
+            .as_ref()
+            .expect("`ExternalInput` cannot call other queries")
+    }
+
+    #[must_use]
+    pub const fn query_id(&self) -> QueryID { self.query_id }
+
+    #[must_use]
+    pub const fn require_value(&self) -> bool {
+        matches!(self.reason, CallerReason::RequireValue { .. })
     }
 }
 
@@ -60,6 +95,17 @@ impl CallerInformation {
         }
     }
 
+    pub const fn get_query_caller(&self) -> Option<&QueryCaller> {
+        match &self.kind {
+            CallerKind::RepairFirewall { .. }
+            | CallerKind::BackwardProjectionPropagation
+            | CallerKind::Tracing
+            | CallerKind::User => None,
+
+            CallerKind::Query(q) => Some(q),
+        }
+    }
+
     pub const fn get_caller(&self) -> Option<&QueryID> {
         match &self.kind {
             CallerKind::RepairFirewall { .. }
@@ -80,21 +126,6 @@ impl CallerInformation {
             CallerKind::User => true,
             CallerKind::Query(q) => {
                 matches!(q.reason, CallerReason::RequireValue { .. })
-            }
-        }
-    }
-
-    pub fn has_a_caller_requiring_value(&self) -> Option<&QueryID> {
-        match &self.kind {
-            // it does require value, but the caller is not another query
-            CallerKind::RepairFirewall { .. }
-            | CallerKind::User
-            | CallerKind::Tracing
-            | CallerKind::BackwardProjectionPropagation => None,
-
-            CallerKind::Query(q) => {
-                matches!(q.reason, CallerReason::RequireValue { .. })
-                    .then_some(&q.query_id)
             }
         }
     }
