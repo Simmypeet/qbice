@@ -1,3 +1,5 @@
+//! In-memory implementation of [`KeyOfSetMap`].
+
 use std::hash::BuildHasher;
 
 use dashmap::DashMap;
@@ -82,7 +84,7 @@ impl<
         }
     }
 
-    fn insert(
+    async fn insert(
         &self,
         key: <K as KeyOfSetColumn>::Key,
         element: <K as KeyOfSetColumn>::Element,
@@ -113,7 +115,7 @@ impl<
         }
     }
 
-    fn remove(
+    async fn remove(
         &self,
         key: &<K as KeyOfSetColumn>::Key,
         element: &<K as KeyOfSetColumn>::Element,

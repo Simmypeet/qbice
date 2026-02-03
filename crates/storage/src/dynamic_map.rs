@@ -3,7 +3,7 @@ use crate::{
     write_transaction::WriteTransaction,
 };
 
-/// In-memory implementation of [`DynamicMap`].
+pub mod cache;
 pub mod in_memory;
 
 /// A trait for key-value map storage that supports dynamic value types.
@@ -55,12 +55,12 @@ pub trait DynamicMap<K: WideColumn> {
     /// - `key`: The key to insert.
     /// - `value`: The value to associate with the key.
     /// - `write_transaction`: The write transaction to record this operation
-    fn insert<V: WideColumnValue<K>>(
-        &self,
+    fn insert<'s, 't, V: WideColumnValue<K>>(
+        &'s self,
         key: K::Key,
         value: V,
-        write_transaction: &mut Self::WriteTransaction,
-    );
+        write_transaction: &'t mut Self::WriteTransaction,
+    ) -> impl std::future::Future<Output = ()> + use<'s, 't, Self, K, V> + Send;
 
     /// Removes a value of type `V` from the map.
     ///
@@ -74,9 +74,9 @@ pub trait DynamicMap<K: WideColumn> {
     ///
     /// - `key`: The key to remove.
     /// - `write_transaction`: The write transaction to record this operation
-    fn remove<V: WideColumnValue<K>>(
-        &self,
-        key: &K::Key,
-        write_transaction: &mut Self::WriteTransaction,
-    );
+    fn remove<'s, 'k, 't, V: WideColumnValue<K>>(
+        &'s self,
+        key: &'k K::Key,
+        write_transaction: &'t mut Self::WriteTransaction,
+    ) -> impl std::future::Future<Output = ()> + use<'s, 'k, 't, Self, K, V> + Send;
 }

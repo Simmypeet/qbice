@@ -7,7 +7,7 @@ use dashmap::DashSet;
 
 use crate::kv_database::KeyOfSetColumn;
 
-/// In-memory implementation of [`KeyOfSetMap`].
+pub mod cache;
 pub mod in_memory;
 
 /// A trait for containers used in key-of-set storage.
@@ -98,12 +98,12 @@ pub trait KeyOfSetMap<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
     ///
     /// Returns `true` if the element was inserted (not already present),
     /// `false` if it already existed.
-    fn insert(
-        &self,
+    fn insert<'s, 't>(
+        &'s self,
         key: K::Key,
         element: K::Element,
-        write_batch: &mut Self::WriteBatch,
-    ) -> bool;
+        write_batch: &'t mut Self::WriteBatch,
+    ) -> impl std::future::Future<Output = bool> + use<'s, 't, Self, K, C> + Send;
 
     /// Removes an element from the set associated with a key.
     ///
@@ -116,10 +116,12 @@ pub trait KeyOfSetMap<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
     /// # Returns
     ///
     /// Returns `true` if the element was removed, `false` if it was not found.
-    fn remove(
-        &self,
-        key: &K::Key,
-        element: &K::Element,
-        write_batch: &mut Self::WriteBatch,
-    ) -> bool;
+    fn remove<'s, 'k, 'e, 't>(
+        &'s self,
+        key: &'k K::Key,
+        element: &'e K::Element,
+        write_batch: &'t mut Self::WriteBatch,
+    ) -> impl std::future::Future<Output = bool>
+    + use<'s, 'k, 'e, 't, Self, K, C>
+    + Send;
 }

@@ -1,3 +1,5 @@
+//! In-memory implementation of [`DynamicMap`].
+
 use std::{any::Any, hash::BuildHasher};
 
 use dashmap::DashMap;
@@ -61,7 +63,7 @@ impl<K: WideColumn, S: BuildHasher + Clone + Send + Sync> DynamicMap<K>
             .and_then(|v| v.downcast_ref::<V>().cloned())
     }
 
-    fn insert<V: WideColumnValue<K>>(
+    async fn insert<V: WideColumnValue<K>>(
         &self,
         key: <K as WideColumn>::Key,
         value: V,
@@ -71,7 +73,7 @@ impl<K: WideColumn, S: BuildHasher + Clone + Send + Sync> DynamicMap<K>
         self.map.insert((key, discriminant), Box::new(value));
     }
 
-    fn remove<V: WideColumnValue<K>>(
+    async fn remove<V: WideColumnValue<K>>(
         &self,
         key: &<K as WideColumn>::Key,
         _write_transaction: &mut Self::WriteTransaction,

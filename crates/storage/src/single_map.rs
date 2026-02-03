@@ -3,7 +3,7 @@ use crate::{
     write_transaction::WriteTransaction,
 };
 
-/// In-memory implementation of [`SingleMap`].
+pub mod cache;
 pub mod in_memory;
 
 /// A trait for key-value map storage with a fixed value type.
@@ -43,12 +43,12 @@ pub trait SingleMap<K: WideColumn, V: WideColumnValue<K>> {
     /// - `value`: The value to associate with the key.
     /// - `write_transaction`: The write transaction to record this operation
     ///   in.
-    fn insert(
-        &self,
+    fn insert<'s, 't>(
+        &'s self,
         key: K::Key,
         value: V,
-        write_transaction: &mut Self::WriteTransaction,
-    );
+        write_transaction: &'t mut Self::WriteTransaction,
+    ) -> impl std::future::Future<Output = ()> + use<'s, 't, Self, K, V> + Send;
 
     /// Removes a key-value pair from the map.
     ///
@@ -57,9 +57,9 @@ pub trait SingleMap<K: WideColumn, V: WideColumnValue<K>> {
     /// - `key`: The key to remove.
     /// - `write_transaction`: The write transaction to record this operation
     ///   in.
-    fn remove(
-        &self,
-        key: &K::Key,
-        write_transaction: &mut Self::WriteTransaction,
-    );
+    fn remove<'s, 'k, 't>(
+        &'s self,
+        key: &'k K::Key,
+        write_transaction: &'t mut Self::WriteTransaction,
+    ) -> impl std::future::Future<Output = ()> + use<'s, 'k, 't, Self, K, V> + Send;
 }

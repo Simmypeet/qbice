@@ -1,3 +1,5 @@
+//! In-memory implementation of [`SingleMap`].
+
 use std::hash::BuildHasher;
 
 use dashmap::DashMap;
@@ -54,7 +56,7 @@ impl<K: WideColumn, V: WideColumnValue<K>, S: BuildHasher + Clone + Send + Sync>
         self.map.get(key).map(|v| v.value().clone())
     }
 
-    fn insert(
+    async fn insert(
         &self,
         key: K::Key,
         value: V,
@@ -63,7 +65,7 @@ impl<K: WideColumn, V: WideColumnValue<K>, S: BuildHasher + Clone + Send + Sync>
         self.map.insert(key, value);
     }
 
-    fn remove(
+    async fn remove(
         &self,
         key: &K::Key,
         _write_transaction: &mut Self::WriteTransaction,
