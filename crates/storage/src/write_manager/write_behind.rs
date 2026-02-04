@@ -757,8 +757,8 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         while let Some(top) = pending_commits.peek() {
             if top.write_task.write_buffer.epoch == *expected_epoch {
                 let mut task = pending_commits.pop().unwrap();
-                task.write_batch.commit();
 
+                task.write_batch.commit();
                 task.write_task
                     .write_buffer
                     .after_commit(task.write_task.write_buffer.epoch)

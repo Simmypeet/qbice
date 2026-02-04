@@ -180,3 +180,6 @@ impl<
         ))
     }
 }
+
+#[cfg(test)]
+mod test;

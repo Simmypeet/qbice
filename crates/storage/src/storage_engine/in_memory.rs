@@ -4,12 +4,14 @@
 //! keeps all data in memory without persistence. Useful for testing,
 //! development, or scenarios where data persistence is not required.
 
+use std::convert::Infallible;
+
 use crate::{
     dynamic_map::in_memory::InMemoryDynamicMap,
     key_of_set_map::{ConcurrentSet, in_memory::InMemoryKeyOfSetMap},
     kv_database::{KeyOfSetColumn, WideColumn, WideColumnValue},
     single_map::in_memory::InMemorySingleMap,
-    storage_engine::StorageEngine,
+    storage_engine::{StorageEngine, StorageEngineFactory},
     write_manager, write_transaction,
 };
 
@@ -56,3 +58,19 @@ impl StorageEngine for InMemoryStorageEngine {
     }
 }
 
+/// Factory for creating in-memory storage engine instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct InMemoryStorageEngineFactory;
+
+impl StorageEngineFactory for InMemoryStorageEngineFactory {
+    type StorageEngine = InMemoryStorageEngine;
+
+    type Error = Infallible;
+
+    fn open(
+        self,
+        _serialization_plugin: qbice_serialize::Plugin,
+    ) -> Result<Self::StorageEngine, Self::Error> {
+        Ok(InMemoryStorageEngine)
+    }
+}

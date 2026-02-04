@@ -342,7 +342,7 @@ pub trait WideColumn: Identifiable + Send + Sync + 'static {
 /// }
 /// ```
 pub trait WideColumnValue<C: WideColumn>:
-    Encode + Decode + Clone + 'static + Send + Sync
+    Debug + Encode + Decode + Clone + 'static + Send + Sync
 {
     /// Returns the unique discriminant for this value type within the
     /// associated wide column.
