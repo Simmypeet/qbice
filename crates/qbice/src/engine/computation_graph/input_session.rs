@@ -11,7 +11,6 @@ use crate::{
         computation_graph::{
             ActiveInputSessionGuard,
             caller::{CallerInformation, CallerKind, QueryCaller},
-            persist::NodeInfo,
             slow_path::GuardedTrackedEngine,
         },
         guard::GuardExt,
@@ -290,12 +289,15 @@ impl<C: Config> InputSession<C> {
         let query_hash = self.engine.hash(&query);
         let query_id = QueryID::new::<Q>(query_hash);
 
+        let mut snapshot = self.engine.get_exclusive_snapshot(query_hash).await;
+
         let query_value_fingerprint = self.engine.hash(&new_value);
 
         // has prior node infos, check for fingerprint diff
         // also, unwire the backward edges (if any)
-        let set_input_result = (self.engine.get_node_info(&query_id).await)
-            .map_or(SetInputResult::Fresh, |node_info| {
+        let set_input_result = (snapshot.node_info().await).map_or(
+            SetInputResult::Fresh,
+            |node_info| {
                 let fingerprint_diff =
                     node_info.value_fingerprint() != query_value_fingerprint;
 
@@ -305,12 +307,12 @@ impl<C: Config> InputSession<C> {
                 } else {
                     SetInputResult::Unchanged
                 }
-            });
+            },
+        );
 
         // should be safe since we're holding input session phase guard
         let ts = unsafe { self.engine.get_current_timestamp_unchecked() };
 
-        let engine = self.engine.clone();
         let transaction = self.transaction.clone();
         let dirty_batch = self.dirty_batch.clone();
 
@@ -325,7 +327,7 @@ impl<C: Config> InputSession<C> {
                 panic!("InputSession transaction has already been committed");
             };
 
-            engine
+            snapshot
                 .set_computed_input(
                     query,
                     query_hash,
@@ -387,7 +389,6 @@ impl<C: Config> InputSession<C> {
         struct RefreshResult<K, V> {
             query_input_hash: Compact128,
             query_result_hash: Compact128,
-            old_node_info: NodeInfo,
             query_input: K,
             new_value: V,
         }
@@ -423,15 +424,7 @@ impl<C: Config> InputSession<C> {
                 for query_hash in chunk.iter().copied() {
                     let query_id = QueryID::new::<Q>(query_hash);
 
-                    let (query, old_node_info) = {
-                        (
-                            engine
-                                .get_query_input::<Q>(&query_hash)
-                                .await
-                                .unwrap(),
-                            engine.get_node_info(&query_id).await.unwrap(),
-                        )
-                    };
+                    let query = engine.get_query_input::<Q>(&query_hash).await;
 
                     // Create a tracked engine to execute the query
                     let wait_group = WaitGroup::new();
@@ -470,7 +463,6 @@ impl<C: Config> InputSession<C> {
                         query_input: query,
                         query_input_hash: query_hash,
                         query_result_hash: new_fingerprint,
-                        old_node_info,
                         new_value,
                     });
                 }
@@ -495,10 +487,15 @@ impl<C: Config> InputSession<C> {
                 match res {
                     Ok(results) => {
                         for refresh_result in results {
-                            let fingerprint_diff = refresh_result
-                                .old_node_info
-                                .value_fingerprint()
-                                != refresh_result.query_result_hash;
+                            let mut snapshot = engine
+                                .get_exclusive_snapshot::<Q>(
+                                    refresh_result.query_input_hash,
+                                )
+                                .await;
+
+                            let fingerprint_diff =
+                                snapshot.value_fingerprint().await.unwrap()
+                                    != refresh_result.query_result_hash;
 
                             if fingerprint_diff {
                                 let query_id = QueryID::new::<Q>(
@@ -508,7 +505,7 @@ impl<C: Config> InputSession<C> {
                                 dirty_batch.push_back(query_id);
                             }
 
-                            engine
+                            snapshot
                                 .set_computed_input(
                                     refresh_result.query_input,
                                     refresh_result.query_input_hash,

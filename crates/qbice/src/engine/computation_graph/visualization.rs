@@ -222,10 +222,9 @@ impl<C: Config> Engine<C> {
             }
 
             // Get the query meta
-            let (Some(kind), Some(forward_edge)) = (
-                self.get_query_kind(&current_id).await,
-                self.get_forward_edges_order(&current_id).await,
-            ) else {
+            let (Some(kind), Some(forward_edge)) =
+                self.get_node_snapshot_for_graph(&current_id).await
+            else {
                 continue;
             };
 
@@ -264,7 +263,7 @@ impl<C: Config> Engine<C> {
             });
 
             // Get forward dependencies (callees) from computed state
-            for edge in forward_edge.iter() {
+            for edge in forward_edge.0.iter() {
                 edges.push(EdgeInfo {
                     source: current_id,
                     target: *edge,

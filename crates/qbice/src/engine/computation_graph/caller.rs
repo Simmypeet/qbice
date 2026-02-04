@@ -4,7 +4,7 @@ use crossbeam::sync::WaitGroup;
 
 use crate::{
     engine::computation_graph::{
-        ActiveComputationGuard, lock::Computing, persist::Timestamp,
+        ActiveComputationGuard, computing::QueryComputing, database::Timestamp,
     },
     query::QueryID,
 };
@@ -18,7 +18,7 @@ pub enum CallerReason {
 #[derive(Debug, Clone)]
 pub struct QueryCaller {
     query_id: QueryID,
-    computing: Option<Arc<Computing>>,
+    computing: Option<Arc<QueryComputing>>,
     reason: CallerReason,
 }
 
@@ -26,7 +26,7 @@ impl QueryCaller {
     pub const fn new(
         query_id: QueryID,
         reason: CallerReason,
-        computing: Arc<Computing>,
+        computing: Arc<QueryComputing>,
     ) -> Self {
         Self { query_id, computing: Some(computing), reason }
     }
@@ -43,7 +43,7 @@ impl QueryCaller {
     }
 
     #[must_use]
-    pub const fn computing(&self) -> &Arc<Computing> {
+    pub const fn computing(&self) -> &Arc<QueryComputing> {
         self.computing
             .as_ref()
             .expect("`ExternalInput` cannot call other queries")

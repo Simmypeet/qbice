@@ -23,7 +23,7 @@ use crate::{
     Engine, TrackedEngine,
     config::Config,
     engine::computation_graph::{
-        CallerInformation, GuardedTrackedEngine, QueryDebug,
+        CallerInformation, GuardedTrackedEngine, QueryDebug, QueryStatus,
     },
     query::{ExecutionStyle, Query},
 };
@@ -433,7 +433,7 @@ type RepairQueryFn<C> = for<'a> fn(
     query_id: &'a Compact128,
     called_from: &'a CallerInformation,
 ) -> Pin<
-    Box<dyn Future<Output = Result<(), CyclicError>> + Send + 'a>,
+    Box<dyn Future<Output = Result<QueryStatus, CyclicError>> + Send + 'a>,
 >;
 
 type ObtainSccValueFn = for<'a> fn(buffer: &'a mut dyn Any);
@@ -518,7 +518,7 @@ impl<C: Config> Entry<C> {
         engine: &Arc<Engine<C>>,
         query_id: &Compact128,
         caller_information: &CallerInformation,
-    ) -> Result<(), CyclicError> {
+    ) -> Result<QueryStatus, CyclicError> {
         (self.repair_query)(engine, query_id, caller_information).await
     }
 
@@ -584,17 +584,6 @@ impl<C: Config> Registry<C> {
     ) -> &Entry<C> {
         self.executors_by_key_type_id.get(type_id).unwrap_or_else(|| {
             panic!("Failed to find executor for query type id: {type_id:?}")
-        })
-    }
-
-    #[must_use]
-    pub(crate) fn get_executor_entry_by_type_id_with_type_name(
-        &self,
-        type_id: &StableTypeID,
-        type_name: &'static str,
-    ) -> &Entry<C> {
-        self.executors_by_key_type_id.get(type_id).unwrap_or_else(|| {
-            panic!("Failed to find executor for query type: {type_name}")
         })
     }
 

@@ -7,9 +7,10 @@ use crate::{
     Engine, Query,
     config::Config,
     engine::computation_graph::{
-        QueryWithID,
+        QueryStatus, QueryWithID,
         caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
-        lock::ComputingLockGuard,
+        computing::ComputingLockGuard,
+        database::Snapshot,
     },
     executor::CyclicError,
     query::QueryID,
@@ -24,47 +25,100 @@ pub enum RepairDecision {
     },
 }
 
-impl<C: Config> Engine<C> {
-    pub(super) async fn recompute_decision_based_on_forward_edges<Q: Query>(
-        self: &Arc<Self>,
-        query: &QueryWithID<'_, Q>,
+impl<C: Config, Q: Query> Snapshot<C, Q> {
+    pub(super) async fn repair_query(
+        self,
+        query: &Q,
         caller_information: &CallerInformation,
-        computing_lock_guard: &ComputingLockGuard<C>,
-    ) -> RepairDecision {
-        let mut repair_transitive_firewall_callees = false;
-        let mut cleaned_edges = Vec::new();
+        lock_guard: ComputingLockGuard<C>,
+    ) {
+        let Some((lock_guard, snapshot)) =
+            self.should_recompute_query(caller_information, lock_guard).await
+        else {
+            return;
+        };
 
-        let forward_edges =
-            self.get_forward_edges_order(&query.id).await.unwrap();
-        let forward_edge_observations =
-            self.get_forward_edge_observations(&query.id).await.unwrap();
+        // recompute the query
+        snapshot
+            .execute_query(
+                query,
+                super::slow_path::ExecuteQueryFor::RecomputeQuery,
+                caller_information,
+                lock_guard,
+            )
+            .await;
+    }
 
-        for callee in forward_edges.iter() {
-            // skip if not dirty
-            if !self.is_edge_dirty(query.id, *callee).await {
-                continue;
-            }
+    async fn should_recompute_query(
+        mut self,
+        caller_information: &CallerInformation,
+        lock_guard: ComputingLockGuard<C>,
+    ) -> Option<(ComputingLockGuard<C>, Self)> {
+        // if the caller is backward projection propagation, we always
+        // recompute since the projection query have already told us
+        // that the value is required to be recomputed.
+        if matches!(
+            caller_information.kind(),
+            CallerKind::BackwardProjectionPropagation
+        ) {
+            return Some((lock_guard, self));
+        }
 
-            let kind = self.get_query_kind(callee).await.unwrap();
+        // continue normal path ...
 
-            // NOTE: if the callee is an input (explicitly set), it's impossible
-            // to try to repair it, so we'll skip repairing and directly
-            // compare the fingerprint.
-            if !kind.is_input() {
-                // recursively repair the callee first
+        // repair transitive firewall callees first before deciding whether to
+        // recompute, since the transitive firewall callees might affect the
+        // decision by propagating dirtiness.
+        if matches!(
+            caller_information.kind(),
+            CallerKind::User | CallerKind::RepairFirewall { .. }
+        ) {
+            self.repair_transitive_firewall_callees(caller_information).await;
+        }
+
+        let recompute = self
+            .recompute_decision_based_on_forward_edges(
+                caller_information,
+                &lock_guard,
+            )
+            .await;
+
+        let (repair_transitive_firewall_callees, cleaned_edges) =
+            match recompute {
+                RepairDecision::Recompute => return Some((lock_guard, self)),
+                RepairDecision::Clean {
+                    repair_transitive_firewall_callees,
+                    cleaned_edges,
+                } => (repair_transitive_firewall_callees, cleaned_edges),
+            };
+
+        if repair_transitive_firewall_callees.not() {
+            self.computing_lock_to_clean_query(
+                cleaned_edges,
+                None,
+                caller_information,
+                lock_guard,
+            )
+            .await;
+        } else {
+            let forward_edges = self.forward_edge_order().await.unwrap();
+
+            // repair all callees
+            for callee in forward_edges.0.iter() {
                 let entry = self
+                    .engine()
                     .executor_registry
                     .get_executor_entry_by_type_id(&callee.stable_type_id());
 
                 let _ = entry
                     .repair_query_from_query_id(
-                        self,
+                        self.engine(),
                         &callee.compact_hash_128(),
                         &CallerInformation::new(
                             CallerKind::Query(QueryCaller::new(
-                                query.id,
+                                *self.query_id(),
                                 CallerReason::Repair,
-                                computing_lock_guard.computing().clone(),
+                                lock_guard.query_computing().clone(),
                             )),
                             caller_information.timestamp(),
                             caller_information.clone_active_computation_guard(),
@@ -73,59 +127,48 @@ impl<C: Config> Engine<C> {
                     .await;
             }
 
-            // after repairing, compare the fingerprints to see if we need to
-            // recompute
-            {
-                let callee_node_info = self.get_node_info(callee).await.expect(
-                    "callee node info should exist when forward edge exists",
-                );
+            let mut new_tfcs = FxHashSet::default();
 
-                let value_fingerprint_diff = callee_node_info
-                    .value_fingerprint()
-                    != forward_edge_observations
-                        .get(callee)
-                        .unwrap()
-                        .seen_value_fingerprint;
+            for x in forward_edges.0.iter() {
+                let kind = self.engine().get_query_kind(x).await;
 
-                // if any of the callee's value fingerprint differs, we need to
-                // recompute
-                if value_fingerprint_diff {
-                    return RepairDecision::Recompute;
-                }
+                if kind.is_firewall() {
+                    new_tfcs.insert(*x);
+                } else {
+                    let callee_info = unsafe {
+                        self.engine().get_node_info_unchecked(x).await
+                    };
 
-                cleaned_edges.push(*callee);
-
-                // check wherther the transitive firewall callee needs repair
-                if !kind.is_firewall() {
-                    let tfc_fingerprint_diff = callee_node_info
-                        .transitive_firewall_callees_fingerprint()
-                        != forward_edge_observations
-                            .get(callee)
-                            .unwrap()
-                            .seen_transitive_firewall_callees_fingerprint;
-
-                    if tfc_fingerprint_diff {
-                        repair_transitive_firewall_callees = true;
-                    }
+                    new_tfcs.extend(
+                        callee_info
+                            .transitive_firewall_callees()
+                            .iter()
+                            .copied(),
+                    );
                 }
             }
+
+            let new_tfc = self.engine().create_tfc(new_tfcs);
+
+            self.computing_lock_to_clean_query(
+                cleaned_edges,
+                Some(new_tfc),
+                caller_information,
+                lock_guard,
+            )
+            .await;
         }
 
-        RepairDecision::Clean {
-            repair_transitive_firewall_callees,
-            cleaned_edges,
-        }
+        None
     }
 
-    pub(super) async fn repair_transitive_firewall_callees<Q: Query>(
-        self: &Arc<Self>,
-        query: &QueryWithID<'_, Q>,
+    async fn repair_transitive_firewall_callees(
+        &mut self,
         caller_information: &CallerInformation,
     ) {
-        let node_info = self.get_node_info(&query.id).await.unwrap();
-
+        let node_info = self.node_info().await.unwrap();
         let is_current_query_projection =
-            self.get_query_kind(&query.id).await.unwrap().is_projection();
+            self.query_kind().await.unwrap().is_projection();
 
         let tfcs = node_info.transitive_firewall_callees();
         let tfcs = tfcs.iter().copied().collect::<Vec<_>>();
@@ -144,7 +187,7 @@ impl<C: Config> Engine<C> {
         let timestamp = caller_information.timestamp();
 
         for tfc_chunk in tfcs.chunks(chunk_size).map(<[_]>::to_vec) {
-            let engine = Arc::clone(self);
+            let engine = self.engine().clone();
             let active_computation_guard =
                 caller_information.clone_active_computation_guard();
 
@@ -184,80 +227,45 @@ impl<C: Config> Engine<C> {
         }
     }
 
-    pub(super) async fn should_recompute_query<Q: Query>(
-        self: &Arc<Self>,
-        query: &QueryWithID<'_, Q>,
+    async fn recompute_decision_based_on_forward_edges(
+        &mut self,
         caller_information: &CallerInformation,
-        lock_guard: ComputingLockGuard<C>,
-    ) -> Option<ComputingLockGuard<C>> {
-        // if the caller is backward projection propagation, we always
-        // recompute since the projection query have already told us
-        // that the value is required to be recomputed.
-        if matches!(
-            caller_information.kind(),
-            CallerKind::BackwardProjectionPropagation
-        ) {
-            return Some(lock_guard);
-        }
+        computing_lock_guard: &ComputingLockGuard<C>,
+    ) -> RepairDecision {
+        let mut repair_transitive_firewall_callees = false;
+        let mut cleaned_edges = Vec::new();
 
-        // continue normal path ...
+        let forward_edges = self.forward_edge_order().await.unwrap();
+        let forward_edge_observation =
+            self.forward_edge_observation().await.unwrap();
 
-        // repair transitive firewall callees first before deciding whether to
-        // recompute, since the transitive firewall callees might affect the
-        // decision by propagating dirtiness.
-        if matches!(
-            caller_information.kind(),
-            CallerKind::User | CallerKind::RepairFirewall { .. }
-        ) {
-            self.repair_transitive_firewall_callees(query, caller_information)
-                .await;
-        }
+        for callee in forward_edges.0.iter() {
+            // skip if not dirty
+            if !self.is_edge_dirty(*callee).await {
+                continue;
+            }
 
-        let recompute = self
-            .recompute_decision_based_on_forward_edges(
-                query,
-                caller_information,
-                &lock_guard,
-            )
-            .await;
+            let kind = self.engine().get_query_kind(callee).await;
 
-        let (repair_transitive_firewall_callees, cleaned_edges) =
-            match recompute {
-                RepairDecision::Recompute => return Some(lock_guard),
-                RepairDecision::Clean {
-                    repair_transitive_firewall_callees,
-                    cleaned_edges,
-                } => (repair_transitive_firewall_callees, cleaned_edges),
-            };
-
-        if repair_transitive_firewall_callees.not() {
-            self.computing_lock_to_clean_query(
-                &query.id,
-                cleaned_edges,
-                None,
-                caller_information,
-                lock_guard,
-            )
-            .await;
-        } else {
-            let forward_edges =
-                self.get_forward_edges_order(&query.id).await.unwrap();
-
-            // repair all callees
-            for callee in forward_edges.iter() {
+            // NOTE: if the callee is an input (explicitly set), it's impossible
+            // to try to repair it, so we'll skip repairing and directly
+            // compare the fingerprint.
+            if !kind.is_input() {
+                // recursively repair the callee first
                 let entry = self
+                    .engine()
                     .executor_registry
                     .get_executor_entry_by_type_id(&callee.stable_type_id());
 
                 let _ = entry
                     .repair_query_from_query_id(
-                        self,
+                        self.engine(),
                         &callee.compact_hash_128(),
                         &CallerInformation::new(
                             CallerKind::Query(QueryCaller::new(
-                                query.id,
+                                *self.query_id(),
                                 CallerReason::Repair,
-                                lock_guard.computing().clone(),
+                                computing_lock_guard.query_computing().clone(),
                             )),
                             caller_information.timestamp(),
                             caller_information.clone_active_computation_guard(),
@@ -266,79 +274,72 @@ impl<C: Config> Engine<C> {
                     .await;
             }
 
-            let mut new_tfcs = FxHashSet::default();
+            // after repairing, compare the fingerprints to see if we need to
+            // recompute
+            {
+                // SAFETY: we have just repaired the callee, so the node info
+                // must exist and immutable now.
+                let callee_node_info = unsafe {
+                    self.engine().get_node_info_unchecked(callee).await
+                };
 
-            for x in forward_edges.iter() {
-                let kind = self.get_query_kind(x).await.unwrap();
+                let value_fingerprint_diff = callee_node_info
+                    .value_fingerprint()
+                    != forward_edge_observation
+                        .0
+                        .get(callee)
+                        .unwrap()
+                        .seen_value_fingerprint;
 
-                if kind.is_firewall() {
-                    new_tfcs.insert(*x);
-                } else {
-                    let callee_info = self.get_node_info(x).await.unwrap();
+                // if any of the callee's value fingerprint differs, we need to
+                // recompute
+                if value_fingerprint_diff {
+                    return RepairDecision::Recompute;
+                }
 
-                    new_tfcs.extend(
-                        callee_info
-                            .transitive_firewall_callees()
-                            .iter()
-                            .copied(),
-                    );
+                cleaned_edges.push(*callee);
+
+                // check wherther the transitive firewall callee needs repair
+                if !kind.is_firewall() {
+                    let tfc_fingerprint_diff = callee_node_info
+                        .transitive_firewall_callees_fingerprint()
+                        != forward_edge_observation
+                            .0
+                            .get(callee)
+                            .unwrap()
+                            .seen_transitive_firewall_callees_fingerprint;
+
+                    if tfc_fingerprint_diff {
+                        repair_transitive_firewall_callees = true;
+                    }
                 }
             }
-
-            let new_tfc = self.create_tfc(new_tfcs);
-
-            self.computing_lock_to_clean_query(
-                &query.id,
-                cleaned_edges,
-                Some(new_tfc),
-                caller_information,
-                lock_guard,
-            )
-            .await;
         }
 
-        None
+        RepairDecision::Clean {
+            repair_transitive_firewall_callees,
+            cleaned_edges,
+        }
     }
+}
 
-    pub(super) async fn repair_query<Q: Query>(
-        self: &Arc<Self>,
-        query: &QueryWithID<'_, Q>,
-        caller_information: &CallerInformation,
-        lock_guard: ComputingLockGuard<C>,
-    ) {
-        let Some(lock_guard) = self
-            .should_recompute_query(query, caller_information, lock_guard)
-            .await
-        else {
-            return;
-        };
-
-        // recompute the query
-        self.execute_query(
-            query,
-            caller_information,
-            super::slow_path::ExecuteQueryFor::RecomputeQuery,
-            lock_guard,
-        )
-        .await;
-    }
-
+impl<C: Config> Engine<C> {
     pub(crate) fn repair_query_from_query_id<'x, Q: Query>(
         self: &'x Arc<Self>,
         query_id: &'x Compact128,
         called_from: &'x CallerInformation,
-    ) -> Pin<Box<dyn Future<Output = Result<(), CyclicError>> + Send + 'x>>
-    {
+    ) -> Pin<
+        Box<dyn Future<Output = Result<QueryStatus, CyclicError>> + Send + 'x>,
+    > {
         Box::pin(async move {
-            let query_input =
-                self.get_query_input::<Q>(query_id).await.unwrap();
+            let query_input = self.get_query_input::<Q>(query_id).await;
 
             let query_for = QueryWithID {
                 id: QueryID::new::<Q>(*query_id),
                 query: &query_input,
             };
 
-            self.query_for(&query_for, called_from).await.map(|_| ())
+            self.query_for(&query_for, called_from).await.map(|x| x.status)
         })
     }
 }

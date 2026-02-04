@@ -3,8 +3,8 @@ use std::{any::Any, cell::RefCell, collections::HashMap, sync::Arc};
 // re-export
 pub(crate) use caller::CallerInformation;
 use dashmap::DashSet;
+pub(crate) use database::{ActiveInputSessionGuard, QueryDebug};
 pub use input_session::{InputSession, SetInputResult};
-pub(crate) use persist::{ActiveInputSessionGuard, QueryDebug};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};
 use qbice_stable_type_id::Identifiable;
@@ -16,9 +16,10 @@ use crate::{
     config::Config,
     engine::computation_graph::{
         caller::CallerKind,
+        computing::Computing,
+        database::{ActiveComputationGuard, Database},
         fast_path::FastPathResult,
-        lock::Lock,
-        persist::{ActiveComputationGuard, Persist},
+        query_lock_manager::QueryLockManager,
         statistic::Statistic,
     },
     executor::{CyclicError, CyclicPanicPayload},
@@ -27,11 +28,12 @@ use crate::{
 
 mod backward_projection;
 mod caller;
+mod computing;
+mod database;
 mod dirty_propagation;
 mod fast_path;
 mod input_session;
-mod lock;
-mod persist;
+mod query_lock_manager;
 mod register_callee;
 mod repair;
 mod slow_path;
@@ -72,8 +74,9 @@ impl QueryKind {
 }
 
 pub struct ComputationGraph<C: Config> {
-    persist: Persist<C>,
-    lock: Arc<Lock<C>>,
+    database: Database<C>,
+    computing: Computing<C>,
+    lock_manager: QueryLockManager,
     dirtied_queries: DashSet<QueryID, C::BuildHasher>,
     statistic: Statistic,
 }
@@ -81,10 +84,11 @@ pub struct ComputationGraph<C: Config> {
 impl<C: Config> ComputationGraph<C> {
     pub async fn new(db: &C::StorageEngine) -> Self {
         Self {
-            persist: Persist::new(db).await,
+            database: Database::new(db).await,
+            lock_manager: QueryLockManager::new(2u64.pow(14)),
             dirtied_queries: DashSet::default(),
             statistic: Statistic::default(),
-            lock: Arc::new(Lock::new()),
+            computing: Computing::new(),
         }
     }
 }
@@ -409,31 +413,21 @@ pub struct QueryWithID<'c, Q: Query> {
 }
 
 /// Specifies whether the query is has been repaired or is up-to-date.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum QueryRepairation {
-    /// The query verification timestamp was older than the current timestamp.
-    /// The query has been repaired to be up-to-date (this doesn't imply that
-    /// the query has been recomputed)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryStatus {
     Repaired,
-
-    /// The verification timestamp was already up-to-date.
     UpToDate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryResult<V> {
-    Return(V, QueryRepairation),
-    Checked(QueryRepairation),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryResult<V> {
+    pub return_value: Option<V>,
+    pub status: QueryStatus,
 }
 
 impl<V> QueryResult<V> {
     pub fn unwrap_return(self) -> V {
-        match self {
-            Self::Return(v, _) => v,
-            Self::Checked(_) => {
-                panic!("called `unwrap_return` on a `UpToDate` value")
-            }
-        }
+        self.return_value.expect("Query did not return a value")
     }
 }
 
@@ -446,62 +440,53 @@ impl<C: Config> Engine<C> {
         // register the dependency for the sake of detecting cycles
         let undo_register = self.register_callee(caller, &query.id);
 
-        let mut checked = QueryRepairation::UpToDate;
+        let mut status = QueryStatus::UpToDate;
 
         // pulling the value
         let value = loop {
-            let slow_path = match self.fast_path::<Q>(&query.id, caller).await {
-                // try again
-                Ok(FastPathResult::TryAgain) => {
-                    continue;
+            // exit SCC if any, otherwise deadlock may happen
+            if let Err(er) = self.exit_scc(&query.id, caller) {
+                // defuse the undo `register_callee` keep cyclic dependency
+                // detection correct
+                if let Some(undo) = undo_register {
+                    undo.defuse();
                 }
 
+                return Err(er);
+            }
+
+            // acquire read snapshot
+            let mut snapshot =
+                self.get_read_snapshot::<Q>(query.id.compact_hash_128()).await;
+
+            let slow_path = match snapshot.fast_path(caller).await {
                 // go to slow path
-                Ok(FastPathResult::ToSlowPath(slow_path)) => slow_path,
+                FastPathResult::ToSlowPath(slow_path) => slow_path,
 
                 // hit
-                Ok(FastPathResult::Hit(value)) => {
+                FastPathResult::Hit(value) => {
                     // defuse the undo `register_callee` since we have obtained
                     // the value, record the dependency successfully
                     if let Some(undo_register) = undo_register {
                         undo_register.defuse();
                     }
 
-                    break value.map_or_else(
-                        || QueryResult::Checked(checked),
-                        |v| QueryResult::Return(v, checked),
-                    );
-                }
-
-                Err(e) => {
-                    // defuse the undo `register_callee` keep cyclic dependency
-                    // detection correct
-                    if let Some(undo) = undo_register {
-                        undo.defuse();
-                    }
-
-                    return Err(e);
+                    break QueryResult { return_value: value, status };
                 }
             };
 
             // now the `query` state is held in computing state.
-            // if `lock_computing` is dropped without defusing, the state will
+            // if `guard` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
-            let Some(guard) = self
-                .get_lock_guard(
-                    &query.id,
-                    slow_path,
-                    std::any::type_name::<Q>(),
-                )
-                .await
+            let Some(guard) = snapshot.get_write_guard(slow_path, caller).await
             else {
                 // try the fast path again
                 continue;
             };
 
-            self.continuation(query, caller, guard).await;
+            snapshot.continuation(query.query, caller, guard).await;
 
-            checked = QueryRepairation::Repaired;
+            status = QueryStatus::Repaired;
 
             // retry to the fast path and obtain value.
         };

@@ -1,30 +1,31 @@
-use std::{sync::Arc, thread::available_parallelism};
+use std::thread::available_parallelism;
 
 use tokio::task::JoinSet;
 
 use crate::{
-    Engine,
+    Query,
     config::Config,
     engine::computation_graph::{
         CallerInformation, caller::CallerKind,
-        lock::BackwardProjectionLockGuard,
+        computing::BackwardProjectionLockGuard, database::Snapshot,
     },
-    query::QueryID,
 };
 
-impl<C: Config> Engine<C> {
-    #[allow(clippy::await_holding_lock)]
+impl<C: Config, Q: Query> Snapshot<C, Q> {
     pub(super) async fn invoke_backward_projections(
-        self: &Arc<Self>,
-        current_query_id: &QueryID,
+        self,
         caller_information: &CallerInformation,
         backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
     ) {
-        let backward_edges = self.get_backward_edges(current_query_id).await;
+        // SAFETY: We are reading our own backward edges, which we've already
+        // acquired the lock for.
+        let backward_edges = unsafe {
+            self.engine().get_backward_edges_unchecked(self.query_id()).await
+        };
 
         let mut backward_projections = Vec::new();
         for query_id in backward_edges {
-            let query_kind = self.get_query_kind(&query_id).await.unwrap();
+            let query_kind = self.engine().get_query_kind(&query_id).await;
 
             if query_kind.is_projection() {
                 backward_projections.push(query_id);
@@ -44,7 +45,7 @@ impl<C: Config> Engine<C> {
 
         let timestamp = caller_information.timestamp();
         for chunk in backward_projections.chunks(chunk_size) {
-            let engine = Arc::clone(self);
+            let engine = self.engine().clone();
             let chunk = chunk.to_vec();
             let active_computation_graph =
                 caller_information.clone_active_computation_guard();
@@ -89,58 +90,6 @@ impl<C: Config> Engine<C> {
             }
         }
 
-        self.done_backward_projection(
-            current_query_id,
-            backward_projection_lock_guard,
-        )
-        .await;
-    }
-
-    pub(super) async fn try_do_backward_projections(
-        self: &Arc<Self>,
-        query_id: &QueryID,
-        caller_information: &CallerInformation,
-    ) {
-        loop {
-            // no more pending backward projection
-            if self
-                .get_pending_backward_projection(query_id)
-                .await
-                .is_none_or(|x| x != caller_information.timestamp())
-            {
-                return;
-            }
-
-            let Some(lock_guard) =
-                self.get_backward_projection_lock_guard(query_id)
-            else {
-                // lock is not available, need to wait
-
-                let Some(pending_lock) = self
-                    .computation_graph
-                    .lock
-                    .try_get_pending_backward_projection_lock(query_id)
-                else {
-                    // during this short amount of time, the lock is now
-                    // available, try again
-                    continue;
-                };
-
-                let notified_owned = pending_lock.notified_owned();
-                drop(pending_lock);
-
-                notified_owned.await;
-
-                continue;
-            };
-
-            // the lock is acquired, do the backward propagations
-            self.invoke_backward_projections(
-                query_id,
-                caller_information,
-                lock_guard,
-            )
-            .await;
-        }
+        self.done_backward_projection(backward_projection_lock_guard).await;
     }
 }

@@ -48,6 +48,7 @@ use qbice_storage::{
     single_map::SingleMap as _,
     storage_engine::StorageEngine,
 };
+pub use snapshot::Snapshot;
 pub(super) use sync::ActiveComputationGuard;
 pub(crate) use sync::ActiveInputSessionGuard;
 
@@ -56,7 +57,7 @@ use crate::{
     config::Config,
     engine::{
         computation_graph::{
-            CallerInformation, QueryKind, lock::BackwardProjectionLockGuard,
+            QueryKind, computing::BackwardProjectionLockGuard,
             tfc_achetype::TransitiveFirewallCallees,
         },
         guard::GuardExt,
@@ -64,6 +65,7 @@ use crate::{
     query::QueryID,
 };
 
+mod snapshot;
 mod sync;
 
 #[derive(
@@ -415,10 +417,16 @@ implements_wide_column_value_new_type!(
     QueryNodeDiscriminant::ForwardEdgeOrder
 );
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ForwardEdgeObservation<C: Config>(
-    Arc<HashMap<QueryID, Observation, C::BuildHasher>>,
+    pub Arc<HashMap<QueryID, Observation, C::BuildHasher>>,
 );
+
+impl<C: Config> std::fmt::Debug for ForwardEdgeObservation<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ForwardEdgeObservation").field(&self.0).finish()
+    }
+}
 
 impl<C: Config> WideColumnValue<QueryNodeColumn> for ForwardEdgeObservation<C> {
     fn discriminant() -> QueryNodeDiscriminant {
@@ -511,11 +519,12 @@ type WriteTransaction<C> =
     <<C as Config>::StorageEngine as StorageEngine>::WriteTransaction;
 
 #[allow(clippy::type_complexity)]
-pub struct Persist<C: Config> {
+pub struct Database<C: Config> {
     last_verified: SingleMap<C, QueryNodeColumn, LastVerified>,
     forward_edge_order: SingleMap<C, QueryNodeColumn, ForwardEdgeOrder>,
     forward_edge_observation:
         SingleMap<C, QueryNodeColumn, ForwardEdgeObservation<C>>,
+
     query_kind: SingleMap<C, QueryNodeColumn, QueryKind>,
     node_info: SingleMap<C, QueryNodeColumn, NodeInfo>,
     pending_backward_projection:
@@ -540,35 +549,35 @@ pub struct Persist<C: Config> {
     sync: sync::Sync<C>,
 }
 
-impl<C: Config> Persist<C> {
+impl<C: Config> Database<C> {
     pub async fn new(db: &C::StorageEngine) -> Self {
         Self {
-        last_verified: db.new_single_map::<QueryNodeColumn, LastVerified>(),
-        forward_edge_order:
-            db.new_single_map::<QueryNodeColumn, ForwardEdgeOrder>(),
-        forward_edge_observation: db
-            .new_single_map::<QueryNodeColumn, ForwardEdgeObservation<C>>(),
-        query_kind: db.new_single_map::<QueryNodeColumn, QueryKind>(),
-        node_info: db.new_single_map::<QueryNodeColumn, NodeInfo>(),
-        pending_backward_projection: db
-            .new_single_map::<QueryNodeColumn, PendingBackwardProjection>(),
+            last_verified: db.new_single_map::<QueryNodeColumn, LastVerified>(),
+            forward_edge_order:
+                db.new_single_map::<QueryNodeColumn, ForwardEdgeOrder>(),
+            forward_edge_observation: db
+                .new_single_map::<QueryNodeColumn, ForwardEdgeObservation<C>>(),
+            query_kind: db.new_single_map::<QueryNodeColumn, QueryKind>(),
+            node_info: db.new_single_map::<QueryNodeColumn, NodeInfo>(),
+            pending_backward_projection: db
+                .new_single_map::<QueryNodeColumn, PendingBackwardProjection>(),
 
-        dirty_edge_set: db.new_single_map::<DirtySetColumn, Unit>(),
+            dirty_edge_set: db.new_single_map::<DirtySetColumn, Unit>(),
 
-        query_store: db.new_dynamic_map::<QueryStoreColumn>(),
+            query_store: db.new_dynamic_map::<QueryStoreColumn>(),
 
-        backward_edges: db.new_key_of_set_map::<
-            BackwardEdgeColumn<C>,
-            CompressedBackwardEdgeSet<C::BuildHasher>,
-        >(),
+            backward_edges: db.new_key_of_set_map::<
+                BackwardEdgeColumn<C>,
+                CompressedBackwardEdgeSet<C::BuildHasher>,
+            >(),
 
-        external_input_queries: db.new_key_of_set_map::<
-            ExternalInputColumn<C>,
-            Arc<DashSet<Compact128, C::BuildHasher>>,
-        >(),
+            external_input_queries: db.new_key_of_set_map::<
+                ExternalInputColumn<C>,
+                Arc<DashSet<Compact128, C::BuildHasher>>,
+            >(),
 
-        sync: sync::Sync::new(db).await,
-    }
+            sync: sync::Sync::new(db).await,
+        }
     }
 }
 
@@ -579,229 +588,6 @@ pub struct Observation {
 }
 
 impl<C: Config> Engine<C> {
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    #[inline(never)]
-    pub(super) async fn set_computed<Q: Query>(
-        &self,
-        query: Q,
-        query_id: QueryID,
-        query_value: Q::Value,
-        query_value_fingerprint: Option<Compact128>,
-        query_kind: QueryKind,
-        forward_edge_order: Arc<[QueryID]>,
-        forward_edge_observations: HashMap<
-            QueryID,
-            Observation,
-            C::BuildHasher,
-        >,
-        tfc_achetype: Interned<TransitiveFirewallCallees>,
-        has_pending_backward_projection: bool,
-        current_timestamp: Timestamp,
-        existing_forward_edges: Option<&[QueryID]>,
-        mut tx: WriteTransaction<C>,
-    ) {
-        let query_value_fingerprint =
-            query_value_fingerprint.unwrap_or_else(|| self.hash(&query_value));
-        let transitive_firewall_callees_fingerprint = self.hash(&tfc_achetype);
-
-        let forward_edge_order = ForwardEdgeOrder(forward_edge_order);
-        let forward_edge_observations =
-            ForwardEdgeObservation::<C>(Arc::new(forward_edge_observations));
-
-        let node_info = NodeInfo::new(
-            query_value_fingerprint,
-            transitive_firewall_callees_fingerprint,
-            tfc_achetype,
-        );
-
-        let query_input = QueryInput::<Q>(query);
-        let query_result = QueryResult::<Q>(query_value);
-
-        {
-            // remove prior backward edges
-            if let Some(forward_edges) = existing_forward_edges {
-                for edge in forward_edges {
-                    self.computation_graph
-                        .persist
-                        .backward_edges
-                        .remove(edge, &query_id, &mut tx)
-                        .await;
-                }
-            }
-
-            // set pending backward projection if needed
-            if has_pending_backward_projection {
-                self.computation_graph
-                    .persist
-                    .pending_backward_projection
-                    .insert(
-                        query_id,
-                        PendingBackwardProjection(current_timestamp),
-                        &mut tx,
-                    )
-                    .await;
-            }
-
-            self.computation_graph
-                .persist
-                .node_info
-                .insert(query_id, node_info, &mut tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .query_kind
-                .insert(query_id, query_kind, &mut tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .last_verified
-                .insert(query_id, LastVerified(current_timestamp), &mut tx)
-                .await;
-
-            for edge in forward_edge_order.0.iter() {
-                self.computation_graph
-                    .persist
-                    .backward_edges
-                    .insert(*edge, query_id, &mut tx)
-                    .await;
-            }
-
-            self.computation_graph
-                .persist
-                .forward_edge_order
-                .insert(query_id, forward_edge_order, &mut tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .forward_edge_observation
-                .insert(query_id, forward_edge_observations, &mut tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .query_store
-                .insert(query_id.compact_hash_128(), query_input, &mut tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .query_store
-                .insert(query_id.compact_hash_128(), query_result, &mut tx)
-                .await;
-
-            // Track external input queries by type for refresh support
-            if query_kind.is_external_input() {
-                self.computation_graph
-                    .persist
-                    .external_input_queries
-                    .insert(
-                        query_id.stable_type_id(),
-                        query_id.compact_hash_128(),
-                        &mut tx,
-                    )
-                    .await;
-            }
-
-            self.submit_write_buffer(tx);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn set_computed_input<Q: Query>(
-        &self,
-        query: Q,
-        query_hash_128: Compact128,
-        query_value: Q::Value,
-        query_value_fingerprint: Compact128,
-        tx: &mut WriteTransaction<C>,
-        set_input: bool,
-        timestamp: Timestamp,
-    ) {
-        let query_id = QueryID::new::<Q>(query_hash_128);
-
-        // if have an existing forward edges, unwire the backward edges
-        let existing_forward_edges =
-            self.get_forward_edges_order(&query_id).await;
-
-        let empty_forward_edges = ForwardEdgeOrder(Arc::from([]));
-        let empty_forward_edge_observations = ForwardEdgeObservation::<C>(
-            Arc::new(HashMap::with_hasher(C::BuildHasher::default())),
-        );
-
-        let transitive_firewall_callees =
-            self.create_tfc_from_iter(std::iter::empty());
-        let transitive_firewall_callees_fingerprint =
-            self.hash(&transitive_firewall_callees);
-
-        let node_info = NodeInfo::new(
-            query_value_fingerprint,
-            transitive_firewall_callees_fingerprint,
-            transitive_firewall_callees,
-        );
-
-        let query_input = QueryInput::<Q>(query);
-        let query_result = QueryResult::<Q>(query_value);
-
-        {
-            if let Some(forward_edges) = existing_forward_edges {
-                for edge in forward_edges.iter() {
-                    self.computation_graph
-                        .persist
-                        .backward_edges
-                        .remove(edge, &query_id, tx)
-                        .await;
-                }
-            }
-
-            if set_input {
-                self.computation_graph
-                    .persist
-                    .query_kind
-                    .insert(query_id, QueryKind::Input, tx)
-                    .await;
-            }
-
-            self.computation_graph
-                .persist
-                .last_verified
-                .insert(query_id, LastVerified(timestamp), tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .forward_edge_order
-                .insert(query_id, empty_forward_edges, tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .forward_edge_observation
-                .insert(query_id, empty_forward_edge_observations, tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .node_info
-                .insert(query_id, node_info, tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .query_store
-                .insert(query_id.compact_hash_128(), query_input, tx)
-                .await;
-
-            self.computation_graph
-                .persist
-                .query_store
-                .insert(query_id.compact_hash_128(), query_result, tx)
-                .await;
-        }
-    }
-
     pub(super) async fn mark_dirty_forward_edge(
         &self,
         from: QueryID,
@@ -811,79 +597,12 @@ impl<C: Config> Engine<C> {
         let edge = Edge { from, to };
 
         self.computation_graph
-            .persist
+            .database
             .dirty_edge_set
             .insert(edge, Unit, tx)
             .await;
 
         self.computation_graph.add_dirtied_edge_count();
-    }
-
-    #[allow(clippy::option_option)]
-    pub(super) async fn clean_query(
-        self: &Arc<Self>,
-        query_id: &QueryID,
-        clean_edges: Vec<QueryID>,
-        new_tfc: Option<Interned<TransitiveFirewallCallees>>,
-        caller_information: &CallerInformation,
-    ) {
-        let new_node_info = if let Some(x) = new_tfc {
-            let mut current_node_info =
-                self.get_node_info(query_id).await.unwrap();
-
-            current_node_info.transitive_firewall_callees = x;
-            current_node_info.transitive_firewall_callees_fingerprint =
-                self.hash(&current_node_info.transitive_firewall_callees);
-
-            Some(current_node_info)
-        } else {
-            None
-        };
-
-        let mut tx = self.new_write_transaction();
-        let caller_information = caller_information.clone();
-        let engine = self.clone();
-        let query_id = *query_id;
-
-        // TRANSACTIONAL: all operations within this async block must be polled
-        // to completion
-
-        async move {
-            for callee in clean_edges.iter().copied() {
-                let edge = Edge { from: query_id, to: callee };
-
-                engine
-                    .computation_graph
-                    .persist
-                    .dirty_edge_set
-                    .remove(&edge, &mut tx)
-                    .await;
-            }
-
-            if let Some(node_info) = new_node_info {
-                engine
-                    .computation_graph
-                    .persist
-                    .node_info
-                    .insert(query_id, node_info, &mut tx)
-                    .await;
-            }
-
-            engine
-                .computation_graph
-                .persist
-                .last_verified
-                .insert(
-                    query_id,
-                    LastVerified(caller_information.timestamp()),
-                    &mut tx,
-                )
-                .await;
-
-            engine.submit_write_buffer(tx);
-        }
-        .guarded() // ensure the future is eventually polled to completion
-        .await;
     }
 
     pub(super) async fn is_edge_dirty(
@@ -892,29 +611,78 @@ impl<C: Config> Engine<C> {
         to: QueryID,
     ) -> bool {
         self.computation_graph
-            .persist
+            .database
             .dirty_edge_set
             .get(&Edge { from, to })
             .await
             .is_some()
     }
 
-    pub(super) async fn done_backward_projection(
+    /// Retrieving the query kind from a global database is safe since the
+    /// query kind is immutable once created.
+    pub(super) async fn get_query_kind(&self, query_id: &QueryID) -> QueryKind {
+        self.computation_graph.database.query_kind.get(query_id).await.unwrap()
+    }
+
+    /// Retrieving the query input from a global database is safe since the
+    /// query input is immutable once created.
+    pub(super) async fn get_query_input<Q: Query>(
+        &self,
+        hash128: &Compact128,
+    ) -> Q {
+        self.computation_graph
+            .database
+            .query_store
+            .get::<QueryInput<Q>>(hash128)
+            .await
+            .map(|x| x.0)
+            .unwrap()
+    }
+
+    /// Directly access the node info without any lock.
+    ///
+    /// This is only acceptable if you've made sure that the node has no
+    /// other concurrent mutations.
+    pub(super) async unsafe fn get_node_info_unchecked(
         &self,
         query_id: &QueryID,
-        backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
-    ) {
-        let mut tx = self.new_write_transaction();
+    ) -> NodeInfo {
+        self.computation_graph.database.node_info.get(query_id).await.unwrap()
+    }
 
+    /// Directly access the backward edges without any lock.
+    pub(super) async unsafe fn get_backward_edges_unchecked(
+        &self,
+        query_id: &QueryID,
+    ) -> impl Iterator<Item = QueryID> + Send {
+        self.computation_graph.database.backward_edges.get(query_id).await
+    }
+
+    pub(super) async fn get_external_input_queries(
+        &self,
+        stable_type_id: &StableTypeID,
+    ) -> impl Iterator<Item = Compact128> + Send {
         self.computation_graph
-            .persist
-            .pending_backward_projection
-            .remove(query_id, &mut tx)
+            .database
+            .external_input_queries
+            .get(stable_type_id)
+            .await
+    }
+
+    pub(crate) async fn get_node_snapshot_for_graph(
+        &self,
+        query_id: &QueryID,
+    ) -> (Option<QueryKind>, Option<ForwardEdgeOrder>) {
+        let node_info =
+            self.computation_graph.database.query_kind.get(query_id).await;
+        let forward_edge_order = self
+            .computation_graph
+            .database
+            .forward_edge_order
+            .get(query_id)
             .await;
 
-        backward_projection_lock_guard.done();
-
-        self.submit_write_buffer(tx);
+        (node_info, forward_edge_order)
     }
 }
 
@@ -931,12 +699,12 @@ impl<C: Config> Engine<C> {
     ) -> Option<QueryDebug> {
         let (Some(query_input), Some(query_value)) = (
             self.computation_graph
-                .persist
+                .database
                 .query_store
                 .get::<QueryInput<Q>>(&query_id)
                 .await,
             self.computation_graph
-                .persist
+                .database
                 .query_store
                 .get::<QueryResult<Q>>(&query_id)
                 .await,
@@ -957,5 +725,336 @@ impl<C: Config> Engine<C> {
     ) -> Pin<Box<dyn std::future::Future<Output = Option<QueryDebug>> + 's>>
     {
         Box::pin(async move { self.get_query_debug::<Q>(query_id).await })
+    }
+}
+
+impl<C: Config, Q: Query> Snapshot<C, Q> {
+    #[allow(clippy::option_option)]
+    pub async fn clean_query(
+        &mut self,
+        clean_edges: Vec<QueryID>,
+        new_tfc: Option<Interned<TransitiveFirewallCallees>>,
+        timestamp: Timestamp,
+    ) {
+        let mut tx = self.engine().new_write_transaction();
+
+        let new_node_info = if let Some(x) = new_tfc {
+            let mut current_node_info = self.node_info().await.unwrap();
+
+            current_node_info.transitive_firewall_callees = x;
+            current_node_info.transitive_firewall_callees_fingerprint = self
+                .engine()
+                .hash(&current_node_info.transitive_firewall_callees);
+
+            Some(current_node_info)
+        } else {
+            None
+        };
+
+        for callee in clean_edges.iter().copied() {
+            let edge = Edge { from: *self.query_id(), to: callee };
+
+            self.engine()
+                .computation_graph
+                .database
+                .dirty_edge_set
+                .remove(&edge, &mut tx)
+                .await;
+        }
+
+        if let Some(node_info) = new_node_info {
+            self.engine()
+                .computation_graph
+                .database
+                .node_info
+                .insert(*self.query_id(), node_info, &mut tx)
+                .await;
+        }
+
+        self.engine()
+            .computation_graph
+            .database
+            .last_verified
+            .insert(*self.query_id(), LastVerified(timestamp), &mut tx)
+            .await;
+
+        self.engine().submit_write_buffer(tx);
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[inline(never)]
+    pub(super) async fn set_computed(
+        &mut self,
+        query: Q,
+        query_value: Q::Value,
+        query_value_fingerprint: Option<Compact128>,
+        query_kind: QueryKind,
+        forward_edge_order: Arc<[QueryID]>,
+        forward_edge_observations: HashMap<
+            QueryID,
+            Observation,
+            C::BuildHasher,
+        >,
+        tfc_achetype: Interned<TransitiveFirewallCallees>,
+        has_pending_backward_projection: bool,
+        current_timestamp: Timestamp,
+        existing_forward_edges: Option<&[QueryID]>,
+        mut tx: WriteTransaction<C>,
+    ) {
+        let query_value_fingerprint = query_value_fingerprint
+            .unwrap_or_else(|| self.engine().hash(&query_value));
+        let transitive_firewall_callees_fingerprint =
+            self.engine().hash(&tfc_achetype);
+
+        let forward_edge_order = ForwardEdgeOrder(forward_edge_order);
+        let forward_edge_observations =
+            ForwardEdgeObservation::<C>(Arc::new(forward_edge_observations));
+
+        let node_info = NodeInfo::new(
+            query_value_fingerprint,
+            transitive_firewall_callees_fingerprint,
+            tfc_achetype,
+        );
+
+        let query_input = QueryInput::<Q>(query);
+        let query_result = QueryResult::<Q>(query_value);
+
+        {
+            // remove prior backward edges
+            if let Some(forward_edges) = existing_forward_edges {
+                for edge in forward_edges {
+                    self.engine()
+                        .computation_graph
+                        .database
+                        .backward_edges
+                        .remove(edge, self.query_id(), &mut tx)
+                        .await;
+                }
+            }
+
+            // set pending backward projection if needed
+            if has_pending_backward_projection {
+                self.engine()
+                    .computation_graph
+                    .database
+                    .pending_backward_projection
+                    .insert(
+                        *self.query_id(),
+                        PendingBackwardProjection(current_timestamp),
+                        &mut tx,
+                    )
+                    .await;
+            }
+
+            self.engine()
+                .computation_graph
+                .database
+                .node_info
+                .insert(*self.query_id(), node_info, &mut tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .query_kind
+                .insert(*self.query_id(), query_kind, &mut tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .last_verified
+                .insert(
+                    *self.query_id(),
+                    LastVerified(current_timestamp),
+                    &mut tx,
+                )
+                .await;
+
+            for edge in forward_edge_order.0.iter() {
+                self.engine()
+                    .computation_graph
+                    .database
+                    .backward_edges
+                    .insert(*edge, *self.query_id(), &mut tx)
+                    .await;
+            }
+
+            self.engine()
+                .computation_graph
+                .database
+                .forward_edge_order
+                .insert(*self.query_id(), forward_edge_order, &mut tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .forward_edge_observation
+                .insert(*self.query_id(), forward_edge_observations, &mut tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .query_store
+                .insert(
+                    self.query_id().compact_hash_128(),
+                    query_input,
+                    &mut tx,
+                )
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .query_store
+                .insert(
+                    self.query_id().compact_hash_128(),
+                    query_result,
+                    &mut tx,
+                )
+                .await;
+
+            // Track external input queries by type for refresh support
+            if query_kind.is_external_input() {
+                self.engine()
+                    .computation_graph
+                    .database
+                    .external_input_queries
+                    .insert(
+                        self.query_id().stable_type_id(),
+                        self.query_id().compact_hash_128(),
+                        &mut tx,
+                    )
+                    .await;
+            }
+
+            self.engine().submit_write_buffer(tx);
+        }
+    }
+
+    pub(super) async fn done_backward_projection(
+        &self,
+        backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
+    ) {
+        let mut tx = self.engine().new_write_transaction();
+        let engine = self.engine().clone();
+        let query_id = *self.query_id();
+
+        async move {
+            engine
+                .computation_graph
+                .database
+                .pending_backward_projection
+                .remove(&query_id, &mut tx)
+                .await;
+
+            backward_projection_lock_guard.done();
+
+            engine.submit_write_buffer(tx);
+        }
+        .guarded()
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn set_computed_input(
+        mut self,
+        query: Q,
+        query_hash_128: Compact128,
+        query_value: Q::Value,
+        query_value_fingerprint: Compact128,
+        tx: &mut WriteTransaction<C>,
+        set_input: bool,
+        timestamp: Timestamp,
+    ) {
+        let query_id = QueryID::new::<Q>(query_hash_128);
+
+        // if have an existing forward edges, unwire the backward edges
+        let existing_forward_edges = self.forward_edge_order().await;
+
+        let empty_forward_edges = ForwardEdgeOrder(Arc::from([]));
+        let empty_forward_edge_observations = ForwardEdgeObservation::<C>(
+            Arc::new(HashMap::with_hasher(C::BuildHasher::default())),
+        );
+
+        let transitive_firewall_callees =
+            self.engine().create_tfc_from_iter(std::iter::empty());
+        let transitive_firewall_callees_fingerprint =
+            self.engine().hash(&transitive_firewall_callees);
+
+        let node_info = NodeInfo::new(
+            query_value_fingerprint,
+            transitive_firewall_callees_fingerprint,
+            transitive_firewall_callees,
+        );
+
+        let query_input = QueryInput::<Q>(query);
+        let query_result = QueryResult::<Q>(query_value);
+
+        {
+            if let Some(forward_edges) = existing_forward_edges {
+                for edge in forward_edges.0.iter() {
+                    self.engine()
+                        .computation_graph
+                        .database
+                        .backward_edges
+                        .remove(edge, &query_id, tx)
+                        .await;
+                }
+            }
+
+            if set_input {
+                self.engine()
+                    .computation_graph
+                    .database
+                    .query_kind
+                    .insert(query_id, QueryKind::Input, tx)
+                    .await;
+            }
+
+            self.engine()
+                .computation_graph
+                .database
+                .last_verified
+                .insert(query_id, LastVerified(timestamp), tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .forward_edge_order
+                .insert(query_id, empty_forward_edges, tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .forward_edge_observation
+                .insert(query_id, empty_forward_edge_observations, tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .node_info
+                .insert(query_id, node_info, tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .query_store
+                .insert(query_id.compact_hash_128(), query_input, tx)
+                .await;
+
+            self.engine()
+                .computation_graph
+                .database
+                .query_store
+                .insert(query_id.compact_hash_128(), query_result, tx)
+                .await;
+        }
     }
 }

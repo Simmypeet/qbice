@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     Engine, ExecutionStyle,
     config::Config,
-    engine::computation_graph::{CallerInformation, lock::Computing},
+    engine::computation_graph::{CallerInformation, computing::QueryComputing},
     query::QueryID,
 };
 
@@ -12,7 +12,7 @@ use crate::{
 /// This aims to ensure cancelation safety in case of the task being yielded and
 /// canceled mid query.
 pub struct UndoRegisterCallee {
-    caller_computing: Arc<Computing>,
+    query_computing: Arc<QueryComputing>,
     callee_target: QueryID,
     defused: bool,
 }
@@ -20,10 +20,10 @@ pub struct UndoRegisterCallee {
 impl UndoRegisterCallee {
     /// Creates a new [`UndoRegisterCallee`] instance.
     pub const fn new(
-        caller_computing: Arc<Computing>,
+        query_computing: Arc<QueryComputing>,
         callee_target: QueryID,
     ) -> Self {
-        Self { caller_computing, callee_target, defused: false }
+        Self { query_computing, callee_target, defused: false }
     }
 
     /// Don't undo the registration when dropped.
@@ -36,7 +36,7 @@ impl Drop for UndoRegisterCallee {
             return;
         }
 
-        self.caller_computing.abort_callee(&self.callee_target);
+        self.query_computing.abort_callee(&self.callee_target);
     }
 }
 impl<C: Config> Engine<C> {

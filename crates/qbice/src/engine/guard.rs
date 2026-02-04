@@ -31,7 +31,9 @@ impl<T: Send + 'static> Future for Guard<T> {
 impl<T: Send + 'static> Drop for Guard<T> {
     fn drop(&mut self) {
         // If the future is still present, spawn it to ensure it completes.
+
         if let Some(future) = self.future.take() {
+            println!("RESPAWNING GUARDED FUTURE ON DROP");
             tokio::spawn(future);
         }
     }

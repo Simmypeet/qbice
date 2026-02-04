@@ -1,18 +1,16 @@
-use std::sync::Arc;
-
 use crossbeam::sync::WaitGroup;
 use thread_local::ThreadLocal;
 
 use crate::{
-    Engine, Query, TrackedEngine,
+    Query, TrackedEngine,
     config::Config,
     engine::{
         computation_graph::{
-            QueryWithID,
             caller::{
                 CallerInformation, CallerKind, CallerReason, QueryCaller,
             },
-            lock::{ComputingLockGuard, ComputingMode, LockGuard},
+            computing::{ComputingLockGuard, ComputingMode, WriteGuard},
+            database::Snapshot,
         },
         guard::GuardExt,
     },
@@ -57,25 +55,25 @@ impl<C: Config> Drop for GuardedTrackedEngine<C> {
     }
 }
 
-impl<C: Config> Engine<C> {
+impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[allow(clippy::too_many_lines)]
-    pub(super) async fn execute_query<Q: Query>(
-        self: &Arc<Self>,
-        query: &QueryWithID<'_, Q>,
-        caller_information: &CallerInformation,
+    pub(super) async fn execute_query(
+        mut self,
+        query: &Q,
         execute_query_for: ExecuteQueryFor,
+        caller_information: &CallerInformation,
         lock_guard: ComputingLockGuard<C>,
     ) {
         let wait_group = WaitGroup::new();
 
         let tracked_engine = TrackedEngine {
-            engine: self.clone(),
+            engine: self.engine().clone(),
             cache: ThreadLocal::new(),
             caller: CallerInformation::new(
                 CallerKind::Query(QueryCaller::new(
-                    query.id,
+                    *self.query_id(),
                     CallerReason::RequireValue(Some(wait_group)),
-                    lock_guard.computing().clone(),
+                    lock_guard.query_computing().clone(),
                 )),
                 caller_information.timestamp(),
                 caller_information.clone_active_computation_guard(),
@@ -83,11 +81,10 @@ impl<C: Config> Engine<C> {
         };
         let guarded_tracked_engine = GuardedTrackedEngine { tracked_engine };
 
-        let entry = self.executor_registry.get_executor_entry::<Q>();
+        let entry = self.engine().executor_registry.get_executor_entry::<Q>();
 
-        let result = entry
-            .invoke_executor::<Q>(query.query, &guarded_tracked_engine)
-            .await;
+        let result =
+            entry.invoke_executor::<Q>(query, &guarded_tracked_engine).await;
 
         // WAIT POINT: We must wait all the potentially spawned threads that
         // might hold references to the tracked engine to finish before
@@ -95,7 +92,7 @@ impl<C: Config> Engine<C> {
         // modify the query's state.
         drop(guarded_tracked_engine);
 
-        let is_in_scc = lock_guard.computing().is_in_scc();
+        let is_in_scc = lock_guard.query_computing().is_in_scc();
 
         // if `is_in_scc` is `true`, it means that the query is part of
         // a strongly connected component (SCC) and the
@@ -119,16 +116,12 @@ impl<C: Config> Engine<C> {
         // We must also hold `caller_information` alive until the end of this
         // async block, because it's needed to hold `ActiveComputationGuard`
 
-        let engine = self.clone();
-        let query_id = query.id;
-        let query = query.query.clone();
         let timestamp = caller_information.timestamp();
-        let caller_information = caller_information.clone();
+        let query = query.clone();
 
         async move {
-            let old_kind = engine.get_query_kind(&query_id).await;
-            let existing_forward_edges =
-                engine.get_forward_edges_order(&query_id).await;
+            let old_kind = self.query_kind().await;
+            let existing_forward_edges = self.forward_edge_order().await;
 
             // if the old node info is a firewall or projection node, we compare
             // the old and new value fingerprints to determine if we need to
@@ -141,22 +134,22 @@ impl<C: Config> Engine<C> {
                 && (old_kind.is_firewall() || old_kind.is_projection())
                 && execute_query_for == ExecuteQueryFor::RecomputeQuery
             {
-                let old_node_info =
-                    engine.get_node_info(&query_id).await.expect(
-                        "old node info should exist for recomputed firewall \
-                         or projection",
-                    );
+                let old_node_info = self.node_info().await.expect(
+                    "old node info should exist for recomputed firewall or \
+                     projection",
+                );
 
-                let fingerprint = engine.hash(&value);
+                let fingerprint = self.engine().hash(&value);
                 let updated = old_node_info.value_fingerprint() != fingerprint;
 
-                let mut write_buffer = engine.new_write_transaction();
+                let mut write_buffer = self.engine().new_write_transaction();
 
                 // if fingerprint has changed, we do dirty propagation
                 if updated {
-                    write_buffer = engine
+                    write_buffer = self
+                        .engine()
                         .dirty_propagate_from_batch(
-                            std::iter::once(query_id),
+                            std::iter::once(*self.query_id()),
                             write_buffer,
                         )
                         .await;
@@ -172,53 +165,40 @@ impl<C: Config> Engine<C> {
                     old_kind.is_firewall() && updated,
                 )
             } else {
-                (engine.new_write_transaction(), None, false)
+                (self.engine().new_write_transaction(), None, false)
             };
 
-            engine
-                .computing_lock_to_computed(
-                    query,
-                    query_id,
-                    value,
-                    query_value_fingerprint,
-                    lock_guard,
-                    need_backward_projection_propagation,
-                    timestamp,
-                    existing_forward_edges
-                        .as_ref()
-                        .map(std::convert::AsRef::as_ref),
-                    continuing_tx,
-                )
-                .await;
-
-            // if the firewall is being repaired, and it has pending backward
-            // projections, we need to do backward projections now.
-            if matches!(caller_information.kind(), CallerKind::RepairFirewall {
-                invoke_backward_projection: true
-            }) && need_backward_projection_propagation
-            {
-                engine
-                    .try_do_backward_projections(&query_id, &caller_information)
-                    .await;
-            }
+            self.computing_lock_to_computed(
+                query.clone(),
+                value,
+                query_value_fingerprint,
+                lock_guard,
+                need_backward_projection_propagation,
+                timestamp,
+                existing_forward_edges.as_ref().map(|x| x.0.as_ref()),
+                continuing_tx,
+            )
+            .await;
         }
         .guarded() // make sure the future will eventually complete
         .await;
     }
+}
 
-    pub(super) async fn continuation<Q: Query>(
-        self: &Arc<Self>,
-        query: &QueryWithID<'_, Q>,
+impl<C: Config, Q: Query> Snapshot<C, Q> {
+    pub async fn continuation(
+        self,
+        query: &Q,
         caller_information: &CallerInformation,
-        lock_guard: LockGuard<C>,
+        lock_guard: WriteGuard<C>,
     ) {
         match lock_guard {
-            LockGuard::ComputingLockGuard(lock_guard) => {
+            WriteGuard::ComputingLockGuard(lock_guard) => {
                 if lock_guard.computing_mode() == ComputingMode::Execute {
                     self.execute_query(
                         query,
-                        caller_information,
                         ExecuteQueryFor::FreshQuery,
+                        caller_information,
                         lock_guard,
                     )
                     .await;
@@ -228,9 +208,8 @@ impl<C: Config> Engine<C> {
                 }
             }
 
-            LockGuard::BackwardProjectionLockGuard(lock_guard) => {
+            WriteGuard::BackwardProjectionLockGuard(lock_guard) => {
                 self.invoke_backward_projections(
-                    &query.id,
                     caller_information,
                     lock_guard,
                 )
