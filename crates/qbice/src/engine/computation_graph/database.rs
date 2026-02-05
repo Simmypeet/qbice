@@ -784,7 +784,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     #[inline(never)]
     pub(super) async fn set_computed(
-        &mut self,
+        mut self,
         query: Q,
         query_value: Q::Value,
         query_value_fingerprint: Option<Compact128>,
@@ -801,6 +801,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         existing_forward_edges: Option<&[QueryID]>,
         mut tx: WriteTransaction<C>,
     ) {
+        self.upgrade_to_exclusive().await;
+
         let query_value_fingerprint = query_value_fingerprint
             .unwrap_or_else(|| self.engine().hash(&query_value));
         let transitive_firewall_callees_fingerprint =
@@ -934,30 +936,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         }
     }
 
-    pub(super) async fn done_backward_projection(
-        &self,
-        backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
-    ) {
-        let mut tx = self.engine().new_write_transaction();
-        let engine = self.engine().clone();
-        let query_id = *self.query_id();
-
-        async move {
-            engine
-                .computation_graph
-                .database
-                .pending_backward_projection
-                .remove(&query_id, &mut tx)
-                .await;
-
-            backward_projection_lock_guard.done();
-
-            engine.submit_write_buffer(tx);
-        }
-        .guarded()
-        .await;
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn set_computed_input(
         mut self,
@@ -1056,5 +1034,31 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 .insert(query_id.compact_hash_128(), query_result, tx)
                 .await;
         }
+    }
+
+    pub(super) async fn done_backward_projection(
+        mut self,
+        mut backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
+    ) {
+        let mut tx = self.engine().new_write_transaction();
+        let engine = self.engine().clone();
+        let query_id = *self.query_id();
+
+        self.upgrade_to_exclusive().await;
+
+        async move {
+            engine
+                .computation_graph
+                .database
+                .pending_backward_projection
+                .remove(&query_id, &mut tx)
+                .await;
+
+            engine.submit_write_buffer(tx);
+
+            backward_projection_lock_guard.done();
+        }
+        .guarded()
+        .await;
     }
 }

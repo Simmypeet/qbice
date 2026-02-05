@@ -445,14 +445,19 @@ impl<C: Config> Engine<C> {
         // pulling the value
         let value = loop {
             // exit SCC if any, otherwise deadlock may happen
-            if let Err(er) = self.exit_scc(&query.id, caller) {
-                // defuse the undo `register_callee` keep cyclic dependency
-                // detection correct
-                if let Some(undo) = undo_register {
-                    undo.defuse();
-                }
+            match self.exit_scc(&query.id, caller).await {
+                // continue to process
+                Ok(_) => {}
 
-                return Err(er);
+                Err(err) => {
+                    // defuse the undo `register_callee` keep cyclic dependency
+                    // detection correct
+                    if let Some(undo) = undo_register {
+                        undo.defuse();
+                    }
+
+                    return Err(err);
+                }
             }
 
             // acquire read snapshot
@@ -478,7 +483,8 @@ impl<C: Config> Engine<C> {
             // now the `query` state is held in computing state.
             // if `guard` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
-            let Some(guard) = snapshot.get_write_guard(slow_path, caller).await
+            let Some((snapshot, guard)) =
+                snapshot.get_write_guard(slow_path, caller).await
             else {
                 // try the fast path again
                 continue;

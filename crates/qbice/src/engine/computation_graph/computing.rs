@@ -7,6 +7,7 @@ use dashmap::{DashMap, DashSet, Entry};
 use parking_lot::RwLock;
 use qbice_stable_hash::Compact128;
 use qbice_storage::intern::Interned;
+use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
     Engine, ExecutionStyle, Query,
@@ -120,14 +121,29 @@ pub enum ComputingMode {
 
 #[derive(Debug)]
 pub struct QueryComputing {
+    notify: Arc<Notify>,
     callee_info: ComputingForwardEdges,
     is_in_scc: Arc<AtomicBool>,
     tfc: DashSet<QueryID>,
     query_kind: QueryKind,
 }
 
+impl QueryComputing {
+    pub fn notified_owned(&self) -> OwnedNotified {
+        self.notify.clone().notified_owned()
+    }
+}
+
 #[derive(Debug)]
-pub struct PendingBackwardProjection;
+pub struct PendingBackwardProjection {
+    notify: Arc<Notify>,
+}
+
+impl PendingBackwardProjection {
+    pub fn notified_owned(&self) -> OwnedNotified {
+        self.notify.clone().notified_owned()
+    }
+}
 
 pub struct BackwardProjectionLockGuard<C: Config> {
     engine: Arc<Engine<C>>,
@@ -136,28 +152,15 @@ pub struct BackwardProjectionLockGuard<C: Config> {
 }
 
 impl<C: Config> BackwardProjectionLockGuard<C> {
-    pub fn done(mut self) {
-        self.defused = true;
-
-        self.engine
-            .computation_graph
-            .computing
-            .backward_projection_lock
-            .remove(&self.query_id)
-            .expect(
-                "the pending backward projection lock guard has dropped and \
-                 tried to remove existing lock, but no entry found",
-            );
-    }
-}
-
-impl<C: Config> Drop for BackwardProjectionLockGuard<C> {
-    fn drop(&mut self) {
+    pub fn done(&mut self) {
         if self.defused {
             return;
         }
 
-        self.engine
+        self.defused = true;
+
+        let entry = self
+            .engine
             .computation_graph
             .computing
             .backward_projection_lock
@@ -166,7 +169,13 @@ impl<C: Config> Drop for BackwardProjectionLockGuard<C> {
                 "the pending backward projection lock guard has dropped and \
                  tried to remove existing lock, but no entry found",
             );
+
+        entry.1.notify.notify_waiters();
     }
+}
+
+impl<C: Config> Drop for BackwardProjectionLockGuard<C> {
+    fn drop(&mut self) { self.done(); }
 }
 
 pub struct Computing<C: Config> {
@@ -204,18 +213,18 @@ impl<C: Config> ComputingLockGuard<C> {
     pub const fn query_computing(&self) -> &Arc<QueryComputing> {
         &self.this_computing
     }
-
-    /// Don't undo the computing lock when dropped.
-    pub fn defuse(mut self) { self.defused = true; }
 }
 
-impl<C: Config> Drop for ComputingLockGuard<C> {
-    fn drop(&mut self) {
+impl<C: Config> ComputingLockGuard<C> {
+    pub fn done(&mut self) {
         if self.defused {
             return;
         }
 
-        self.engine
+        self.defused = true;
+
+        let entry = self
+            .engine
             .computation_graph
             .computing
             .computing_lock
@@ -224,7 +233,13 @@ impl<C: Config> Drop for ComputingLockGuard<C> {
                 "the computing lock guard has dropped and tried to remove \
                  existing computing lock, but no entry found",
             );
+
+        entry.1.notify.notify_waiters();
     }
+}
+
+impl<C: Config> Drop for ComputingLockGuard<C> {
+    fn drop(&mut self) { self.done(); }
 }
 
 impl<C: Config> Computing<C> {
@@ -235,6 +250,19 @@ impl<C: Config> Computing<C> {
         let guard = self.computing_lock.get(query_id)?;
         Some(guard.clone())
     }
+
+    pub fn try_get_notified_computing_lock(
+        &self,
+        query_id: &QueryID,
+    ) -> Option<(OwnedNotified, Arc<QueryComputing>)> {
+        let guard = self.computing_lock.get(query_id)?;
+        let notified = guard.notified_owned();
+        let guard_clone = guard.clone();
+
+        drop(guard);
+
+        Some((notified, guard_clone))
+    }
 }
 
 pub enum WriteGuard<C: Config> {
@@ -244,20 +272,22 @@ pub enum WriteGuard<C: Config> {
 
 impl<C: Config> Engine<C> {
     /// Exit early if a cyclic dependency is detected.
-    pub fn exit_scc(
+    pub(crate) async fn exit_scc(
         &self,
         callee: &QueryID,
         caller_information: &CallerInformation,
-    ) -> Result<(), CyclicError> {
-        let Some(running_state) =
-            self.computation_graph.computing.try_get_query_computing(callee)
+    ) -> Result<bool, CyclicError> {
+        let Some((notified, running_state)) = self
+            .computation_graph
+            .computing
+            .try_get_notified_computing_lock(callee)
         else {
-            return Ok(());
+            return Ok(true);
         };
 
         // if there is no caller, we are at the root.
         let Some(query_caller) = caller_information.get_query_caller() else {
-            return Ok(());
+            return Ok(true);
         };
 
         let is_in_scc =
@@ -271,7 +301,9 @@ impl<C: Config> Engine<C> {
             return Err(CyclicError);
         }
 
-        Ok(())
+        notified.await;
+
+        Ok(false)
     }
 
     /// Checks whether the stack of computing queries contains a cycle
@@ -348,9 +380,9 @@ impl<C: Config> Engine<C> {
 
 impl<C: Config, Q: Query> Snapshot<C, Q> {
     async fn computing_lock_guard(
-        &mut self,
+        mut self,
         caller_information: &CallerInformation,
-    ) -> Option<ComputingLockGuard<C>> {
+    ) -> Option<(Self, ComputingLockGuard<C>)> {
         // IMPORTANT: here we move the retrival logic outside the lock guard
         // to avoid holding the lock across await points
 
@@ -378,21 +410,29 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             },
 
             query_kind,
+            notify: Arc::new(Notify::new()),
             is_in_scc: Arc::new(AtomicBool::new(false)),
             tfc: DashSet::new(),
         });
 
-        let result = match self
-            .engine()
+        let engine = self.engine().clone();
+        let result = match engine
             .computation_graph
             .computing
             .computing_lock
             .entry(*self.query_id())
         {
-            dashmap::Entry::Occupied(_) => {
+            dashmap::Entry::Occupied(entry) => {
                 // there's some computing state already try again
+                let notified_owned = entry.get().notified_owned();
 
-                None
+                drop(entry);
+                drop(self);
+
+                // wait for the existing computing to finish
+                notified_owned.await;
+
+                return None;
             }
 
             dashmap::Entry::Vacant(vacant_entry) => {
@@ -408,28 +448,33 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             }
         };
 
-        if result.is_some() {
-            self.upgrade_to_exclusive().await;
-        }
-
-        result
+        result.map(|x| (self, x))
     }
 
     pub(super) async fn get_backward_projection_lock_guard(
-        &mut self,
-    ) -> Option<BackwardProjectionLockGuard<C>> {
-        let pending_backward_projection = PendingBackwardProjection;
+        self,
+    ) -> Option<(Self, BackwardProjectionLockGuard<C>)> {
+        let pending_backward_projection =
+            PendingBackwardProjection { notify: Arc::new(Notify::new()) };
 
-        let result = match self
-            .engine()
+        let engine = self.engine().clone();
+
+        let result = match engine
             .computation_graph
             .computing
             .backward_projection_lock
             .entry(*self.query_id())
         {
-            dashmap::Entry::Occupied(_) => {
-                // there's some computing state already try again
-                None
+            dashmap::Entry::Occupied(entry) => {
+                let notified = entry.get().notified_owned();
+
+                drop(entry);
+                drop(self);
+
+                // wait for the existing backward projection to finish
+                notified.await;
+
+                return None;
             }
 
             dashmap::Entry::Vacant(vacant_entry) => {
@@ -443,28 +488,24 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             }
         };
 
-        if result.is_some() {
-            self.upgrade_to_exclusive().await;
-        }
-
-        result
+        result.map(|x| (self, x))
     }
 
     pub(super) async fn get_write_guard(
-        &mut self,
+        self,
         slow_path: SlowPath,
         caller_information: &CallerInformation,
-    ) -> Option<WriteGuard<C>> {
+    ) -> Option<(Self, WriteGuard<C>)> {
         match slow_path {
             SlowPath::Computing => self
                 .computing_lock_guard(caller_information)
                 .await
-                .map(WriteGuard::ComputingLockGuard),
+                .map(|x| (x.0, WriteGuard::ComputingLockGuard(x.1))),
 
             SlowPath::BaackwardProjection => self
                 .get_backward_projection_lock_guard()
                 .await
-                .map(WriteGuard::BackwardProjectionLockGuard),
+                .map(|x| (x.0, WriteGuard::BackwardProjectionLockGuard(x.1))),
         }
     }
 }
@@ -476,21 +517,15 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         clean_edges: Vec<QueryID>,
         new_tfc: Option<Interned<TransitiveFirewallCallees>>,
         caller_information: &CallerInformation,
-        lock_guard: ComputingLockGuard<C>,
+        mut lock_guard: ComputingLockGuard<C>,
     ) {
+        self.upgrade_to_exclusive().await;
         let timsestamp = caller_information.timestamp();
 
         async move {
             self.clean_query(clean_edges, new_tfc, timsestamp).await;
 
-            self.engine()
-                .computation_graph
-                .computing
-                .computing_lock
-                .remove(self.query_id())
-                .expect("should've existed");
-
-            lock_guard.defuse();
+            lock_guard.done();
         }
         .guarded()
         .await;
@@ -499,11 +534,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn computing_lock_to_computed(
-        &mut self,
+        self,
         query: Q,
         value: Q::Value,
         query_value_fingerprint: Option<Compact128>,
-        lock_guard: ComputingLockGuard<C>,
+        mut lock_guard: ComputingLockGuard<C>,
         has_pending_backward_projection: bool,
         current_timestamp: Timestamp,
         existing_forward_edges: Option<&[QueryID]>,
@@ -549,13 +584,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         )
         .await;
 
-        lock_guard.defuse();
-
-        // done, remove the computing lock
-        self.engine()
-            .computation_graph
-            .computing
-            .computing_lock
-            .remove(self.query_id());
+        lock_guard.done();
     }
 }
