@@ -36,6 +36,7 @@ thread_local.workspace = true
 ouroboros.workspace = true
 tracing.workspace = true
 moka.workspace = true
+quick_cache.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

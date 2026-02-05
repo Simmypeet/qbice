@@ -1,6 +1,7 @@
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
-use dashmap::DashMap;
+use fxhash::FxBuildHasher;
+use quick_cache::{Lifecycle, UnitWeighter};
 use tokio::sync::RwLock;
 
 use crate::query::QueryID;
@@ -14,8 +15,27 @@ pub enum QueryLock {
 #[derive(Debug, Clone)]
 pub struct OwnedLock(Arc<RwLock<()>>);
 
-#[derive(Debug, Clone)]
-pub struct WeakLock(Weak<RwLock<()>>);
+#[derive(Debug, Clone, Default)]
+pub struct Pinner;
+
+impl Lifecycle<QueryID, OwnedLock> for Pinner {
+    type RequestState = ();
+
+    fn is_pinned(&self, _key: &QueryID, val: &OwnedLock) -> bool {
+        // the lock is used elsewhere, can't evict
+        Arc::strong_count(&val.0) > 1
+    }
+
+    fn begin_request(&self) -> Self::RequestState {}
+
+    fn on_evict(
+        &self,
+        _state: &mut Self::RequestState,
+        _key: QueryID,
+        _val: OwnedLock,
+    ) {
+    }
+}
 
 /// Manages query-level locks
 ///
@@ -27,66 +47,62 @@ pub struct WeakLock(Weak<RwLock<()>>);
 /// - Shared locks: required for reading query data (e.g. reading a query value
 ///   for use in computing another query)
 pub struct QueryLockManager {
-    cold: Arc<DashMap<QueryID, WeakLock>>,
-    hot: moka::sync::Cache<QueryID, OwnedLock>,
+    hot: quick_cache::sync::Cache<
+        QueryID,
+        OwnedLock,
+        UnitWeighter,
+        FxBuildHasher,
+        Pinner,
+    >,
 }
 
 impl QueryLockManager {
     /// Create a new LockManager with the given capacity for the hot cache.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn new(capacity: u64) -> Self {
-        let cold = Arc::new(DashMap::<QueryID, WeakLock>::new());
-        let hot = moka::sync::Cache::<QueryID, OwnedLock>::builder()
-            .max_capacity(capacity)
-            .eviction_listener({
-                let cold = cold.clone();
-                move |key, value, _| {
-                    // Drop the strong reference from the hot cache
-                    drop(value);
+        let cache = quick_cache::sync::Cache::<
+            QueryID,
+            OwnedLock,
+            UnitWeighter,
+            FxBuildHasher,
+            Pinner,
+        >::with(
+            capacity as usize,
+            capacity,
+            UnitWeighter,
+            FxBuildHasher::default(),
+            Pinner,
+        );
 
-                    cold.remove_if(&*key, |_, v| v.0.strong_count() == 0);
-                }
-            })
-            .build();
-
-        Self { cold, hot }
+        Self { hot: cache }
     }
 
     pub fn get_lock_instance(&self, query_id: &QueryID) -> OwnedLock {
-        // FAST PATH: Check hot cache first, no memory allocation needed, just
-        // an atomic count bump.
-        if let Some(lock) = self.hot.get(query_id) {
-            return lock;
+        loop {
+            // FAST PATH: Check hot cache first, no memory allocation needed,
+            // just an atomic count bump.
+            if let Some(lock) = self.hot.get(query_id) {
+                return lock;
+            }
+
+            match self.hot.get_value_or_guard(query_id, None) {
+                quick_cache::sync::GuardResult::Value(value) => return value,
+                quick_cache::sync::GuardResult::Guard(placeholder_guard) => {
+                    let owned_lock = OwnedLock(Arc::new(RwLock::new(())));
+
+                    if matches!(
+                        placeholder_guard.insert(owned_lock.clone()),
+                        Ok(())
+                    ) {
+                        return owned_lock;
+                    }
+                }
+
+                quick_cache::sync::GuardResult::Timeout => {
+                    unreachable!("we didn't request a timeout")
+                }
+            }
         }
-
-        // SLOW PATH: Not in hot cache, check cold cache.
-        let result = match self.cold.entry(*query_id) {
-            dashmap::Entry::Occupied(mut occupied_entry) => {
-                occupied_entry.get().0.upgrade().map_or_else(
-                    || {
-                        // The weak reference is dead, create a new one.
-                        let new_lock = OwnedLock(Arc::new(RwLock::new(())));
-
-                        occupied_entry
-                            .insert(WeakLock(Arc::downgrade(&new_lock.0)));
-
-                        new_lock
-                    },
-                    OwnedLock,
-                )
-            }
-            dashmap::Entry::Vacant(vacant_entry) => {
-                let new_lock = OwnedLock(Arc::new(RwLock::new(())));
-
-                vacant_entry.insert(WeakLock(Arc::downgrade(&new_lock.0)));
-
-                new_lock
-            }
-        };
-
-        // Insert into hot cache for faster access next time.
-        self.hot.insert(*query_id, result.clone());
-
-        result
     }
 
     pub async fn acquire_exclusive_lock(
