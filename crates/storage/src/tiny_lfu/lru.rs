@@ -1,3 +1,5 @@
+use std::hash::Hash;
+
 use fxhash::FxHashMap;
 
 #[derive(Debug)]
@@ -5,6 +7,65 @@ struct Entry<K> {
     val: K,
     prev: Option<usize>,
     next: Option<usize>,
+}
+
+pub struct Cursor<'x, K> {
+    lru: &'x mut Lru<K>,
+    current: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(unused)]
+pub enum MoveTo {
+    MoreRecent,
+    LessRecent,
+}
+
+impl<K: Eq + Hash + Clone> Cursor<'_, K> {
+    pub fn move_to(&mut self, direction: MoveTo) {
+        if let Some(current_idx) = self.current {
+            let entry = self.lru.entries[current_idx].as_ref().unwrap();
+            self.current = match direction {
+                MoveTo::MoreRecent => entry.prev,
+                MoveTo::LessRecent => entry.next,
+            };
+        }
+    }
+
+    pub fn get(&self) -> Option<&K> {
+        let current_idx = self.current?;
+        Some(&self.lru.entries[current_idx].as_ref().unwrap().val)
+    }
+
+    pub fn remove(&mut self, move_to: MoveTo) -> Option<K> {
+        let current_idx = self.current?;
+
+        let entry = self.lru.entries[current_idx].take().unwrap();
+
+        self.current = match move_to {
+            MoveTo::MoreRecent => entry.prev,
+            MoveTo::LessRecent => entry.next,
+        };
+
+        self.lru.index_map.remove(&entry.val);
+        self.lru.free_list.push(current_idx);
+
+        if let Some(prev_idx) = entry.prev {
+            self.lru.entries[prev_idx].as_mut().unwrap().next = entry.next;
+        } else {
+            self.lru.head = entry.next;
+        }
+
+        if let Some(next_idx) = entry.next {
+            self.lru.entries[next_idx].as_mut().unwrap().prev = entry.prev;
+        } else {
+            self.lru.tail = entry.prev;
+        }
+
+        Some(entry.val)
+    }
+
+    pub fn len(&self) -> usize { self.lru.len() }
 }
 
 /// A simple LRU (Least Recently Used) list implementation.
@@ -48,13 +109,6 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
             // Key doesn't exist, insert it at the head
             self.insert_at_head(key.clone());
         }
-    }
-
-    /// Peeks at the least recently used item (from tail) without removing it.
-    pub fn peek_lru(&self) -> Option<&K> {
-        let tail_idx = self.tail?;
-        let entry = self.entries[tail_idx].as_ref()?;
-        Some(&entry.val)
     }
 
     /// Pops the least recently used item (from tail).
@@ -163,6 +217,11 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
     }
 
     pub fn len(&self) -> usize { self.index_map.len() }
+
+    pub const fn least_recent_cursor(&mut self) -> Cursor<'_, K> {
+        let tail = self.tail;
+        Cursor { lru: self, current: tail }
+    }
 }
 
 #[cfg(test)]

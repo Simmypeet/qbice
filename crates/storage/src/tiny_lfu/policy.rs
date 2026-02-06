@@ -2,7 +2,10 @@ use std::hash::BuildHasher;
 
 use fxhash::{FxBuildHasher, FxHashMap};
 
-use crate::tiny_lfu::{lru, sketch::Sketch};
+use crate::tiny_lfu::{
+    lru::{self, MoveTo},
+    sketch::Sketch,
+};
 
 #[derive(Clone)]
 pub enum PolicyMessage<K> {
@@ -152,29 +155,32 @@ impl<K> Policy<K> {
         // getting stuck at the cost of possibly evicting a better candidate
         // or growing beyond capacity temporarily.
         let mut attempt = 0;
+        let mut cursor = self.probation.least_recent_cursor();
 
         while attempt <= MAX_ATTEMPTS {
             attempt += 1;
 
-            let victim_key = self.probation.peek_lru().unwrap();
+            let Some(victim_key) = cursor.get() else {
+                // no more victims to try
+                break;
+            };
+
             let victim_hash = hasher.hash_one(victim_key);
 
             let candidate_freq = self.sketch.estimate_frequency(candidate_hash);
             let victim_freq = self.sketch.estimate_frequency(victim_hash);
 
             if candidate_freq > victim_freq {
-                // if can't remove, resuffle and try again
+                // can't evict victim, try next
                 if !remove(victim_key) {
-                    // resuffle pinned victim to most recently used position
-                    let victim_key_owned = victim_key.clone();
-                    self.probation.hit(&victim_key_owned);
+                    cursor.move_to(MoveTo::MoreRecent);
 
                     continue;
                 }
 
                 // the main storage has confirmed removal of the victim,
                 // we can evict it safely
-                let evicted_key = self.probation.pop().unwrap();
+                let evicted_key = cursor.remove(MoveTo::MoreRecent).unwrap();
                 self.location_map.remove(&evicted_key);
 
                 self.location_map
@@ -185,9 +191,31 @@ impl<K> Policy<K> {
             }
 
             // candidate loses, evict it
+            if !remove(&candidate_key) {
+                // If the candidate is pinned, we can't evict it.
+                // We force-promote it to probation to keep tracking it.
+                self.location_map
+                    .insert(candidate_key.clone(), Location::Probation);
+                self.probation.hit(&candidate_key);
+                return;
+            }
+
             self.location_map.remove(&candidate_key);
             return;
         }
+
+        // if we reach here, it means we have exceeded MAX_ATTEMPTS and couldn't
+        // find a victim to evict (likely all pinned). So we have to evict the
+        // candidate itself.
+        if !remove(&candidate_key) {
+            // Cannot evict candidate either, so we keep it in probation.
+            self.location_map
+                .insert(candidate_key.clone(), Location::Probation);
+            self.probation.hit(&candidate_key);
+            return;
+        }
+
+        self.location_map.remove(&candidate_key);
     }
 
     pub fn attempt_to_trim_overflowing_cache(
@@ -200,27 +228,29 @@ impl<K> Policy<K> {
             self.max_capacity - self.window_capacity - self.protected_capacity;
         let mut attempted = 0;
 
-        'outer: while self.probation.len() > probation_capacity {
+        let mut cursor = self.probation.least_recent_cursor();
+
+        'outer: while cursor.len() > probation_capacity {
             // for each entry, we give it maximum MAX_ATTEMPTS to try to evict
             // it. if we exceed that, we stop trying to evict more entries as
             // it's likely that the cache is mostly pinned entries.
             while attempted <= MAX_ATTEMPTS {
                 attempted += 1;
 
-                let victim_key = self.probation.peek_lru().unwrap();
+                let Some(victim_key) = cursor.get() else {
+                    // no more victims to try
+                    break 'outer;
+                };
 
                 // if can't remove, resuffle and try again
                 if !remove(victim_key) {
-                    // resuffle pinned victim to most recently used position
-                    let victim_key_owned = victim_key.clone();
-                    self.probation.hit(&victim_key_owned);
-
+                    cursor.move_to(MoveTo::MoreRecent);
                     continue;
                 }
 
                 // the main storage has confirmed removal of the victim,
                 // we can evict it safely
-                let evicted_key = self.probation.pop().unwrap();
+                let evicted_key = cursor.remove(MoveTo::MoreRecent).unwrap();
                 self.location_map.remove(&evicted_key);
 
                 // reset attempt counter for next entry
