@@ -15,7 +15,6 @@ mod policy;
 mod single_flight;
 mod sketch;
 
-const MAINTENANCE_THRESHOLD: usize = 64;
 const MAINTENANCE_BATCH_SIZE: usize = 32;
 
 /// A listener trait for cache entry lifecycle events.
@@ -164,7 +163,7 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
         // immediately drop the shard lock to avoid lock contention
         drop(shard);
 
-        self.try_maintenance(Some(&PolicyMessage::ReadHit(key.clone())));
+        self.try_maintenance(Some(PolicyMessage::ReadHit(key.clone())));
 
         entry
     }
@@ -198,40 +197,38 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
 
         drop(shard);
 
-        self.try_maintenance(message.as_ref());
+        self.try_maintenance(message);
 
         t
     }
 
-    fn try_maintenance(&self, policy_message: Option<&PolicyMessage<K>>) {
-        let Some(policy_message) = policy_message else {
-            // opportunisitically try to lock and process messages
-            let Some(mut try_lock) = self.policy.try_lock() else {
-                return;
-            };
+    fn try_maintenance(&self, policy_message: Option<PolicyMessage<K>>) {
+        match (policy_message, self.policy.try_lock()) {
+            // no message and can't lock, can't do anything
+            (None, None) => {}
 
-            self.process_policy_message(&mut try_lock);
+            (None, Some(mut lock)) => {
+                // got the lock, process messages
+                self.process_policy_message(&mut lock);
+            }
 
-            return;
-        };
+            // have a message but can't lock, will enqueue
+            (Some(value), None) => {
+                // will enqueue later
+                self.message_queue.push(value);
+            }
 
-        self.message_queue.push(policy_message.clone());
+            (Some(value), Some(mut lock)) => {
+                // got the lock, process the message first
+                self.process_message(value, &mut lock);
 
-        // Try to process some messages if the queue is above the
-        // maintenance threshold.
-        if self.message_queue.len() < MAINTENANCE_THRESHOLD {
-            return;
+                // then process any queued messages
+                self.process_policy_message(&mut lock);
+            }
         }
-
-        // opportunistically try to lock and process messages
-        let Some(mut try_lock) = self.policy.try_lock() else {
-            return;
-        };
-
-        self.process_policy_message(&mut try_lock);
     }
 
-    fn process_policy_message(&self, policy: &mut Policy<K>) {
+    fn process_policy_message(&self, lock: &mut Policy<K>) {
         let mut processed = 0;
 
         while processed <= MAINTENANCE_BATCH_SIZE {
@@ -242,66 +239,72 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
                 break;
             };
 
-            match message {
-                PolicyMessage::ReadHit(key) => {
-                    let hash = self.hash(&key);
-                    policy.on_read_hit(&key, hash, true);
+            self.process_message(message, lock);
+        }
+    }
+
+    fn process_message(&self, message: PolicyMessage<K>, lock: &mut Policy<K>) {
+        match message {
+            PolicyMessage::ReadHit(key) => {
+                let hash = self.hash(&key);
+                lock.on_read_hit(&key, hash, true);
+            }
+
+            PolicyMessage::Write(key) => {
+                let hash = self.hash(&key);
+                lock.on_write(
+                    &key,
+                    hash,
+                    &self.build_hasher,
+                    self.remove_closure(),
+                );
+            }
+
+            PolicyMessage::Removed(key) => {
+                lock.on_removed(&key);
+            }
+        }
+
+        // before dropping the lock, we can try to overflow trimming
+        lock.attempt_to_trim_overflowing_cache(self.remove_closure());
+    }
+
+    fn remove_closure(&self) -> impl Fn(&K) -> bool + '_ {
+        // atomically determine if we can remove the key
+        |evicted_key| {
+            // IMPORTANT: must obtain exclusive access to
+            // also avoid eviction race
+            let mut shard = self
+                .storage
+                .write_shard(self.storage.shard_index(self.hash(evicted_key)));
+
+            match shard.entry(evicted_key.clone()) {
+                hash_map::Entry::Occupied(mut occupied_entry) => {
+                    let can_remove = {
+                        let value = occupied_entry.get_mut();
+
+                        !self.lifecycle_listener.is_pinned(evicted_key, value)
+                    };
+
+                    // IMPORTANT: we drop the value outside
+                    // of the lock to avoid potential large
+                    // value drop times blocking other
+                    // operations
+                    let value = if can_remove {
+                        Some(occupied_entry.remove_entry())
+                    } else {
+                        None
+                    };
+
+                    drop(shard);
+                    drop(value);
+
+                    true
                 }
 
-                PolicyMessage::Write(key) => {
-                    let hash = self.hash(&key);
-                    policy.on_write(
-                        &key,
-                        hash,
-                        &self.build_hasher,
-                        // atomically determine if we can remove the key
-                        |evicted_key| {
-                            // IMPORTANT: must obtain exclusive access to
-                            // also avoid eviction race
-                            let mut shard = self.storage.write_shard(
-                                self.storage
-                                    .shard_index(self.hash(evicted_key)),
-                            );
-
-                            match shard.entry(evicted_key.clone()) {
-                                hash_map::Entry::Occupied(
-                                    mut occupied_entry,
-                                ) => {
-                                    let can_remove = {
-                                        let value = occupied_entry.get_mut();
-
-                                        !self
-                                            .lifecycle_listener
-                                            .is_pinned(evicted_key, value)
-                                    };
-
-                                    // IMPORTANT: we drop the value outside
-                                    // of the lock to avoid potential large
-                                    // value drop times blocking other
-                                    // operations
-                                    let value = if can_remove {
-                                        Some(occupied_entry.remove_entry())
-                                    } else {
-                                        None
-                                    };
-
-                                    drop(shard);
-                                    drop(value);
-
-                                    true
-                                }
-
-                                hash_map::Entry::Vacant(_) => {
-                                    // already evicted
-                                    true
-                                }
-                            }
-                        },
-                    );
-                }
-
-                PolicyMessage::Removed(key) => {
-                    policy.on_removed(&key);
+                hash_map::Entry::Vacant(_) => {
+                    // already evicted
+                    true
                 }
             }
         }

@@ -190,6 +190,50 @@ impl<K> Policy<K> {
         }
     }
 
+    pub fn attempt_to_trim_overflowing_cache(
+        &mut self,
+        remove: impl Fn(&K) -> bool,
+    ) where
+        K: std::hash::Hash + Eq + Clone,
+    {
+        let probation_capacity =
+            self.max_capacity - self.window_capacity - self.protected_capacity;
+        let mut attempted = 0;
+
+        'outer: while self.probation.len() > probation_capacity {
+            // for each entry, we give it maximum MAX_ATTEMPTS to try to evict
+            // it. if we exceed that, we stop trying to evict more entries as
+            // it's likely that the cache is mostly pinned entries.
+            while attempted <= MAX_ATTEMPTS {
+                attempted += 1;
+
+                let victim_key = self.probation.peek_lru().unwrap();
+
+                // if can't remove, resuffle and try again
+                if !remove(victim_key) {
+                    // resuffle pinned victim to most recently used position
+                    let victim_key_owned = victim_key.clone();
+                    self.probation.hit(&victim_key_owned);
+
+                    continue;
+                }
+
+                // the main storage has confirmed removal of the victim,
+                // we can evict it safely
+                let evicted_key = self.probation.pop().unwrap();
+                self.location_map.remove(&evicted_key);
+
+                // reset attempt counter for next entry
+                attempted = 0;
+                continue 'outer;
+            }
+
+            // if we reach here, it means we have exceeded MAX_ATTEMPTS
+            // we'll stop trying to evict more entries
+            break;
+        }
+    }
+
     pub fn on_removed(&mut self, key: &K)
     where
         K: std::hash::Hash + Eq + Clone,
