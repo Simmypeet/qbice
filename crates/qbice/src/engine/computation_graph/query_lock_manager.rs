@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use fxhash::FxBuildHasher;
-use quick_cache::{Lifecycle, UnitWeighter};
+use qbice_storage::{
+    storage_engine::db_backed::default_shard_amount,
+    tiny_lfu::{LifecycleListener, TinyLFU},
+};
 use tokio::sync::RwLock;
 
 use crate::query::QueryID;
@@ -16,24 +18,13 @@ pub enum QueryLock {
 pub struct OwnedLock(Arc<RwLock<()>>);
 
 #[derive(Debug, Clone, Default)]
-pub struct Pinner;
+pub struct ActiveLockLifecycleListener;
 
-impl Lifecycle<QueryID, OwnedLock> for Pinner {
-    type RequestState = ();
-
-    fn is_pinned(&self, _key: &QueryID, val: &OwnedLock) -> bool {
-        // the lock is used elsewhere, can't evict
-        Arc::strong_count(&val.0) > 1
-    }
-
-    fn begin_request(&self) -> Self::RequestState {}
-
-    fn on_evict(
-        &self,
-        _state: &mut Self::RequestState,
-        _key: QueryID,
-        _val: OwnedLock,
-    ) {
+impl LifecycleListener<QueryID, OwnedLock> for ActiveLockLifecycleListener {
+    fn is_pinned(&self, _key: &QueryID, value: &mut OwnedLock) -> bool {
+        // Keep locks pinned while they are active (have at least one strong
+        // reference).
+        Arc::strong_count(&value.0) > 1
     }
 }
 
@@ -47,62 +38,36 @@ impl Lifecycle<QueryID, OwnedLock> for Pinner {
 /// - Shared locks: required for reading query data (e.g. reading a query value
 ///   for use in computing another query)
 pub struct QueryLockManager {
-    hot: quick_cache::sync::Cache<
-        QueryID,
-        OwnedLock,
-        UnitWeighter,
-        FxBuildHasher,
-        Pinner,
-    >,
+    hot: TinyLFU<QueryID, OwnedLock, ActiveLockLifecycleListener>,
 }
 
 impl QueryLockManager {
     /// Create a new LockManager with the given capacity for the hot cache.
     #[allow(clippy::cast_possible_truncation)]
     pub fn new(capacity: u64) -> Self {
-        let cache = quick_cache::sync::Cache::<
-            QueryID,
-            OwnedLock,
-            UnitWeighter,
-            FxBuildHasher,
-            Pinner,
-        >::with(
-            capacity as usize,
-            capacity,
-            UnitWeighter,
-            FxBuildHasher::default(),
-            Pinner,
-        );
+        let cache = TinyLFU::new(capacity as usize, default_shard_amount());
 
         Self { hot: cache }
     }
 
     pub fn get_lock_instance(&self, query_id: &QueryID) -> OwnedLock {
-        loop {
-            // FAST PATH: Check hot cache first, no memory allocation needed,
-            // just an atomic count bump.
-            if let Some(lock) = self.hot.get(query_id) {
-                return lock;
-            }
-
-            match self.hot.get_value_or_guard(query_id, None) {
-                quick_cache::sync::GuardResult::Value(value) => return value,
-                quick_cache::sync::GuardResult::Guard(placeholder_guard) => {
-                    let owned_lock = OwnedLock(Arc::new(RwLock::new(())));
-
-                    if matches!(
-                        placeholder_guard.insert(owned_lock.clone()),
-                        Ok(())
-                    ) {
-                        return owned_lock;
-                    }
-                }
-
-                quick_cache::sync::GuardResult::Timeout => {
-                    unreachable!("we didn't request a timeout")
-                }
-            }
+        // FAST PATH: Check hot cache first, no memory allocation needed,
+        // just an atomic count bump.
+        if let Some(lock) = self.hot.get(query_id) {
+            return lock;
         }
+
+        let lock_instance = OwnedLock(Arc::new(RwLock::new(())));
+
+        self.hot.entry(*query_id, |x| match x {
+            qbice_storage::tiny_lfu::Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(lock_instance.clone());
+                lock_instance
+            }
+            qbice_storage::tiny_lfu::Entry::Occupied(occupied_entry) => {
+                occupied_entry.get().clone()
+            }
+        })
     }
 
     pub async fn acquire_exclusive_lock(
