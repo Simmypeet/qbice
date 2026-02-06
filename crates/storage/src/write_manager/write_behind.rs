@@ -23,18 +23,16 @@ use std::{
     any::{Any, TypeId},
     cell::RefCell,
     collections::{BinaryHeap, HashMap},
+    ops::Not,
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     thread,
 };
 
-use crossbeam_deque::{Injector, Stealer};
-use crossbeam_utils::Backoff;
 use fxhash::FxBuildHasher;
-use parking_lot::{Condvar, Mutex};
 use thread_local::ThreadLocal;
 
 use crate::{
@@ -42,7 +40,7 @@ use crate::{
         KeyOfSetColumn, KvDatabase, WideColumn, WideColumnValue,
         WriteBatch as _,
     },
-    write_manager, write_transaction,
+    write_batch, write_manager,
 };
 
 pub(crate) trait WideColumnCache<
@@ -95,7 +93,7 @@ enum Task<'s> {
 }
 
 trait WriteEntry<Db: KvDatabase>: Any + Send + Sync + 'static {
-    fn write_to_db(&self, tx: &Db::WriteBatch);
+    fn write_to_db(&self, tx: &mut Db::WriteBatch);
     fn after_commit(&mut self, epoch: Epoch) -> Task<'_>;
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync);
 }
@@ -103,7 +101,7 @@ trait WriteEntry<Db: KvDatabase>: Any + Send + Sync + 'static {
 impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase> WriteEntry<Db>
     for TypedWideColumnWrites<C, V, Db>
 {
-    fn write_to_db(&self, tx: &<Db as KvDatabase>::WriteBatch) {
+    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
         for (key, value_opt) in &self.writes {
             match value_opt {
                 Some(value) => tx.put(key, value),
@@ -194,7 +192,7 @@ impl<Db: KvDatabase> WideColumnWrites<Db> {
         }
     }
 
-    pub(super) fn write_to_db(&self, tx: &<Db as KvDatabase>::WriteBatch) {
+    pub(super) fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
         for write_entry in self.writes.values() {
             write_entry.write_to_db(tx);
         }
@@ -229,7 +227,7 @@ struct TypedKeyOfSetWrites<C: KeyOfSetColumn, Db: KvDatabase> {
 impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
     for TypedKeyOfSetWrites<C, Db>
 {
-    fn write_to_db(&self, tx: &<Db as KvDatabase>::WriteBatch) {
+    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
         for (key, element_map) in &self.writes {
             for (element, op) in element_map {
                 match op {
@@ -323,7 +321,7 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
         }
     }
 
-    pub(super) fn write_to_db(&self, tx: &<Db as KvDatabase>::WriteBatch) {
+    pub(super) fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
         for write_entry in self.writes.values() {
             write_entry.write_to_db(tx);
         }
@@ -404,33 +402,29 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
 /// writer.submit_write_transaction(buffer);
 /// // Writes will be flushed to database in background
 /// ```
-pub struct WriteTransaction<Db: KvDatabase> {
+pub struct WriteBatch<Db: KvDatabase> {
     pub(super) wide_column_writes: WideColumnWrites<Db>,
     pub(super) key_of_set_writes: KeyOfSetWrites<Db>,
-    write_batch: Option<Db::WriteBatch>,
     epoch: Epoch,
     active: bool,
 }
 
-impl<Db: KvDatabase> write_transaction::WriteTransaction
-    for WriteTransaction<Db>
-{
-}
+impl<Db: KvDatabase> write_batch::WriteBatch for WriteBatch<Db> {}
 
-impl<Db: KvDatabase> Drop for WriteTransaction<Db> {
+impl<Db: KvDatabase> Drop for WriteBatch<Db> {
     fn drop(&mut self) {
         assert!(!self.active, "WriteBuffer dropped while still active");
     }
 }
 
-impl<Db: KvDatabase> std::fmt::Debug for WriteTransaction<Db> {
+impl<Db: KvDatabase> std::fmt::Debug for WriteBatch<Db> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WriteBuffer").finish_non_exhaustive()
     }
 }
 
-impl<Db: KvDatabase> WriteTransaction<Db> {
-    fn write_to_db(&self, tx: &<Db as KvDatabase>::WriteBatch) {
+impl<Db: KvDatabase> WriteBatch<Db> {
+    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
         self.wide_column_writes.write_to_db(tx);
         self.key_of_set_writes.write_to_db(tx);
     }
@@ -463,12 +457,11 @@ impl<Db: KvDatabase> WriteTransaction<Db> {
     pub(crate) const fn epoch(&self) -> Epoch { self.epoch }
 }
 
-impl<Db: KvDatabase> WriteTransaction<Db> {
-    fn new(epoch: Epoch, active: bool, write_batch: Db::WriteBatch) -> Self {
+impl<Db: KvDatabase> WriteBatch<Db> {
+    fn new(epoch: Epoch, active: bool) -> Self {
         Self {
             wide_column_writes: WideColumnWrites::new(),
             key_of_set_writes: KeyOfSetWrites::new(),
-            write_batch: Some(write_batch),
             active,
             epoch,
         }
@@ -555,30 +548,61 @@ impl<Db: KvDatabase> WriteTransaction<Db> {
 /// drop(write_manager);
 /// ```
 pub struct WriteBehind<Db: KvDatabase> {
-    registry: Arc<Registry<Db>>,
-    write_handles: Vec<thread::JoinHandle<()>>,
+    commit_sender: Option<crossbeam_channel::Sender<WriteTask<Db>>>,
     commit_handle: Option<thread::JoinHandle<()>>,
+
+    after_commit_handle: Option<thread::JoinHandle<()>>,
+
     pool: Arc<WriteBufferPool<Db>>,
 }
 
 impl<Db: KvDatabase> write_manager::WriteManager for WriteBehind<Db> {
-    type WriteTransaction = WriteTransaction<Db>;
+    type WriteBatch = WriteBatch<Db>;
 
-    fn new_write_transaction(&self) -> Self::WriteTransaction {
-        Self::new_write_transaction(self)
+    fn new_write_batch(&self) -> Self::WriteBatch {
+        Self::new_write_batch(self)
     }
 
-    fn submit_write_transaction(
-        &self,
-        write_transaction: Self::WriteTransaction,
-    ) {
-        Self::submit_write_transaction(self, write_transaction);
+    fn submit_write_batch(&self, write_transaction: Self::WriteBatch) {
+        Self::submit_write_batch(self, write_transaction);
     }
 }
 
 impl<Db: KvDatabase> std::fmt::Debug for WriteBehind<Db> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BackgroundWriter").finish_non_exhaustive()
+    }
+}
+
+struct CurrentBatch<Db: KvDatabase> {
+    processed_logical_batch: Vec<WriteTask<Db>>,
+    db_write_batch: Db::WriteBatch,
+    expected_epoch: Epoch,
+}
+
+impl<Db: KvDatabase> CurrentBatch<Db> {
+    pub fn flush(
+        &mut self,
+        db: &Db,
+        after_commit_sender: &crossbeam_channel::Sender<AfterCommitTask<Db>>,
+    ) {
+        // commit physical batch
+        let to_commit_db_batch =
+            std::mem::replace(&mut self.db_write_batch, db.write_batch());
+        let to_commit_logical_batches =
+            std::mem::take(&mut self.processed_logical_batch);
+
+        // commit physical batch
+        to_commit_db_batch.commit();
+
+        // after commit actions
+        for logical_batch in to_commit_logical_batches {
+            after_commit_sender
+                .send(AfterCommitTask {
+                    write_buffer: logical_batch.write_buffer,
+                })
+                .unwrap();
+        }
     }
 }
 
@@ -619,155 +643,145 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     /// // Shutdown gracefully on drop
     /// drop(writer);
     /// ```
-    pub fn new(num_threads: usize, db: Db) -> Self {
-        let injector = Injector::new();
-        let mut workers = Vec::new();
-        let mut stealers = Vec::new();
-
+    pub fn new(db: Db) -> Self {
         let (commit_sender, commit_receiver) =
-            crossbeam_channel::unbounded::<CommitTask<Db>>();
+            crossbeam_channel::unbounded::<WriteTask<Db>>();
+        let (after_commit_sender, after_commit_receiver) =
+            crossbeam_channel::unbounded::<AfterCommitTask<Db>>();
 
-        // Create Local Queues
-        for _ in 0..num_threads {
-            let w = crossbeam_deque::Worker::new_lifo();
-            stealers.push(w.stealer());
-            workers.push(w);
-        }
-
-        let registry = Arc::new(Registry {
-            injector,
-            stealers,
-            jobs_event_counter: AtomicUsize::new(0),
-            sleeping_threads: AtomicUsize::new(0),
-            shutdown: Mutex::new(false),
-            condvar: Condvar::new(),
-        });
-
-        // Spawn Threads
-        let handles = workers
-            .into_iter()
-            .enumerate()
-            .map(|(i, local)| {
-                let registry = registry.clone();
-                let commit_sender = commit_sender.clone();
-
-                thread::Builder::new()
-                    .name(format!("bg_writer_{i}"))
-                    .spawn(move || {
-                        let worker = WorkerThread {
-                            local,
-                            registry,
-                            sender: commit_sender,
-                        };
-                        worker.run();
-                    })
-                    .unwrap()
-            })
-            .collect();
-
-        let pool = Arc::new(WriteBufferPool::new(db));
+        let pool = Arc::new(WriteBufferPool::new());
 
         Self {
-            registry,
-            write_handles: handles,
+            commit_sender: Some(commit_sender),
             commit_handle: Some({
                 let commit_receiver = commit_receiver;
-                let pool = pool.clone();
 
                 thread::Builder::new()
                     .name("bg_writer_commit".to_string())
                     .spawn(move || {
-                        // NOTE: we create a dedicated single-threaded runtime
-                        // here because we don't want comit tasks to be
-                        // interfered with by other async tasks that might be
-                        // spawned in the same thread.
-                        let runtime =
-                            tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                                .unwrap();
+                        Self::commit_worker(
+                            &commit_receiver,
+                            after_commit_sender,
+                            &db,
+                        );
+                    })
+                    .unwrap()
+            }),
 
+            after_commit_handle: Some({
+                let after_commit_receiver = after_commit_receiver;
+                let pool = pool.clone();
+
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                thread::Builder::new()
+                    .name("bg_writer_after_commit".to_string())
+                    .spawn(move || {
                         runtime.block_on(async {
-                            Self::commit_worker(&commit_receiver, &pool).await;
+                            Self::after_commit_worker(
+                                &after_commit_receiver,
+                                &pool,
+                            )
+                            .await;
                         });
                     })
                     .unwrap()
             }),
+
             pool,
         }
     }
 
     /// Creates a new write buffer for accumulating write operations.
     #[must_use]
-    pub fn new_write_transaction(&self) -> WriteTransaction<Db> {
-        self.pool.get_buffer()
-    }
+    pub fn new_write_batch(&self) -> WriteBatch<Db> { self.pool.get_buffer() }
 
     /// Submits a write buffer to be processed by the background writer.
-    pub fn submit_write_transaction(&self, write_buffer: WriteTransaction<Db>) {
+    pub fn submit_write_batch(&self, write_buffer: WriteBatch<Db>) {
         let write_task = WriteTask { write_buffer };
 
-        // Push to global queue
-        self.registry.injector.push(write_task);
+        self.commit_sender.as_ref().unwrap().send(write_task).unwrap();
+    }
 
-        // Increment JEC
-        self.registry.jobs_event_counter.fetch_add(1, Ordering::SeqCst);
+    async fn after_commit_worker(
+        receiver: &crossbeam_channel::Receiver<AfterCommitTask<Db>>,
+        pool: &WriteBufferPool<Db>,
+    ) {
+        while let Ok(mut task) = receiver.recv() {
+            let epoch = task.write_buffer.epoch();
 
-        // Notify sleeping threads
-        if self.registry.sleeping_threads.load(Ordering::SeqCst) > 0 {
-            self.registry.condvar.notify_one();
+            task.write_buffer.after_commit(epoch).await;
+            pool.return_buffer(task.write_buffer);
         }
     }
 
-    async fn commit_worker(
-        receiver: &crossbeam_channel::Receiver<CommitTask<Db>>,
-        pool: &WriteBufferPool<Db>,
+    fn commit_worker(
+        receiver: &crossbeam_channel::Receiver<WriteTask<Db>>,
+        after_commit_sender: crossbeam_channel::Sender<AfterCommitTask<Db>>,
+        db: &Db,
     ) {
-        let mut expected_epoch = Epoch(0);
-        let mut pending_commits = BinaryHeap::new();
+        let mut holdback_queues = BinaryHeap::new();
+
+        let mut current_batch = CurrentBatch {
+            processed_logical_batch: Vec::new(),
+            db_write_batch: db.write_batch(),
+            expected_epoch: Epoch(0),
+        };
 
         while let Ok(task) = receiver.recv() {
-            pending_commits.push(task);
+            holdback_queues.push(task);
 
             Self::process_pending_commits(
-                &mut pending_commits,
-                &mut expected_epoch,
-                pool,
-            )
-            .await;
+                &mut holdback_queues,
+                &mut current_batch,
+                &after_commit_sender,
+                db,
+            );
         }
 
         // Process remaining commits
         Self::process_pending_commits(
-            &mut pending_commits,
-            &mut expected_epoch,
-            pool,
-        )
-        .await;
+            &mut holdback_queues,
+            &mut current_batch,
+            &after_commit_sender,
+            db,
+        );
+
+        // flush any remaining in current batch
+        current_batch.flush(db, &after_commit_sender);
 
         // should be empty now
-        assert!(pending_commits.is_empty());
+        assert!(holdback_queues.is_empty());
+
+        // close after commit sender
+        drop(after_commit_sender);
     }
 
-    async fn process_pending_commits(
-        pending_commits: &mut BinaryHeap<CommitTask<Db>>,
-        expected_epoch: &mut Epoch,
-        pool: &WriteBufferPool<Db>,
+    fn process_pending_commits(
+        pending_commits: &mut BinaryHeap<WriteTask<Db>>,
+        current_batch: &mut CurrentBatch<Db>,
+        after_commit_sender: &crossbeam_channel::Sender<AfterCommitTask<Db>>,
+        db: &Db,
     ) {
         while let Some(top) = pending_commits.peek() {
-            if top.write_task.write_buffer.epoch == *expected_epoch {
-                let mut task = pending_commits.pop().unwrap();
+            if top.write_buffer.epoch == current_batch.expected_epoch {
+                let task = pending_commits.pop().unwrap();
 
-                task.write_batch.commit();
-                task.write_task
-                    .write_buffer
-                    .after_commit(task.write_task.write_buffer.epoch)
-                    .await;
+                task.write_buffer
+                    .write_to_db(&mut current_batch.db_write_batch);
 
-                expected_epoch.0 += 1;
+                // push into current batch
+                current_batch.processed_logical_batch.push(task);
 
-                // return write buffer to pool
-                pool.return_buffer(task.write_task.write_buffer);
+                current_batch.expected_epoch.0 += 1;
+
+                // commit if the physical batch is "big enough"
+                if current_batch.db_write_batch.should_write_more().not() {
+                    current_batch.flush(db, after_commit_sender);
+                }
             } else {
                 break;
             }
@@ -777,224 +791,71 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
 impl<Db: KvDatabase> Drop for WriteBehind<Db> {
     fn drop(&mut self) {
-        // Signal shutdown
-        *self.registry.shutdown.lock() = true;
-
-        self.registry.condvar.notify_all();
-
-        // Join all threads
-        for handle in self.write_handles.drain(..) {
-            let _ = handle.join();
-        }
-
-        // Join commit thread
+        let _ = self.commit_sender.take().unwrap();
         let _ = self.commit_handle.take().unwrap().join();
+
+        let _ = self.after_commit_handle.take().unwrap().join();
     }
+}
+
+struct AfterCommitTask<Db: KvDatabase> {
+    write_buffer: WriteBatch<Db>,
 }
 
 struct WriteTask<Db: KvDatabase> {
-    write_buffer: WriteTransaction<Db>,
+    write_buffer: WriteBatch<Db>,
 }
 
-struct CommitTask<Db: KvDatabase> {
-    write_task: WriteTask<Db>,
-    write_batch: Db::WriteBatch,
-}
-
-impl<Db: KvDatabase> PartialEq for CommitTask<Db> {
+impl<Db: KvDatabase> PartialEq for WriteTask<Db> {
     fn eq(&self, other: &Self) -> bool {
-        self.write_task.write_buffer.epoch
-            == other.write_task.write_buffer.epoch
+        self.write_buffer.epoch == other.write_buffer.epoch
     }
 }
 
-impl<Db: KvDatabase> Eq for CommitTask<Db> {}
+impl<Db: KvDatabase> Eq for WriteTask<Db> {}
 
-impl<Db: KvDatabase> PartialOrd for CommitTask<Db> {
+impl<Db: KvDatabase> PartialOrd for WriteTask<Db> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<Db: KvDatabase> Ord for CommitTask<Db> {
+impl<Db: KvDatabase> Ord for WriteTask<Db> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse order for min-heap behavior
-        other
-            .write_task
-            .write_buffer
-            .epoch
-            .cmp(&self.write_task.write_buffer.epoch)
-    }
-}
-
-#[derive(Debug)]
-struct Registry<Db: KvDatabase> {
-    injector: Injector<WriteTask<Db>>,
-    stealers: Vec<Stealer<WriteTask<Db>>>,
-
-    jobs_event_counter: AtomicUsize,
-    sleeping_threads: AtomicUsize,
-
-    shutdown: Mutex<bool>,
-    condvar: Condvar,
-}
-
-struct WorkerThread<Db: KvDatabase> {
-    local: crossbeam_deque::Worker<WriteTask<Db>>,
-    registry: Arc<Registry<Db>>,
-    sender: crossbeam_channel::Sender<CommitTask<Db>>,
-}
-
-impl<Db: KvDatabase> WorkerThread<Db> {
-    fn run(&self) {
-        // Init the backoff strategy (Rayon uses this for spinning)
-        let backoff = Backoff::new();
-
-        loop {
-            // A. CHECK SHUTDOWN
-            if *self.registry.shutdown.lock() {
-                // Drain all queues: local, global, and steal from others
-                while let Some(task) = self.find_work() {
-                    self.process_task(task);
-                }
-                break;
-            }
-
-            // B. SNAPSHOT THE JEC
-            // We remember "what time it was" before we started looking for
-            // work.
-            let last_jec =
-                self.registry.jobs_event_counter.load(Ordering::SeqCst);
-
-            // C. SEARCH FOR WORK (Local -> Global -> Steal)
-            if let Some(task) = self.find_work() {
-                self.process_task(task);
-                // Reset backoff because we were useful
-                backoff.reset();
-                continue;
-            }
-
-            // D. THE "SLEEPY" PHASE (Spinning)
-            // If we found no work, we don't park immediately. We spin a bit.
-            if backoff.is_completed() {
-                // E. THE "PARKING" PHASE (Sleeping)
-                self.wait_until_work_appears(last_jec);
-                backoff.reset();
-            } else {
-                // Snooze efficiently (CPU instruction 'pause')
-                backoff.snooze();
-            }
-        }
-    }
-
-    fn process_task(&self, mut task: WriteTask<Db>) {
-        let write_batch =
-            task.write_buffer.write_batch.take().expect(
-                "Write batch should've been set when retrieved from pool",
-            );
-
-        task.write_buffer.write_to_db(&write_batch);
-
-        // send to commit thread
-        self.sender
-            .send(CommitTask { write_task: task, write_batch })
-            .expect("failed to send CommitTask to commit channel");
-    }
-
-    fn find_work(&self) -> Option<WriteTask<Db>> {
-        // 1. Pop Local
-        self.local
-            .pop()
-            .or_else(|| {
-                // 2. Pop Global
-                std::iter::repeat_with(|| {
-                    self.registry.injector.steal_batch_and_pop(&self.local)
-                })
-                .find(|s| !s.is_retry())
-                .and_then(crossbeam_deque::Steal::success)
-            })
-            .or_else(|| {
-                // 3. Steal from others
-                self.registry
-                    .stealers
-                    .iter()
-                    .map(crossbeam_deque::Stealer::steal)
-                    .find(crossbeam_deque::Steal::is_success)
-                    .and_then(crossbeam_deque::Steal::success)
-            })
-    }
-
-    // This is the core synchronization logic similar to Rayon
-    fn wait_until_work_appears(&self, last_jec: usize) {
-        // Check the JEC again *while holding the lock*.
-        // If the counter changed between the time we started searching
-        // (last_jec) and now, it means work was pushed while we were
-        // failing to find it. We should NOT sleep.
-        let current_jec =
-            self.registry.jobs_event_counter.load(Ordering::SeqCst);
-
-        if current_jec != last_jec {
-            // Work arrived! Return immediately to search loop.
-            return;
-        }
-
-        // 3. Mark ourselves as sleeping
-        let mut shutdown = self.registry.shutdown.lock();
-
-        if *shutdown {
-            // Shutdown signaled while acquiring lock
-            return;
-        }
-
-        self.registry.sleeping_threads.fetch_add(1, Ordering::SeqCst);
-
-        // 4. Wait
-        // Check shutdown again to avoid hanging forever if shutdown happened
-        // during lock
-        self.registry.condvar.wait(&mut shutdown);
-
-        // 5. We woke up! Mark ourselves as active.
-        self.registry.sleeping_threads.fetch_sub(1, Ordering::SeqCst);
+        other.write_buffer.epoch.cmp(&self.write_buffer.epoch)
     }
 }
 
 struct WriteBufferPool<Db: KvDatabase> {
-    pool: ThreadLocal<RefCell<Vec<WriteTransaction<Db>>>>,
-    db: Db,
+    pool: ThreadLocal<RefCell<Vec<WriteBatch<Db>>>>,
     epoch: AtomicU64,
 }
 
 impl<Db: KvDatabase> WriteBufferPool<Db> {
     #[must_use]
-    pub const fn new(db: Db) -> Self {
-        Self { pool: ThreadLocal::new(), db, epoch: AtomicU64::new(0) }
+    pub const fn new() -> Self {
+        Self { pool: ThreadLocal::new(), epoch: AtomicU64::new(0) }
     }
 
-    pub fn get_buffer(&self) -> WriteTransaction<Db> {
+    pub fn get_buffer(&self) -> WriteBatch<Db> {
         let curr_epoch = self.epoch.fetch_add(1, Ordering::SeqCst);
         let curr_pool = self.pool.get_or(|| RefCell::new(Vec::new()));
 
         let mut pool = curr_pool.borrow_mut();
 
         pool.pop().map_or_else(
-            || {
-                WriteTransaction::new(
-                    Epoch(curr_epoch),
-                    true,
-                    self.db.write_batch(),
-                )
-            },
+            || WriteBatch::new(Epoch(curr_epoch), true),
             |mut buffer| {
                 buffer.epoch = Epoch(curr_epoch);
                 buffer.active = true;
-                buffer.write_batch = Some(self.db.write_batch());
 
                 buffer
             },
         )
     }
 
-    pub fn return_buffer(&self, mut buffer: WriteTransaction<Db>) {
+    pub fn return_buffer(&self, mut buffer: WriteBatch<Db>) {
         buffer.active = false;
 
         self.pool.get_or(|| RefCell::new(Vec::new())).borrow_mut().push(buffer);

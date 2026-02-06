@@ -8,7 +8,6 @@ use std::{path::Path, sync::Arc};
 
 use dashmap::DashMap;
 use ouroboros::self_referencing;
-use parking_lot::Mutex;
 use qbice_serialize::{
     Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
 };
@@ -26,6 +25,9 @@ use crate::{
     },
     sharded::default_shard_amount,
 };
+
+/// Alias for RocksDB error type.
+pub type RocksDBError = rust_rocksdb::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ColumnKind {
@@ -389,33 +391,45 @@ impl Impl {
 /// [`WriteTransaction::commit`] is called.
 ///
 /// [`WriteTransaction::commit`]: crate::kv_database::WriteBatch::commit
-pub struct RocksDBWriteTransaction {
+pub struct RocksDBWriteBatch {
     /// Reference to the parent database.
     db: Arc<Impl>,
 
     /// The write batch accumulating all operations.
-    batch: Mutex<rust_rocksdb::WriteBatch>,
+    batch: rust_rocksdb::WriteBatch,
+
+    /// Estimated size of the write batch.
+    estimated_size: usize,
 }
 
-impl std::fmt::Debug for RocksDBWriteTransaction {
+unsafe impl Sync for RocksDBWriteBatch {}
+
+impl std::fmt::Debug for RocksDBWriteBatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RocksDBWriteTransaction")
             .field("db", &self.db)
             .field("batch", &"<WriteBatch>")
+            .field("estimated_size", &self.estimated_size)
             .finish()
     }
 }
 
-impl RocksDBWriteTransaction {
+impl RocksDBWriteBatch {
     /// Creates a new write transaction.
     fn new(db: Arc<Impl>) -> Self {
-        Self { db, batch: Mutex::new(rust_rocksdb::WriteBatch::default()) }
+        Self {
+            db,
+            batch: rust_rocksdb::WriteBatch::default(),
+            estimated_size: 0,
+        }
     }
 }
 
-impl WriteBatch for RocksDBWriteTransaction {
+const PREFERRED_WRITE_BATCH_SIZE: usize = 4 * 1024 * 1024; // 4MB
+
+impl WriteBatch for RocksDBWriteBatch {
     fn put<W: WideColumn, C: WideColumnValue<W>>(
-        &self,
+        &mut self,
         key: &W::Key,
         value: &C,
     ) {
@@ -427,30 +441,32 @@ impl WriteBatch for RocksDBWriteTransaction {
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
         self.db.encode_value(value, &mut value_buffer);
 
-        self.batch.lock().put_cf(
-            &cf,
-            key_buffer.as_slice(),
-            value_buffer.as_slice(),
-        );
+        self.batch.put_cf(&cf, key_buffer.as_slice(), value_buffer.as_slice());
+
+        // accumulate estimated size
+        self.estimated_size += key_buffer.len() + value_buffer.len();
 
         self.db.buffer_pool.return_buffer(key_buffer);
         self.db.buffer_pool.return_buffer(value_buffer);
     }
 
-    fn delete<W: WideColumn, C: WideColumnValue<W>>(&self, key: &W::Key) {
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key) {
         let cf = self.db.get_or_create_cf::<W>(ColumnKind::WideColumn);
 
         let mut key_buffer = self.db.buffer_pool.get_buffer();
 
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
 
-        self.batch.lock().delete_cf(&cf, key_buffer.as_slice());
+        self.batch.delete_cf(&cf, key_buffer.as_slice());
+
+        // accumulate estimated size
+        self.estimated_size += key_buffer.len();
 
         self.db.buffer_pool.return_buffer(key_buffer);
     }
 
     fn insert_member<C: KeyOfSetColumn>(
-        &self,
+        &mut self,
         key: &C::Key,
         value: &C::Element,
     ) {
@@ -462,13 +478,16 @@ impl WriteBatch for RocksDBWriteTransaction {
 
         // For set membership, the value is empty (presence indicates
         // membership)
-        self.batch.lock().put_cf(&cf, buffer.as_slice(), []);
+        self.batch.put_cf(&cf, buffer.as_slice(), []);
+
+        // accumulate estimated size
+        self.estimated_size += buffer.len();
 
         self.db.buffer_pool.return_buffer(buffer);
     }
 
     fn delete_member<C: KeyOfSetColumn>(
-        &self,
+        &mut self,
         key: &C::Key,
         value: &C::Element,
     ) {
@@ -478,26 +497,31 @@ impl WriteBatch for RocksDBWriteTransaction {
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer);
 
-        self.batch.lock().delete_cf(&cf, buffer.as_slice());
+        self.batch.delete_cf(&cf, buffer.as_slice());
+
+        // accumulate estimated size
+        self.estimated_size += buffer.len();
 
         self.db.buffer_pool.return_buffer(buffer);
     }
 
     fn commit(self) {
-        let batch = self.batch.into_inner();
-
         let mut write_opts = rust_rocksdb::WriteOptions::default();
         write_opts.disable_wal(true);
 
         self.db
             .db
-            .write_opt(&batch, &write_opts)
+            .write_opt(&self.batch, &write_opts)
             .expect("write should not fail");
+    }
+
+    fn should_write_more(&self) -> bool {
+        self.estimated_size < PREFERRED_WRITE_BATCH_SIZE
     }
 }
 
 impl KvDatabase for RocksDB {
-    type WriteBatch = RocksDBWriteTransaction;
+    type WriteBatch = RocksDBWriteBatch;
 
     type ScanMemberIterator<C: KeyOfSetColumn> = ScanMembersIterator<C>;
 
@@ -571,7 +595,7 @@ impl KvDatabase for RocksDB {
     }
 
     fn write_batch(&self) -> Self::WriteBatch {
-        RocksDBWriteTransaction::new(self.0.clone())
+        RocksDBWriteBatch::new(self.0.clone())
     }
 }
 

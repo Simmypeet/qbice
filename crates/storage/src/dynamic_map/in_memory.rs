@@ -9,7 +9,7 @@ use crate::{
     dynamic_map::DynamicMap,
     kv_database::{WideColumn, WideColumnValue},
     sharded::default_shard_amount,
-    write_transaction::FauxWriteTransaction,
+    write_batch::FauxWriteBatch,
 };
 
 /// An in-memory implementation of [`DynamicMap`] backed by a concurrent
@@ -54,7 +54,7 @@ impl<K: WideColumn> Default for InMemoryDynamicMap<K> {
 }
 
 impl<K: WideColumn> DynamicMap<K> for InMemoryDynamicMap<K> {
-    type WriteTransaction = FauxWriteTransaction;
+    type WriteTransaction = FauxWriteBatch;
 
     async fn get<V: WideColumnValue<K>>(&self, key: &K::Key) -> Option<V> {
         let discriminant = V::discriminant();

@@ -58,7 +58,7 @@ impl<K: WideColumn, Db: KvDatabase> CacheDynamicMap<K, Db> {
 }
 
 impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
-    type WriteTransaction = write_behind::WriteTransaction<Db>;
+    type WriteTransaction = write_behind::WriteBatch<Db>;
 
     async fn get<V: WideColumnValue<K>>(&self, key: &K::Key) -> Option<V> {
         let key = (key.clone(), std::any::TypeId::of::<V>());

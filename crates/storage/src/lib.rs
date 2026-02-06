@@ -106,7 +106,7 @@ pub mod kv_database;
 pub mod single_map;
 pub mod storage_engine;
 pub mod write_manager;
-pub mod write_transaction;
+pub mod write_batch;
 
 pub(crate) mod sharded;
 pub(crate) mod wide_column_cache;

@@ -3,7 +3,7 @@
 //! This module provides the [`WriteManager`] trait for managing write
 //! transactions and ensuring atomicity of write operations.
 
-use crate::write_transaction::FauxWriteTransaction;
+use crate::write_batch::FauxWriteBatch;
 
 pub mod write_behind;
 
@@ -18,14 +18,14 @@ pub trait WriteManager {
     ///
     /// A write transaction collects write batches from various storage
     /// components and applies them atomically when submitted.
-    type WriteTransaction;
+    type WriteBatch;
 
     /// Creates a new write transaction.
     ///
     /// # Returns
     ///
     /// A new write transaction that can be used to collect write batches.
-    fn new_write_transaction(&self) -> Self::WriteTransaction;
+    fn new_write_batch(&self) -> Self::WriteBatch;
 
     /// Submits a write transaction to be applied to the storage backend.
     ///
@@ -35,10 +35,7 @@ pub trait WriteManager {
     /// # Parameters
     ///
     /// - `write_transaction`: The write transaction to submit.
-    fn submit_write_transaction(
-        &self,
-        write_transaction: Self::WriteTransaction,
-    );
+    fn submit_write_batch(&self, write_transaction: Self::WriteBatch);
 }
 
 /// A faux write manager for storage engines that do not require actual
@@ -47,16 +44,11 @@ pub trait WriteManager {
 pub struct FauxWriteManager;
 
 impl WriteManager for FauxWriteManager {
-    type WriteTransaction = FauxWriteTransaction;
+    type WriteBatch = FauxWriteBatch;
 
-    fn new_write_transaction(&self) -> Self::WriteTransaction {
-        FauxWriteTransaction
-    }
+    fn new_write_batch(&self) -> Self::WriteBatch { FauxWriteBatch }
 
-    fn submit_write_transaction(
-        &self,
-        _write_transaction: Self::WriteTransaction,
-    ) {
+    fn submit_write_batch(&self, _write_transaction: Self::WriteBatch) {
         // No-op for faux write manager
     }
 }

@@ -7,7 +7,7 @@ use crate::{
     key_of_set_map::{ConcurrentSet, KeyOfSetMap, OwnedIterator},
     kv_database::KeyOfSetColumn,
     sharded::default_shard_amount,
-    write_transaction::FauxWriteTransaction,
+    write_batch::FauxWriteBatch,
 };
 
 /// An in-memory implementation of [`KeyOfSetMap`] backed by a concurrent
@@ -57,7 +57,7 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>> Default
 impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + Default>
     KeyOfSetMap<K, C> for InMemoryKeyOfSetMap<K, C>
 {
-    type WriteBatch = FauxWriteTransaction;
+    type WriteBatch = FauxWriteBatch;
 
     async fn get(&self, key: &K::Key) -> impl Iterator<Item = C::Element> {
         if let Some(set) = self.map.get(key) {

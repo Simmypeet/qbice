@@ -24,7 +24,7 @@ async fn scan_iterator_isolation() {
     let tempdir = tempfile::tempdir().unwrap();
     let db = RocksDB::open(tempdir.path(), Plugin::default()).unwrap();
 
-    let a = db.write_batch();
+    let mut a = db.write_batch();
 
     a.insert_member::<KeyOfSetTest>(&0, &1);
     a.insert_member::<KeyOfSetTest>(&0, &2);
@@ -39,7 +39,7 @@ async fn scan_iterator_isolation() {
     assert!(iter.contains(&1));
     assert!(iter.contains(&2));
 
-    let b = db.write_batch();
+    let mut b = db.write_batch();
     b.insert_member::<KeyOfSetTest>(&0, &4);
 
     // Iterator should not see uncommitted data
@@ -56,7 +56,7 @@ async fn scan_iterator_isolation() {
     let iter_final =
         db.scan_members::<KeyOfSetTest>(&0).collect::<HashSet<_>>();
 
-    let c = db.write_batch();
+    let mut c = db.write_batch();
     c.insert_member::<KeyOfSetTest>(&0, &5);
     c.commit();
 

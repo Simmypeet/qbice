@@ -5,7 +5,7 @@
 
 use crate::{
     kv_database::{WideColumn, WideColumnValue},
-    write_transaction::WriteTransaction,
+    write_batch::WriteBatch,
 };
 
 pub mod cache;
@@ -23,7 +23,7 @@ pub mod in_memory;
 /// - `K`: The wide column type that defines the key type and discriminant.
 pub trait DynamicMap<K: WideColumn> {
     /// The write batch type used to group write operations atomically.
-    type WriteTransaction: WriteTransaction;
+    type WriteTransaction: WriteBatch;
 
     /// Retrieves a value of type `V` by its key.
     ///

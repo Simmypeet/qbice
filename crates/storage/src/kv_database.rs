@@ -47,18 +47,18 @@ pub mod rocksdb;
 pub trait WriteBatch {
     /// Inserts or updates a value in a wide column.
     fn put<W: WideColumn, C: WideColumnValue<W>>(
-        &self,
+        &mut self,
         key: &W::Key,
         value: &C,
     );
 
     /// Deletes a value from a wide column.
-    fn delete<W: WideColumn, C: WideColumnValue<W>>(&self, key: &W::Key);
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key);
 
     /// Inserts a member into the set associated with the given key in a
     /// [`KeyOfSetColumn`] mode.
     fn insert_member<C: KeyOfSetColumn>(
-        &self,
+        &mut self,
         key: &C::Key,
         value: &C::Element,
     );
@@ -66,7 +66,7 @@ pub trait WriteBatch {
     /// Deletes a member from the set associated with the given key in a
     /// [`KeyOfSetColumn`] mode.
     fn delete_member<C: KeyOfSetColumn>(
-        &self,
+        &mut self,
         key: &C::Key,
         value: &C::Element,
     );
@@ -77,6 +77,11 @@ pub trait WriteBatch {
     ///
     /// The commit should always succeed, panic if it fails.
     fn commit(self);
+
+    /// Indicates whether more writes should be accumulated before committing.
+    ///
+    /// This can be used as a hint to the write system to optimize batching.
+    fn should_write_more(&self) -> bool { false }
 }
 
 /// Factory trait for creating instances of a key-value database backend.

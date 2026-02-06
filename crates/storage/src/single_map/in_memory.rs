@@ -7,7 +7,7 @@ use crate::{
     kv_database::{WideColumn, WideColumnValue},
     sharded::default_shard_amount,
     single_map::SingleMap,
-    write_transaction::FauxWriteTransaction,
+    write_batch::FauxWriteBatch,
 };
 
 /// An in-memory implementation of [`SingleMap`] backed by a concurrent
@@ -50,7 +50,7 @@ impl<K: WideColumn, V> Default for InMemorySingleMap<K, V> {
 impl<K: WideColumn, V: WideColumnValue<K>> SingleMap<K, V>
     for InMemorySingleMap<K, V>
 {
-    type WriteTransaction = FauxWriteTransaction;
+    type WriteTransaction = FauxWriteBatch;
 
     async fn get(&self, key: &K::Key) -> Option<V> {
         self.map.get(key).map(|v| v.value().clone())

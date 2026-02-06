@@ -65,11 +65,11 @@ impl<C: Config> Sync<C> {
         let timestamp = if let Some(timestamp) = timestamp {
             timestamp
         } else {
-            let mut tx = write_manager.new_write_transaction();
+            let mut tx = write_manager.new_write_batch();
 
             timestamp_map.insert((), Timestamp(0), &mut tx).await;
 
-            write_manager.submit_write_transaction(tx);
+            write_manager.submit_write_batch(tx);
 
             Timestamp(0)
         };
@@ -88,11 +88,7 @@ impl<C: Config> Engine<C> {
         &'_ self,
     ) -> WriteTransaction<C> {
         // the guard must be dropped here to make the future Send
-        self.computation_graph
-            .database
-            .sync
-            .write_manager
-            .new_write_transaction()
+        self.computation_graph.database.sync.write_manager.new_write_batch()
     }
 
     pub(in crate::engine::computation_graph) async fn acquire_active_computation_guard(
@@ -118,7 +114,7 @@ impl<C: Config> Engine<C> {
             .database
             .sync
             .write_manager
-            .new_write_transaction();
+            .new_write_batch();
 
         let prev = self
             .computation_graph
@@ -155,7 +151,7 @@ impl<C: Config> Engine<C> {
             .database
             .sync
             .write_manager
-            .submit_write_transaction(write_buffer);
+            .submit_write_batch(write_buffer);
     }
 
     pub(in crate::engine::computation_graph) unsafe fn get_current_timestamp_unchecked(

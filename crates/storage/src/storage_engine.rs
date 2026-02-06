@@ -44,7 +44,7 @@ pub trait StorageEngine {
     type WriteTransaction: Send + Sync;
 
     /// The write manager type for handling write transactions.
-    type WriteManager: WriteManager<WriteTransaction = Self::WriteTransaction>
+    type WriteManager: WriteManager<WriteBatch = Self::WriteTransaction>
         + Send
         + Sync;
 

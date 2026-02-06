@@ -9,7 +9,7 @@
 /// applied atomically to the storage backend. This ensures consistency and
 /// can improve performance by reducing the number of individual write
 /// operations.
-pub trait WriteTransaction {}
+pub trait WriteBatch {}
 
 /// A no-op write batch implementation for in-memory storage.
 ///
@@ -17,6 +17,6 @@ pub trait WriteTransaction {}
 /// that don't require actual batch semantics, as all operations take effect
 /// immediately.
 #[derive(Debug, Clone, Copy)]
-pub struct FauxWriteTransaction;
+pub struct FauxWriteBatch;
 
-impl WriteTransaction for FauxWriteTransaction {}
+impl WriteBatch for FauxWriteBatch {}

@@ -53,7 +53,7 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase>
 impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
     for CacheSingleMap<K, V, Db>
 {
-    type WriteTransaction = write_behind::WriteTransaction<Db>;
+    type WriteTransaction = write_behind::WriteBatch<Db>;
 
     async fn get(&self, key: &K::Key) -> Option<V> {
         self.cache

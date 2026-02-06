@@ -168,7 +168,7 @@ impl<
     Db: KvDatabase,
 > KeyOfSetMap<K, C> for CacheKeyOfSetMap<K, C, Db>
 {
-    type WriteBatch = write_behind::WriteTransaction<Db>;
+    type WriteBatch = write_behind::WriteBatch<Db>;
 
     async fn get(
         &self,

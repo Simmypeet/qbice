@@ -12,7 +12,7 @@ use crate::{
     kv_database::{KeyOfSetColumn, WideColumn, WideColumnValue},
     single_map::in_memory::InMemorySingleMap,
     storage_engine::{StorageEngine, StorageEngineFactory},
-    write_manager, write_transaction,
+    write_manager, write_batch,
 };
 
 /// An in-memory storage engine implementation.
@@ -20,7 +20,7 @@ use crate::{
 pub struct InMemoryStorageEngine;
 
 impl StorageEngine for InMemoryStorageEngine {
-    type WriteTransaction = write_transaction::FauxWriteTransaction;
+    type WriteTransaction = write_batch::FauxWriteBatch;
 
     type WriteManager = write_manager::FauxWriteManager;
 
