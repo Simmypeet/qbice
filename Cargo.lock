@@ -1137,6 +1137,7 @@ name = "qbice_storage"
 version = "0.4.8"
 dependencies = [
  "bon",
+ "crossbeam",
  "crossbeam-channel",
  "crossbeam-deque",
  "crossbeam-skiplist",

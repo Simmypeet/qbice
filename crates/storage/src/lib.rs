@@ -105,8 +105,9 @@ pub mod key_of_set_map;
 pub mod kv_database;
 pub mod single_map;
 pub mod storage_engine;
-pub mod write_manager;
+pub mod tiny_lfu;
 pub mod write_batch;
+pub mod write_manager;
 
 pub(crate) mod sharded;
 pub(crate) mod wide_column_cache;

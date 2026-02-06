@@ -31,6 +31,7 @@ ouroboros.workspace = true
 bon.workspace = true
 tracing.workspace = true
 crossbeam-skiplist.workspace = true
+crossbeam.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
