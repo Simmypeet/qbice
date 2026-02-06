@@ -63,7 +63,7 @@ impl CountMinSketch {
         for r in 0..self.depth {
             let idx = (r * self.width) + (h as usize % self.width);
             self.table[idx] = self.table[idx].saturating_add(1);
-            h = h.wrapping_add(hash); // Simple rehashing
+            h = (h.wrapping_add(hash)).rotate_left(17);
         }
     }
 
@@ -74,7 +74,7 @@ impl CountMinSketch {
         for r in 0..self.depth {
             let idx = (r * self.width) + (h as usize % self.width);
             min = min.min(self.table[idx]);
-            h = h.wrapping_add(hash);
+            h = (h.wrapping_add(hash)).rotate_left(17);
         }
         min
     }
