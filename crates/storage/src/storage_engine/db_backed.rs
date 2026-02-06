@@ -22,7 +22,7 @@ pub struct Configuration {
     ///
     /// Higher values allow more data to be cached in memory, reducing
     /// database reads but increasing memory usage.
-    #[builder(default = 2u64.pow(19))]
+    #[builder(default = 2u64.pow(16))]
     pub cache_capacity: u64,
 
     /// The number of worker threads for serialization and write processing.

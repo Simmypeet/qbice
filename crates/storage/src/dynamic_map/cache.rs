@@ -33,7 +33,7 @@ pub struct CacheDynamicMap<K: WideColumn, Db: KvDatabase> {
     cache: Arc<
         WideColumnCache<
             (K::Key, TypeId),
-            Arc<dyn Any + Send + Sync>,
+            Box<dyn Any + Send + Sync>,
             DynamicMapTag,
         >,
     >,
@@ -64,18 +64,20 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         let key = (key.clone(), std::any::TypeId::of::<V>());
 
         self.cache
-            .get(&key, async {
-                self.db
-                    .get_wide_column::<K, V>(&key.0)
-                    .map(|v| Arc::new(v) as Arc<dyn Any + Send + Sync>)
-            })
+            .get(
+                &key,
+                |x| {
+                    x.downcast_ref::<V>()
+                        .expect("incorrect type detected")
+                        .clone()
+                },
+                || {
+                    self.db
+                        .get_wide_column::<K, V>(&key.0)
+                        .map(|v| Box::new(v) as Box<dyn Any + Send + Sync>)
+                },
+            )
             .await
-            .map(|arc_any| {
-                arc_any
-                    .downcast_ref::<V>()
-                    .expect("incorrect type detected")
-                    .clone()
-            })
     }
 
     async fn insert<V: WideColumnValue<K>>(
@@ -84,7 +86,7 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         value: V,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        write_transaction.put_wide_column::<K, V>(
+        let updated = write_transaction.put_wide_column::<K, V>(
             key.clone(),
             Some(value.clone()),
             self.cache.clone(),
@@ -93,8 +95,8 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         let cache_key = (key, std::any::TypeId::of::<V>());
         self.cache.insert(
             cache_key,
-            Arc::new(value) as Arc<dyn Any + Send + Sync>,
-            write_transaction.epoch(),
+            Box::new(value) as Box<dyn Any + Send + Sync>,
+            updated,
         );
     }
 
@@ -103,13 +105,13 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         key: &K::Key,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        write_transaction.put_wide_column::<K, V>(
+        let updated = write_transaction.put_wide_column::<K, V>(
             key.clone(),
             None,
             self.cache.clone(),
         );
 
         let cache_key = (key.clone(), std::any::TypeId::of::<V>());
-        self.cache.remove(&cache_key, write_transaction.epoch());
+        self.cache.remove(&cache_key, updated);
     }
 }

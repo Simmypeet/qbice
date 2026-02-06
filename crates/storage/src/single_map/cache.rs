@@ -57,7 +57,9 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
 
     async fn get(&self, key: &K::Key) -> Option<V> {
         self.cache
-            .get(key, async { self.db.get_wide_column::<K, V>(key) })
+            .get(key, std::clone::Clone::clone, || {
+                self.db.get_wide_column::<K, V>(key)
+            })
             .await
     }
 
@@ -67,13 +69,13 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
         value: V,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        write_transaction.put_wide_column::<K, V>(
+        let updated = write_transaction.put_wide_column::<K, V>(
             key.clone(),
             Some(value.clone()),
             self.cache.clone(),
         );
 
-        self.cache.insert(key, value, write_transaction.epoch());
+        self.cache.insert(key, value, updated);
     }
 
     async fn remove(
@@ -81,12 +83,12 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
         key: &K::Key,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        write_transaction.put_wide_column::<K, V>(
+        let updated = write_transaction.put_wide_column::<K, V>(
             key.clone(),
             None,
             self.cache.clone(),
         );
 
-        self.cache.remove(key, write_transaction.epoch());
+        self.cache.remove(key, updated);
     }
 }
