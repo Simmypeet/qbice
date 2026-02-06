@@ -10,14 +10,14 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashMap;
 use fxhash::FxBuildHasher;
-use moka::ops::compute;
 use parking_lot::RwLock;
 
 use crate::{
     key_of_set_map::{ConcurrentSet, KeyOfSetMap, OwnedIterator},
     kv_database::{KeyOfSetColumn, KvDatabase},
+    single_flight,
+    tiny_lfu::{self, LifecycleListener, TinyLFU},
     write_manager::write_behind::{self, Epoch, KeyOfSetCache},
 };
 
@@ -51,17 +51,12 @@ impl<
 {
     /// Creates a new cached key-of-set map with the specified capacity.
     ///
-    /// # Parameters
-    ///
-    /// - `cap`: The maximum number of key entries to cache.
-    /// - `db`: The database backend for persistence.
-    ///
     /// # Returns
     ///
     /// A new `CacheKeyOfSetMap` instance.
     #[must_use]
-    pub fn new(cap: u64, db: Db) -> Self {
-        Self { repr: Arc::new(Repr::new(cap)), db }
+    pub fn new(cap: u64, shard_amount: usize, db: Db) -> Self {
+        Self { repr: Arc::new(Repr::new(cap, shard_amount)), db }
     }
 }
 
@@ -107,14 +102,28 @@ impl<V> Ord for VersionedOperation<V> {
 
 type ConcurrentLog<V> = Arc<RwLock<BinaryHeap<VersionedOperation<V>>>>;
 
+#[derive(Default)]
+struct PinnedLogLifecycleListener;
+
+impl<K: Hash + Eq, V> LifecycleListener<K, ConcurrentLog<V>>
+    for PinnedLogLifecycleListener
+{
+    fn is_pinned(&self, _key: &K, value: &mut ConcurrentLog<V>) -> bool {
+        !value.read().is_empty()
+    }
+}
+
 /// Internal representation of the cache state.
 #[derive(Debug)]
 pub struct Repr<
     K: KeyOfSetColumn,
     C: ConcurrentSet<Element = K::Element> + 'static,
 > {
-    staging: Arc<DashMap<K::Key, ConcurrentLog<K::Element>, FxBuildHasher>>,
-    moka: moka::future::Cache<K::Key, Entry<C>>,
+    staging:
+        TinyLFU<K::Key, ConcurrentLog<K::Element>, PinnedLogLifecycleListener>,
+
+    cache: TinyLFU<K::Key, Arc<RwLock<Entry<C>>>>,
+    single_flight: single_flight::SingleFlight<K::Key>,
 }
 
 impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
@@ -122,10 +131,12 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
 {
     /// Creates a new representation with the specified cache capacity.
     #[must_use]
-    pub fn new(cap: u64) -> Self {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn new(cap: u64, shard_amount: usize) -> Self {
         Self {
-            staging: Arc::new(DashMap::default()),
-            moka: moka::future::Cache::builder().max_capacity(cap).build(),
+            staging: TinyLFU::new(2048, shard_amount),
+            cache: TinyLFU::new(cap as usize, shard_amount),
+            single_flight: single_flight::SingleFlight::new(shard_amount),
         }
     }
 
@@ -135,7 +146,7 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
         keys: impl IntoIterator<Item = K::Key>,
     ) {
         for key in keys {
-            let Some(log) = self.staging.get(&key).map(|x| x.clone()) else {
+            let Some(log) = self.staging.get(&key) else {
                 continue;
             };
 
@@ -174,41 +185,7 @@ impl<
         &self,
         key: &<K as KeyOfSetColumn>::Key,
     ) -> impl Iterator<Item = <K as KeyOfSetColumn>::Element> {
-        let mut spilled = None;
-        let snapshot = self.get_staging_snapshot(key);
-
-        let result = self
-            .repr
-            .moka
-            .get_with(key.clone(), async {
-                let new_set = C::default();
-                let mut count = 0;
-                let mut iter = self.db.scan_members::<K>(key);
-
-                while let Some(element) = iter.next() {
-                    new_set.insert_element(element);
-                    count += 1;
-
-                    if count > 1024 {
-                        spilled = Some(Spilled {
-                            half_constructed: new_set,
-                            rest_iterator: iter,
-                        });
-
-                        return Entry::TooLarge;
-                    }
-                }
-
-                for element in &snapshot.added {
-                    new_set.insert_element(element.clone());
-                }
-                for element in &snapshot.removed {
-                    new_set.remove_element(element);
-                }
-
-                Entry::InMemory(new_set)
-            })
-            .await;
+        let (entry, snapshot, spilled) = self.get_entry(key).await;
 
         if let Some(spilled) = spilled {
             return MergeIterator::Spilled(
@@ -217,7 +194,7 @@ impl<
             );
         }
 
-        match result {
+        match entry.read().clone() {
             Entry::InMemory(set) => {
                 MergeIterator::OwnedIterator(OwnedIterator::new(set, |set| {
                     set.iter()
@@ -243,8 +220,7 @@ impl<
             self.repr.clone(),
         );
 
-        self.apply_op(key, Operation::Insert(element), write_batch.epoch())
-            .await;
+        self.apply_op(&key, Operation::Insert(element), write_batch.epoch());
     }
 
     async fn remove(
@@ -254,11 +230,10 @@ impl<
         write_batch: &mut Self::WriteBatch,
     ) {
         self.apply_op(
-            key.clone(),
+            key,
             Operation::Remove(element.clone()),
             write_batch.epoch(),
-        )
-        .await;
+        );
     }
 }
 
@@ -268,6 +243,82 @@ impl<
     Db: KvDatabase,
 > CacheKeyOfSetMap<K, C, Db>
 {
+    async fn get_entry(
+        &self,
+        key: &K::Key,
+    ) -> (
+        Arc<RwLock<Entry<C>>>,
+        StagingShapshot<K::Element>,
+        Option<Spilled<C, Db::ScanMemberIterator<K>>>,
+    ) {
+        loop {
+            let staging_snapshot = self.get_staging_snapshot(key);
+            let mut spilled = None;
+
+            if let Some(entry) = self.repr.cache.get(key) {
+                return (entry, staging_snapshot, spilled);
+            }
+
+            let entry = self
+                .repr
+                .single_flight
+                .wait_or_work(key, || {
+                    let entry =
+                        self.fetch_entry(key, &staging_snapshot, &mut spilled);
+
+                    self.repr.cache.entry(key.clone(), |e| match e {
+                        tiny_lfu::Entry::Vacant(vaccant_entry) => {
+                            vaccant_entry.insert(entry.clone());
+                        }
+                        tiny_lfu::Entry::Occupied(_) => {
+                            // Do nothing as another thread inserted an explicit
+                            // value
+                        }
+                    });
+
+                    entry
+                })
+                .await;
+
+            if let Some(entry) = entry {
+                return (entry, staging_snapshot, spilled);
+            }
+        }
+    }
+
+    fn fetch_entry(
+        &self,
+        key: &K::Key,
+        snapshot: &StagingShapshot<K::Element>,
+        spilled: &mut Option<Spilled<C, Db::ScanMemberIterator<K>>>,
+    ) -> Arc<RwLock<Entry<C>>> {
+        let new_set = C::default();
+        let mut count = 0;
+        let mut iter = self.db.scan_members::<K>(key);
+
+        while let Some(element) = iter.next() {
+            new_set.insert_element(element);
+            count += 1;
+
+            if count > 1024 {
+                *spilled = Some(Spilled {
+                    half_constructed: new_set,
+                    rest_iterator: iter,
+                });
+
+                return Arc::new(RwLock::new(Entry::TooLarge));
+            }
+        }
+
+        for element in &snapshot.added {
+            new_set.insert_element(element.clone());
+        }
+        for element in &snapshot.removed {
+            new_set.remove_element(element);
+        }
+
+        Arc::new(RwLock::new(Entry::InMemory(new_set)))
+    }
 }
 
 /// A snapshot of staged (uncommitted) set operations.
@@ -306,33 +357,25 @@ impl<
     Db: KvDatabase,
 > CacheKeyOfSetMap<K, C, Db>
 {
-    async fn apply_op(
-        &self,
-        key: K::Key,
-        op: Operation<K::Element>,
-        epoch: Epoch,
-    ) {
+    fn apply_op(&self, key: &K::Key, op: Operation<K::Element>, epoch: Epoch) {
         // Step 1: Write to Staging (The Anchor)
         // We ensure the log exists and push the op.
         let entry = {
-            self.repr.staging.get(&key).map_or_else(
-                || {
-                    let new_log: ConcurrentLog<K::Element> =
-                        Arc::new(RwLock::new(BinaryHeap::new()));
+            self.repr.staging.get(key).unwrap_or_else(|| {
+                let new_log: ConcurrentLog<K::Element> =
+                    Arc::new(RwLock::new(BinaryHeap::new()));
 
-                    match self.repr.staging.entry(key.clone()) {
-                        dashmap::mapref::entry::Entry::Occupied(occ) => {
-                            occ.get().clone()
-                        }
-                        dashmap::mapref::entry::Entry::Vacant(vac) => {
-                            vac.insert(new_log.clone());
+                self.repr.staging.entry(key.clone(), |x| match x {
+                    tiny_lfu::Entry::Vacant(vacant_entry) => {
+                        vacant_entry.insert(new_log.clone());
 
-                            new_log
-                        }
+                        new_log
                     }
-                },
-                |x| x.clone(),
-            )
+                    tiny_lfu::Entry::Occupied(occupied_entry) => {
+                        occupied_entry.get().clone()
+                    }
+                })
+            })
         };
 
         {
@@ -342,45 +385,36 @@ impl<
 
         // Step 2: Update Cache (Optimization)
         // We DO NOT load from DB if missing. We only update if present.
-        self.repr
-            .moka
-            .entry(key)
-            .and_compute_with(async move |entry| {
-                let Some(entry) = entry else {
-                    // Not present in cache; do nothing.
-                    return compute::Op::Nop;
-                };
+        let Some(entry) = self.repr.cache.get(key) else {
+            return;
+        };
 
-                match entry.into_value() {
-                    Entry::InMemory(set) => {
-                        let new_set = set;
+        let read_entry = entry.read();
+        match &*read_entry {
+            Entry::InMemory(set) => {
+                let new_set = set;
 
-                        match op {
-                            Operation::Insert(v) => {
-                                new_set.insert_element(v);
-                            }
-                            Operation::Remove(v) => {
-                                new_set.remove_element(&v);
-                            }
-                        }
-
-                        // Step 3: Threshold Check
-                        // If it grew too big, downgrade to TooLarge
-                        if new_set.len() > 1024 {
-                            compute::Op::Put(Entry::TooLarge)
-                        } else {
-                            compute::Op::Put(Entry::InMemory(new_set))
-                        }
+                match op {
+                    Operation::Insert(v) => {
+                        new_set.insert_element(v);
                     }
-                    Entry::TooLarge => {
-                        // Do nothing. It stays "TooLarge".
-                        // Reads will force a stream from DB + Staging.
-
-                        compute::Op::Nop
+                    Operation::Remove(v) => {
+                        new_set.remove_element(&v);
                     }
                 }
-            })
-            .await;
+
+                // Step 3: Threshold Check
+                // If it grew too big, downgrade to TooLarge
+                if new_set.len() > 1024 {
+                    drop(read_entry);
+
+                    let mut write_entry = entry.write();
+                    *write_entry = Entry::TooLarge;
+                }
+            }
+
+            Entry::TooLarge => {}
+        }
     }
 
     fn get_staging_snapshot(
@@ -390,7 +424,7 @@ impl<
         let mut added = HashSet::with_hasher(FxBuildHasher::default());
         let mut removed = HashSet::with_hasher(FxBuildHasher::default());
 
-        if let Some(log) = self.repr.staging.get(key).map(|x| x.clone()) {
+        if let Some(log) = self.repr.staging.get(key) {
             let log = log.read();
 
             for op in log.iter() {

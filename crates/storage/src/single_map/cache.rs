@@ -36,17 +36,12 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase>
 {
     /// Creates a new cached single map with the specified capacity.
     ///
-    /// # Parameters
-    ///
-    /// - `cap`: The maximum number of entries to cache.
-    /// - `db`: The database backend for persistence.
-    ///
     /// # Returns
     ///
     /// A new `CacheSingleMap` instance.
     #[must_use]
-    pub fn new(cap: u64, db: Db) -> Self {
-        Self { cache: Arc::new(WideColumnCache::new(cap)), db }
+    pub fn new(cap: u64, shard_amount: usize, db: Db) -> Self {
+        Self { cache: Arc::new(WideColumnCache::new(cap, shard_amount)), db }
     }
 }
 

@@ -12,6 +12,13 @@ use crate::{
     write_manager::write_behind,
 };
 
+/// Returns the default number of shards for caches.
+#[must_use]
+pub fn default_shard_amount() -> usize {
+    std::thread::available_parallelism()
+        .map_or_else(|_| 8, |x| x.get().next_power_of_two() * 8)
+}
+
 /// Configuration options for a database-backed storage engine.
 ///
 /// This struct holds the configuration parameters used when creating
@@ -31,6 +38,12 @@ pub struct Configuration {
     /// but returns diminish beyond the database's I/O capacity.
     #[builder(default = 2)]
     pub serialization_workers: usize,
+
+    /// The default number of shards to use for caches.
+    ///
+    /// More shards can improve concurrency but increase memory overhead.
+    #[builder(default = default_shard_amount())]
+    pub default_shard_amount: usize,
 }
 
 /// A database-backed storage engine with caching and write-behind support.
@@ -88,6 +101,7 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     ) -> Self::SingleMap<K, V> {
         CacheSingleMap::new(
             self.configuration.cache_capacity,
+            self.configuration.default_shard_amount,
             self.backing_db.clone(),
         )
     }
@@ -95,6 +109,7 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     fn new_dynamic_map<K: WideColumn>(&self) -> Self::DynamicMap<K> {
         CacheDynamicMap::new(
             self.configuration.cache_capacity,
+            self.configuration.default_shard_amount,
             self.backing_db.clone(),
         )
     }
@@ -107,6 +122,7 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     ) -> Self::KeyOfSetMap<K, C> {
         CacheKeyOfSetMap::new(
             self.configuration.cache_capacity,
+            self.configuration.default_shard_amount,
             self.backing_db.clone(),
         )
     }
