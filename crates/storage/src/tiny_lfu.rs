@@ -299,7 +299,7 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
                     drop(shard);
                     drop(value);
 
-                    true
+                    can_remove
                 }
 
                 hash_map::Entry::Vacant(_) => {
