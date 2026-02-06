@@ -27,7 +27,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
 };
@@ -552,6 +552,7 @@ pub struct WriteBehind<Db: KvDatabase> {
     commit_handle: Option<thread::JoinHandle<()>>,
 
     after_commit_handle: Option<thread::JoinHandle<()>>,
+    shutting_down: Arc<AtomicBool>,
 
     pool: Arc<WriteBufferPool<Db>>,
 }
@@ -585,6 +586,7 @@ impl<Db: KvDatabase> CurrentBatch<Db> {
         &mut self,
         db: &Db,
         after_commit_sender: &crossbeam_channel::Sender<AfterCommitTask<Db>>,
+        shutting_down: &Arc<AtomicBool>,
     ) {
         // commit physical batch
         let to_commit_db_batch =
@@ -596,12 +598,16 @@ impl<Db: KvDatabase> CurrentBatch<Db> {
         to_commit_db_batch.commit();
 
         // after commit actions
-        for logical_batch in to_commit_logical_batches {
-            after_commit_sender
-                .send(AfterCommitTask {
-                    write_buffer: logical_batch.write_buffer,
-                })
-                .unwrap();
+        for mut logical_batch in to_commit_logical_batches {
+            if shutting_down.load(Ordering::SeqCst).not() {
+                after_commit_sender
+                    .send(AfterCommitTask {
+                        write_buffer: logical_batch.write_buffer,
+                    })
+                    .unwrap();
+            } else {
+                logical_batch.write_buffer.active = false;
+            }
         }
     }
 }
@@ -650,11 +656,13 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             crossbeam_channel::unbounded::<AfterCommitTask<Db>>();
 
         let pool = Arc::new(WriteBufferPool::new());
+        let shutting_down = Arc::new(AtomicBool::new(false));
 
         Self {
             commit_sender: Some(commit_sender),
             commit_handle: Some({
                 let commit_receiver = commit_receiver;
+                let shutting_down = shutting_down.clone();
 
                 thread::Builder::new()
                     .name("bg_writer_commit".to_string())
@@ -662,6 +670,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                         Self::commit_worker(
                             &commit_receiver,
                             after_commit_sender,
+                            &shutting_down,
                             &db,
                         );
                     })
@@ -670,6 +679,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
             after_commit_handle: Some({
                 let after_commit_receiver = after_commit_receiver;
+                let shutting_down = shutting_down.clone();
                 let pool = pool.clone();
 
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -683,6 +693,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                         runtime.block_on(async {
                             Self::after_commit_worker(
                                 &after_commit_receiver,
+                                &shutting_down,
                                 &pool,
                             )
                             .await;
@@ -692,6 +703,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             }),
 
             pool,
+            shutting_down,
         }
     }
 
@@ -708,10 +720,16 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
     async fn after_commit_worker(
         receiver: &crossbeam_channel::Receiver<AfterCommitTask<Db>>,
+        shutting_down: &Arc<AtomicBool>,
         pool: &WriteBufferPool<Db>,
     ) {
         while let Ok(mut task) = receiver.recv() {
             let epoch = task.write_buffer.epoch();
+
+            if shutting_down.load(Ordering::SeqCst) {
+                task.write_buffer.active = false;
+                continue;
+            }
 
             task.write_buffer.after_commit(epoch).await;
             pool.return_buffer(task.write_buffer);
@@ -721,6 +739,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     fn commit_worker(
         receiver: &crossbeam_channel::Receiver<WriteTask<Db>>,
         after_commit_sender: crossbeam_channel::Sender<AfterCommitTask<Db>>,
+        shutting_down: &Arc<AtomicBool>,
         db: &Db,
     ) {
         let mut holdback_queues = BinaryHeap::new();
@@ -738,6 +757,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                 &mut holdback_queues,
                 &mut current_batch,
                 &after_commit_sender,
+                shutting_down,
                 db,
             );
         }
@@ -747,11 +767,12 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             &mut holdback_queues,
             &mut current_batch,
             &after_commit_sender,
+            shutting_down,
             db,
         );
 
         // flush any remaining in current batch
-        current_batch.flush(db, &after_commit_sender);
+        current_batch.flush(db, &after_commit_sender, shutting_down);
 
         // should be empty now
         assert!(holdback_queues.is_empty());
@@ -764,6 +785,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         pending_commits: &mut BinaryHeap<WriteTask<Db>>,
         current_batch: &mut CurrentBatch<Db>,
         after_commit_sender: &crossbeam_channel::Sender<AfterCommitTask<Db>>,
+        shutting_down: &Arc<AtomicBool>,
         db: &Db,
     ) {
         while let Some(top) = pending_commits.peek() {
@@ -780,7 +802,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
                 // commit if the physical batch is "big enough"
                 if current_batch.db_write_batch.should_write_more().not() {
-                    current_batch.flush(db, after_commit_sender);
+                    current_batch.flush(db, after_commit_sender, shutting_down);
                 }
             } else {
                 break;
@@ -791,6 +813,8 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
 impl<Db: KvDatabase> Drop for WriteBehind<Db> {
     fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+
         let _ = self.commit_sender.take().unwrap();
         let _ = self.commit_handle.take().unwrap().join();
 

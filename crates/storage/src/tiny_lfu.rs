@@ -214,8 +214,17 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
 
             // have a message but can't lock, will enqueue
             (Some(value), None) => {
-                // will enqueue later
-                self.message_queue.push(value);
+                match value {
+                    PolicyMessage::ReadHit(_) => {
+                        // Drop read hits on contention to avoid unbounded queue
+                        // growth
+                    }
+
+                    _ => {
+                        // will enqueue later
+                        self.message_queue.push(value);
+                    }
+                }
             }
 
             (Some(value), Some(mut lock)) => {
@@ -274,9 +283,12 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
         |evicted_key| {
             // IMPORTANT: must obtain exclusive access to
             // also avoid eviction race
-            let mut shard = self
-                .storage
-                .write_shard(self.storage.shard_index(self.hash(evicted_key)));
+            let Some(mut shard) = self.storage.try_write_shard(
+                self.storage.shard_index(self.hash(evicted_key)),
+            ) else {
+                // couldn't get the lock, skip removal
+                return false;
+            };
 
             match shard.entry(evicted_key.clone()) {
                 hash_map::Entry::Occupied(mut occupied_entry) => {
