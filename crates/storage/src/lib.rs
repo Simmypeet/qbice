@@ -110,4 +110,5 @@ pub mod write_batch;
 pub mod write_manager;
 
 pub(crate) mod sharded;
+pub(crate) mod single_flight;
 pub(crate) mod wide_column_cache;

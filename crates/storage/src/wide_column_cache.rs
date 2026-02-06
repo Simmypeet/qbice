@@ -2,11 +2,10 @@ use std::{any::TypeId, hash::Hash, sync::atomic::AtomicI32};
 
 use crate::{
     kv_database::{KvDatabase, WideColumn, WideColumnValue},
+    single_flight,
     tiny_lfu::{self, LifecycleListener, TinyLFU},
     write_manager::write_behind::{self, Epoch},
 };
-
-mod single_flight;
 
 #[derive(Debug, Default)]
 struct PinnedLifecycleListener;
@@ -38,13 +37,10 @@ impl<K: Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static, T>
     WideColumnCache<K, V, T>
 {
     #[allow(clippy::cast_possible_truncation)]
-    pub fn new(capacity: u64) -> Self {
-        let shard_count = std::thread::available_parallelism()
-            .map_or_else(|_| 4, |x| x.get().next_power_of_two());
-
+    pub fn new(capacity: u64, shard_amount: usize) -> Self {
         Self {
-            tiny_lfu: TinyLFU::new(capacity as usize, shard_count),
-            single_flight: single_flight::SingleFlight::new(shard_count),
+            tiny_lfu: TinyLFU::new(capacity as usize, shard_amount),
+            single_flight: single_flight::SingleFlight::new(shard_amount),
             _phantom: std::marker::PhantomData,
         }
     }

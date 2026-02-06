@@ -1,3 +1,5 @@
+//! A single-flight implementation to suppress duplicate work.
+
 use std::{
     collections::hash_map::Entry,
     hash::{BuildHasher, Hash},
@@ -9,6 +11,11 @@ use tokio::sync::Notify;
 
 use crate::sharded::{self, Sharded};
 
+/// A single-flight mechanism to ensure that only one concurrent operation
+/// is performed for a given key.
+///
+/// Other concurrent requests for the same key will wait for the first operation
+/// to complete.
 pub struct SingleFlight<K> {
     map: Sharded<FxHashMap<K, Arc<Notify>>>,
     build_hasher: FxBuildHasher,
@@ -30,6 +37,8 @@ impl<K> SingleFlight<K> {
 }
 
 impl<K: Eq + Hash + Clone> SingleFlight<K> {
+    /// Waits for an ongoing operation for the given key to complete, or
+    /// performs the work if no operation is ongoing.
     pub async fn wait_or_work<T>(
         &self,
         key: &K,
