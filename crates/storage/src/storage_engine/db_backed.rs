@@ -16,7 +16,7 @@ use crate::{
 #[must_use]
 pub fn default_shard_amount() -> usize {
     std::thread::available_parallelism()
-        .map_or_else(|_| 16, |x| x.get().next_power_of_two() * 16)
+        .map_or_else(|_| 32, |x| x.get().next_power_of_two() * 32)
 }
 
 /// Configuration options for a database-backed storage engine.
@@ -29,7 +29,7 @@ pub struct Configuration {
     ///
     /// Higher values allow more data to be cached in memory, reducing
     /// database reads but increasing memory usage.
-    #[builder(default = 2u64.pow(16))]
+    #[builder(default = 2u64.pow(20))]
     pub cache_capacity: u64,
 
     /// The number of worker threads for serialization and write processing.

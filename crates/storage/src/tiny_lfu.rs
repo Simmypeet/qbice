@@ -3,6 +3,7 @@
 
 use std::{collections::hash_map, hash::BuildHasher};
 
+use crossbeam_utils::CachePadded;
 use fxhash::{FxBuildHasher, FxHashMap};
 
 use crate::{
@@ -41,13 +42,11 @@ impl<K, V> LifecycleListener<K, V> for DefaultLifecycleListener {
 /// write operations, and negative caching is used to remember absent entries
 /// without storing actual values.
 pub struct TinyLFU<K, V, L = DefaultLifecycleListener> {
-    storage: Sharded<FxHashMap<K, V>>,
-
-    message_queue: crossbeam::queue::SegQueue<PolicyMessage<K>>,
-    policy: parking_lot::Mutex<Policy<K>>,
+    storage: CachePadded<Sharded<FxHashMap<K, V>>>,
+    message_queue: CachePadded<crossbeam::queue::SegQueue<PolicyMessage<K>>>,
+    policy: CachePadded<parking_lot::Mutex<Policy<K>>>,
 
     lifecycle_listener: L,
-    evicted_count: std::sync::atomic::AtomicU64,
     build_hasher: FxBuildHasher,
 }
 
@@ -62,26 +61,16 @@ impl<K, V, L: Default> TinyLFU<K, V, L> {
     #[must_use]
     pub fn new(capacity: usize, shard_count: usize) -> Self {
         Self {
-            storage: Sharded::new(shard_count, |_| FxHashMap::default()),
-            message_queue: crossbeam::queue::SegQueue::new(),
-            policy: parking_lot::Mutex::new(Policy::new(capacity)),
+            storage: CachePadded::new(Sharded::new(shard_count, |_| {
+                FxHashMap::default()
+            })),
+            message_queue: CachePadded::new(crossbeam::queue::SegQueue::new()),
+            policy: CachePadded::new(parking_lot::Mutex::new(Policy::new(
+                capacity,
+            ))),
             lifecycle_listener: L::default(),
-            evicted_count: std::sync::atomic::AtomicU64::new(0),
             build_hasher: FxBuildHasher::default(),
         }
-    }
-}
-
-impl<K, V, L> Drop for TinyLFU<K, V, L> {
-    fn drop(&mut self) {
-        println!(
-            "Dropping TinyLFU cache, with {} items",
-            self.storage.iter_read_shards().map(|x| x.len()).sum::<usize>()
-        );
-        println!(
-            "Dropping TinyLFU cache, evicted {} items",
-            self.evicted_count.load(std::sync::atomic::Ordering::SeqCst)
-        );
     }
 }
 
@@ -218,7 +207,12 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
     }
 
     fn try_maintenance(&self, policy_message: Option<PolicyMessage<K>>) {
-        match (policy_message, self.policy.try_lock()) {
+        match (
+            policy_message,
+            (self.message_queue.len() > MAINTENANCE_BATCH_SIZE)
+                .then(|| self.policy.try_lock())
+                .and_then(|x| x),
+        ) {
             // no message and can't lock, can't do anything
             (None, None) => {}
 
@@ -229,17 +223,8 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
 
             // have a message but can't lock, will enqueue
             (Some(value), None) => {
-                match value {
-                    PolicyMessage::ReadHit(_) => {
-                        // Drop read hits on contention to avoid unbounded queue
-                        // growth
-                    }
-
-                    _ => {
-                        // will enqueue later
-                        self.message_queue.push(value);
-                    }
-                }
+                // will enqueue later
+                self.message_queue.push(value);
             }
 
             (Some(value), Some(mut lock)) => {
@@ -342,8 +327,6 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
                     // value drop times blocking other
                     // operations
                     let value = if can_remove {
-                        self.evicted_count
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         Some(occupied_entry.remove_entry())
                     } else {
                         None

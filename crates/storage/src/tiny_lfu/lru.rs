@@ -109,6 +109,19 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         }
     }
 
+    /// Moves the key to the head if it exists. Returns true if it was found.
+    pub fn hit_if_exists(&mut self, key: &K) -> bool {
+        if let Some(&idx) = self.index_map.get(key) {
+            self.move_to_head(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Checks if the key exists in the list.
+    pub fn contains(&self, key: &K) -> bool { self.index_map.contains_key(key) }
+
     /// Pops the least recently used item (from tail).
     pub fn pop_least_recent(&mut self) -> Option<K> {
         let tail_idx = self.tail?;
@@ -273,7 +286,7 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
     }
 
     /// Removes the specified key from the LRU list.
-    pub fn remove(&mut self, key: &K) {
+    pub fn remove(&mut self, key: &K) -> Option<K> {
         if let Some(&idx) = self.index_map.get(key) {
             let entry = self.entries[idx].take().unwrap();
             self.index_map.remove(key);
@@ -293,6 +306,10 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
                 // This was tail
                 self.tail = entry.prev;
             }
+
+            Some(entry.val)
+        } else {
+            None
         }
     }
 

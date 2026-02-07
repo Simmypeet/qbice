@@ -7,9 +7,13 @@ use std::{
     collections::{BinaryHeap, HashSet},
     hash::Hash,
     ops::Not,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
+use crossbeam::queue::SegQueue;
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 
@@ -100,16 +104,109 @@ impl<V> Ord for VersionedOperation<V> {
     }
 }
 
-type ConcurrentLog<V> = Arc<RwLock<BinaryHeap<VersionedOperation<V>>>>;
+#[derive(Debug)]
+struct TrackedConcurrentLog<V> {
+    log: Arc<ConcurrentLog<V>>,
+    dirty: AtomicUsize,
+}
+
+enum ConcurrentLogMessage<V> {
+    FlushUpTo(Epoch),
+    AppendOperation(VersionedOperation<V>),
+}
+
+#[derive(Debug)]
+struct ConcurrentLog<V> {
+    log: RwLock<BinaryHeap<VersionedOperation<V>>>,
+    deferred_messages: SegQueue<ConcurrentLogMessage<V>>,
+}
+
+impl<V: Eq + Hash + Clone> ConcurrentLog<V> {
+    const fn new() -> Self {
+        Self {
+            log: RwLock::new(BinaryHeap::new()),
+            deferred_messages: SegQueue::new(),
+        }
+    }
+
+    fn apply_message(&self, op: ConcurrentLogMessage<V>) {
+        let Some(mut lock) = self.log.try_write() else {
+            self.deferred_messages.push(op);
+
+            return;
+        };
+
+        Self::fix(&mut lock, &self.deferred_messages);
+
+        Self::apply_message_to_heap(&mut lock, op);
+    }
+
+    fn apply_message_to_heap(
+        heap_lock: &mut BinaryHeap<VersionedOperation<V>>,
+        op: ConcurrentLogMessage<V>,
+    ) {
+        match op {
+            ConcurrentLogMessage::FlushUpTo(epoch) => {
+                while let Some(peek) = heap_lock.peek() {
+                    if peek.epoch <= epoch {
+                        heap_lock.pop();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            ConcurrentLogMessage::AppendOperation(op) => {
+                heap_lock.push(op);
+            }
+        }
+    }
+
+    fn fix(
+        heap_lock: &mut BinaryHeap<VersionedOperation<V>>,
+        message_queue: &SegQueue<ConcurrentLogMessage<V>>,
+    ) {
+        while let Some(message) = message_queue.pop() {
+            Self::apply_message_to_heap(heap_lock, message);
+        }
+    }
+
+    fn get_snapshot(&self) -> StagingShapshot<V> {
+        let mut log = self.log.write();
+
+        // fix any deferred messages
+        Self::fix(&mut log, &self.deferred_messages);
+
+        let mut added = HashSet::with_hasher(FxBuildHasher::default());
+        let mut removed = HashSet::with_hasher(FxBuildHasher::default());
+
+        for op in log.iter() {
+            match &op.op {
+                Operation::Insert(v) => {
+                    if removed.remove(v).not() {
+                        added.insert(v.clone());
+                    }
+                }
+                Operation::Remove(v) => {
+                    if added.remove(v).not() {
+                        removed.insert(v.clone());
+                    }
+                }
+            }
+        }
+
+        StagingShapshot { added, removed }
+    }
+}
 
 #[derive(Default)]
 struct PinnedLogLifecycleListener;
 
-impl<K: Hash + Eq, V> LifecycleListener<K, ConcurrentLog<V>>
+impl<K: Hash + Eq, V: Eq + Hash + Clone>
+    LifecycleListener<K, TrackedConcurrentLog<V>>
     for PinnedLogLifecycleListener
 {
-    fn is_pinned(&self, _key: &K, value: &ConcurrentLog<V>) -> bool {
-        !value.read().is_empty()
+    fn is_pinned(&self, _key: &K, value: &TrackedConcurrentLog<V>) -> bool {
+        value.dirty.load(std::sync::atomic::Ordering::SeqCst) != 0
     }
 }
 
@@ -119,8 +216,11 @@ pub struct Repr<
     K: KeyOfSetColumn,
     C: ConcurrentSet<Element = K::Element> + 'static,
 > {
-    staging:
-        TinyLFU<K::Key, ConcurrentLog<K::Element>, PinnedLogLifecycleListener>,
+    staging: TinyLFU<
+        K::Key,
+        TrackedConcurrentLog<K::Element>,
+        PinnedLogLifecycleListener,
+    >,
 
     cache: TinyLFU<K::Key, Arc<RwLock<Entry<C>>>>,
     single_flight: single_flight::SingleFlight<K::Key>,
@@ -146,18 +246,14 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
         keys: impl IntoIterator<Item = K::Key>,
     ) {
         for key in keys {
-            let Some(log) = self.staging.get(&key) else {
-                continue;
-            };
+            let log = self.staging.get_map(&key, |x| {
+                x.dirty.fetch_sub(1, Ordering::SeqCst);
 
-            // drain ops up to epoch
-            let mut log = log.write();
-            while let Some(op) = log.peek() {
-                if op.epoch <= epoch {
-                    log.pop();
-                } else {
-                    break;
-                }
+                x.log.clone()
+            });
+
+            if let Some(log) = log {
+                log.apply_message(ConcurrentLogMessage::FlushUpTo(epoch));
             }
         }
     }
@@ -213,14 +309,19 @@ impl<
         element: <K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
-        write_batch.put_set::<K>(
+        let updated = write_batch.put_set::<K>(
             key.clone(),
             element.clone(),
             write_behind::Operation::Insert,
             Arc::downgrade(&(self.repr.clone() as _)),
         );
 
-        self.apply_op(&key, Operation::Insert(element), write_batch.epoch());
+        self.apply_op(
+            &key,
+            Operation::Insert(element),
+            write_batch.epoch(),
+            updated,
+        );
     }
 
     async fn remove(
@@ -229,7 +330,7 @@ impl<
         element: &<K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
-        write_batch.put_set::<K>(
+        let updated = write_batch.put_set::<K>(
             key.clone(),
             element.clone(),
             write_behind::Operation::Remove,
@@ -240,6 +341,7 @@ impl<
             key,
             Operation::Remove(element.clone()),
             write_batch.epoch(),
+            updated,
         );
     }
 }
@@ -364,30 +466,50 @@ impl<
     Db: KvDatabase,
 > CacheKeyOfSetMap<K, C, Db>
 {
-    fn apply_op(&self, key: &K::Key, op: Operation<K::Element>, epoch: Epoch) {
+    fn apply_op(
+        &self,
+        key: &K::Key,
+        op: Operation<K::Element>,
+        epoch: Epoch,
+        updated: bool,
+    ) {
         // Step 1: Write to Staging (The Anchor)
         // We ensure the log exists and push the op.
-        let entry = {
-            self.repr.staging.get(key).unwrap_or_else(|| {
-                let new_log: ConcurrentLog<K::Element> =
-                    Arc::new(RwLock::new(BinaryHeap::new()));
+        let log = {
+            self.repr.staging.get_map(key, |x| {
+                if updated {
+                    x.dirty.fetch_add(1, Ordering::SeqCst);
+                }
 
-                self.repr.staging.entry(key.clone(), |x| match x {
-                    tiny_lfu::Entry::Vacant(vacant_entry) => {
-                        vacant_entry.insert(new_log.clone());
+                x.log.clone()
+            });
 
-                        new_log
-                    }
-                    tiny_lfu::Entry::Occupied(occupied_entry) => {
-                        occupied_entry.get().clone()
-                    }
-                })
+            let tracked_log = TrackedConcurrentLog {
+                log: Arc::new(ConcurrentLog::new()),
+                dirty: AtomicUsize::new(usize::from(updated)),
+            };
+
+            self.repr.staging.entry(key.clone(), |entry| match entry {
+                tiny_lfu::Entry::Vacant(vacant_entry) => {
+                    let log = tracked_log.log.clone();
+                    vacant_entry.insert(tracked_log);
+
+                    log
+                }
+
+                tiny_lfu::Entry::Occupied(occupied_entry) => {
+                    occupied_entry.get().dirty.fetch_add(1, Ordering::SeqCst);
+
+                    occupied_entry.get().log.clone()
+                }
             })
         };
 
+        // apply the operation to the log
         {
-            let mut log = entry.write();
-            log.push(VersionedOperation { op: op.clone(), epoch });
+            log.apply_message(ConcurrentLogMessage::AppendOperation(
+                VersionedOperation { op: op.clone(), epoch },
+            ));
         }
 
         // Step 2: Update Cache (Optimization)
@@ -428,29 +550,15 @@ impl<
         &self,
         key: &K::Key,
     ) -> StagingShapshot<K::Element> {
-        let mut added = HashSet::with_hasher(FxBuildHasher::default());
-        let mut removed = HashSet::with_hasher(FxBuildHasher::default());
+        let log = self.repr.staging.get_map(key, |x| x.log.clone());
 
-        if let Some(log) = self.repr.staging.get(key) {
-            let log = log.read();
-
-            for op in log.iter() {
-                match &op.op {
-                    Operation::Insert(v) => {
-                        if removed.remove(v).not() {
-                            added.insert(v.clone());
-                        }
-                    }
-                    Operation::Remove(v) => {
-                        if added.remove(v).not() {
-                            removed.insert(v.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        StagingShapshot { added, removed }
+        log.map_or_else(
+            || StagingShapshot {
+                added: HashSet::with_hasher(FxBuildHasher::default()),
+                removed: HashSet::with_hasher(FxBuildHasher::default()),
+            },
+            |log| log.get_snapshot(),
+        )
     }
 }
 

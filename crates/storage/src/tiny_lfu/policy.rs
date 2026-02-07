@@ -1,6 +1,6 @@
 use std::hash::BuildHasher;
 
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxBuildHasher;
 
 use crate::tiny_lfu::{
     lru::{self, MoveTo},
@@ -14,18 +14,10 @@ pub enum PolicyMessage<K> {
     Removed(K),
 }
 
-enum Location {
-    Window,
-    Probation,
-    Protected,
-}
-
 pub struct Policy<K> {
     windows: lru::Lru<K>,
     probation: lru::Lru<K>,
     protected: lru::Lru<K>,
-
-    location_map: FxHashMap<K, Location>,
 
     window_capacity: usize,
     protected_capacity: usize,
@@ -58,7 +50,6 @@ impl<K> Policy<K> {
             windows: lru::Lru::new(),
             probation: lru::Lru::new(),
             protected: lru::Lru::new(),
-            location_map: FxHashMap::default(),
             window_capacity,
             protected_capacity,
             max_capacity: window_capacity + main_capacity,
@@ -66,7 +57,7 @@ impl<K> Policy<K> {
         }
     }
 
-    pub fn on_read_hit(&mut self, key: &K, hash: u64, increment: bool)
+    pub fn on_read_hit(&mut self, key: &K, hash: u64, increment: bool) -> bool
     where
         K: std::hash::Hash + Eq + Clone,
     {
@@ -74,34 +65,31 @@ impl<K> Policy<K> {
             self.sketch.record_access(hash);
         }
 
-        match self.location_map.get(key) {
-            Some(Location::Window) => {
-                self.windows.hit(key);
-            }
-
-            Some(Location::Probation) => {
-                // promote to protected
-                self.probation.remove(key);
-
-                self.protected.hit(key);
-                self.location_map.insert(key.clone(), Location::Protected);
-
-                // demote LRU of protected to probation if over capacity
-                if self.protected.len() > self.protected_capacity
-                    && let Some(lru_key) = self.protected.pop_least_recent()
-                {
-                    self.location_map
-                        .insert(lru_key.clone(), Location::Probation);
-                    self.probation.hit(&lru_key);
-                }
-            }
-
-            Some(Location::Protected) => {
-                self.protected.hit(key);
-            }
-
-            None => {}
+        if self.windows.hit_if_exists(key) {
+            return true;
         }
+
+        if self.protected.hit_if_exists(key) {
+            return true;
+        }
+
+        if self.probation.contains(key) {
+            // promote to protected
+            self.probation.remove(key);
+
+            self.protected.hit(key);
+
+            // demote LRU of protected to probation if over capacity
+            if self.protected.len() > self.protected_capacity
+                && let Some(lru_key) = self.protected.pop_least_recent()
+            {
+                self.probation.hit(&lru_key);
+            }
+
+            return true;
+        }
+
+        false
     }
 
     pub fn on_write(
@@ -115,14 +103,12 @@ impl<K> Policy<K> {
     {
         self.sketch.record_access(hash);
 
-        if self.location_map.contains_key(key) {
-            self.on_read_hit(key, hash, false);
+        if self.on_read_hit(key, hash, false) {
             return;
         }
 
         // insert into window
         self.windows.hit(key);
-        self.location_map.insert(key.clone(), Location::Window);
 
         // evict from window if over capacity
         if self.windows.len() <= self.window_capacity {
@@ -138,8 +124,6 @@ impl<K> Policy<K> {
 
         if main_usage < main_limit {
             // add to main cache
-            self.location_map
-                .insert(candidate_key.clone(), Location::Probation);
             self.probation.hit(&candidate_key);
 
             return;
@@ -180,11 +164,8 @@ impl<K> Policy<K> {
 
                 // the main storage has confirmed removal of the victim,
                 // we can evict it safely
-                let evicted_key = cursor.remove(MoveTo::MoreRecent).unwrap();
-                self.location_map.remove(&evicted_key);
+                let _ = cursor.remove(MoveTo::MoreRecent).unwrap();
 
-                self.location_map
-                    .insert(candidate_key.clone(), Location::Probation);
                 self.probation.hit(&candidate_key);
 
                 return;
@@ -194,13 +175,10 @@ impl<K> Policy<K> {
             if !remove(&candidate_key) {
                 // If the candidate is pinned, we can't evict it.
                 // We force-promote it to probation to keep tracking it.
-                self.location_map
-                    .insert(candidate_key.clone(), Location::Probation);
                 self.probation.hit(&candidate_key);
                 return;
             }
 
-            self.location_map.remove(&candidate_key);
             return;
         }
 
@@ -209,13 +187,8 @@ impl<K> Policy<K> {
         // candidate itself.
         if !remove(&candidate_key) {
             // Cannot evict candidate either, so we keep it in probation.
-            self.location_map
-                .insert(candidate_key.clone(), Location::Probation);
             self.probation.hit(&candidate_key);
-            return;
         }
-
-        self.location_map.remove(&candidate_key);
     }
 
     pub fn attempt_to_trim_overflowing_cache(
@@ -239,8 +212,7 @@ impl<K> Policy<K> {
 
             // the main storage has confirmed removal of the victim,
             // we can evict it safely
-            let evicted_key = self.probation.pop_least_recent().unwrap();
-            self.location_map.remove(&evicted_key);
+            let _ = self.probation.pop_least_recent().unwrap();
         }
     }
 
@@ -248,20 +220,19 @@ impl<K> Policy<K> {
     where
         K: std::hash::Hash + Eq + Clone,
     {
-        match self.location_map.remove(key) {
-            Some(Location::Window) => {
-                self.windows.remove(key);
-            }
+        // Try removing from all queues. One of them might have it.
+        // Since the logic guarantees a key is in exactly one queue (or none),
+        // and `remove` is safe (no-op if missing), this works.
+        // However, we can stop early if found.
 
-            Some(Location::Probation) => {
-                self.probation.remove(key);
-            }
+        // Optimization: most items are in Protected or Probation.
 
-            Some(Location::Protected) => {
-                self.protected.remove(key);
-            }
-
-            None => {}
+        if self.protected.remove(key).is_some() {
+            return;
         }
+        if self.probation.remove(key).is_some() {
+            return;
+        }
+        self.windows.remove(key);
     }
 }
