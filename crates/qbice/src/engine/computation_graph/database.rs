@@ -520,6 +520,8 @@ type WriteTransaction<C> =
 
 #[allow(clippy::type_complexity)]
 pub struct Database<C: Config> {
+    sync: sync::Sync<C>,
+
     last_verified: SingleMap<C, QueryNodeColumn, LastVerified>,
     forward_edge_order: SingleMap<C, QueryNodeColumn, ForwardEdgeOrder>,
     forward_edge_observation:
@@ -545,8 +547,6 @@ pub struct Database<C: Config> {
         ExternalInputColumn<C>,
         Arc<DashSet<Compact128, C::BuildHasher>>,
     >,
-
-    sync: sync::Sync<C>,
 }
 
 impl<C: Config> Database<C> {

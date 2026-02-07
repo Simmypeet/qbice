@@ -39,10 +39,10 @@ impl WideColumnValue<TimestampColumn> for Timestamp {
 }
 
 pub struct Sync<C: Config> {
+    write_manager: <C::StorageEngine as StorageEngine>::WriteManager,
     timestamp: AtomicU64,
     phase_mutex: Arc<RwLock<()>>,
     timestamp_map: SingleMap<C, TimestampColumn, Timestamp>,
-    write_manager: <C::StorageEngine as StorageEngine>::WriteManager,
 }
 
 #[derive(Debug, Clone)]
