@@ -255,6 +255,9 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
         if let Some(message) = extra_message {
             self.process_message(message, lock);
         }
+
+        // before dropping the lock, we can try to overflow trimming
+        lock.attempt_to_trim_overflowing_cache(self.remove_closure());
     }
 
     fn process_message(&self, message: PolicyMessage<K>, lock: &mut Policy<K>) {
@@ -278,9 +281,6 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
                 lock.on_removed(&key);
             }
         }
-
-        // before dropping the lock, we can try to overflow trimming
-        lock.attempt_to_trim_overflowing_cache(self.remove_closure());
     }
 
     fn remove_closure(&self) -> impl Fn(&K) -> bool + '_ {

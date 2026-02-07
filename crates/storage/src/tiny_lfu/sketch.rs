@@ -13,17 +13,22 @@ impl BloomFilter {
         Self { bitmap: vec![0; u64_count], size_mask: bits - 1 }
     }
 
+    // In BloomFilter
     #[allow(clippy::cast_possible_truncation)]
     pub fn contains_or_add(&mut self, hash: u64) -> bool {
         let bit_index = (hash as usize) & self.size_mask;
         let array_index = bit_index / 64;
-        let bit_in_word = bit_index % 64;
-        let mask = 1u64 << bit_in_word;
+        let mask = 1u64 << (bit_index % 64);
 
-        let already_present = (self.bitmap[array_index] & mask) != 0;
-        self.bitmap[array_index] |= mask;
+        let old_val = self.bitmap[array_index];
+        if (old_val & mask) != 0 {
+            return true;
+        }
 
-        already_present
+        // Only write if necessary to avoid cache line dirtying (minor
+        // optimization)
+        self.bitmap[array_index] = old_val | mask;
+        false
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -44,45 +49,98 @@ impl BloomFilter {
 }
 
 struct CountMinSketch {
-    table: Vec<u8>,
-    width: usize,
-    depth: usize,
+    table: Vec<u64>, // Stores packed 4-bit counters (16 per u64)
+    mask: usize,     // Used instead of modulo
 }
 
 impl CountMinSketch {
-    fn new(mut width: usize) -> Self {
-        width = width.max(1).next_power_of_two();
-        let depth = 4; // 4 Hash functions is standard
+    fn new(capacity: usize) -> Self {
+        // We need 4 rows (depth=4)
+        // Capacity determines the width.
+        // We pack 16 counters into one u64.
 
-        Self { table: vec![0; width * depth], width, depth }
+        let width = capacity.max(1).next_power_of_two();
+
+        // Calculate how many u64s we need to hold (width * 4 rows) counters
+        // Dividing by 16 because each u64 holds 16 counters
+        let len = (width * 4).div_ceil(16);
+
+        Self { table: vec![0; len], mask: width - 1 }
     }
 
     #[allow(clippy::cast_possible_truncation)]
     fn increment(&mut self, hash: u64) {
-        let mut h = hash;
-        for r in 0..self.depth {
-            let idx = (r * self.width) + (h as usize % self.width);
-            self.table[idx] = self.table[idx].saturating_add(1);
-            h = (h.wrapping_add(hash)).rotate_left(17);
+        // Double Hashing Strategy
+        // h1 is the starting point, h2 is the stride
+        let h1 = hash;
+        let h2 = hash.rotate_left(32); // Simple remix for stride
+
+        let mut h = h1;
+
+        for r in 0..4 {
+            // 1. Calculate the logical index (0..width)
+            let idx = (h as usize) & self.mask;
+
+            // 2. Map logical index to physical location
+            // "Global" index across the 4 rows conceptually laid out linearly
+            let global_idx = (r * (self.mask + 1)) + idx;
+
+            let array_idx = global_idx / 16; // Which u64?
+            let bit_offset = (global_idx % 16) * 4; // Which 4-bit block?
+
+            // 3. Read-Modify-Write
+            let mut word = self.table[array_idx];
+            let counter = (word >> bit_offset) & 0xF;
+
+            if counter < 15 {
+                // Increment only if not saturated
+                word += 1 << bit_offset;
+                self.table[array_idx] = word;
+            }
+
+            // Stride for next hash function
+            h = h.wrapping_add(h2);
         }
     }
 
     #[allow(clippy::cast_possible_truncation)]
     fn estimate(&self, hash: u64) -> u8 {
-        let mut min = u8::MAX;
-        let mut h = hash;
-        for r in 0..self.depth {
-            let idx = (r * self.width) + (h as usize % self.width);
-            min = min.min(self.table[idx]);
-            h = (h.wrapping_add(hash)).rotate_left(17);
+        let mut min = 15; // Max possible value
+
+        let h1 = hash;
+        let h2 = hash.rotate_left(32);
+        let mut h = h1;
+
+        for r in 0..4 {
+            let idx = (h as usize) & self.mask;
+            let global_idx = (r * (self.mask + 1)) + idx;
+
+            let array_idx = global_idx / 16;
+            let bit_offset = (global_idx % 16) * 4;
+
+            let count = (self.table[array_idx] >> bit_offset) & 0xF;
+
+            if count == 0 {
+                return 0;
+            } // Optimization: can't go lower
+            if (count as u8) < min {
+                min = count as u8;
+            }
+
+            h = h.wrapping_add(h2);
         }
         min
     }
 
-    // "Aging" process: Divide all counters by 2 to favor recent history
+    // The "SWAR" Reset (SIMD Within A Register)
+    // This is where the 4-bit packing shines.
     fn reset(&mut self) {
-        for c in &mut self.table {
-            *c /= 2;
+        // Divide every counter by 2 in parallel
+        for word in &mut self.table {
+            // Mask 0xF -> 0x7 to keep counters from spilling into neighbors
+            // during shift 0x777... preserves the bottom 3 bits of
+            // every nibble Shifting right effectively divides by 2
+            *word = (*word >> 1) & 0x7777_7777_7777_7777;
         }
     }
 }
