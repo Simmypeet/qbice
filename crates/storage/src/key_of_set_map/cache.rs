@@ -108,7 +108,7 @@ struct PinnedLogLifecycleListener;
 impl<K: Hash + Eq, V> LifecycleListener<K, ConcurrentLog<V>>
     for PinnedLogLifecycleListener
 {
-    fn is_pinned(&self, _key: &K, value: &mut ConcurrentLog<V>) -> bool {
+    fn is_pinned(&self, _key: &K, value: &ConcurrentLog<V>) -> bool {
         !value.read().is_empty()
     }
 }
@@ -217,7 +217,7 @@ impl<
             key.clone(),
             element.clone(),
             write_behind::Operation::Insert,
-            self.repr.clone(),
+            Arc::downgrade(&(self.repr.clone() as _)),
         );
 
         self.apply_op(&key, Operation::Insert(element), write_batch.epoch());
@@ -229,6 +229,13 @@ impl<
         element: &<K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
+        write_batch.put_set::<K>(
+            key.clone(),
+            element.clone(),
+            write_behind::Operation::Remove,
+            Arc::downgrade(&(self.repr.clone() as _)),
+        );
+
         self.apply_op(
             key,
             Operation::Remove(element.clone()),

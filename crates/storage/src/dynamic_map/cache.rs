@@ -85,7 +85,7 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         let updated = write_transaction.put_wide_column::<K, V>(
             key.clone(),
             Some(value.clone()),
-            self.cache.clone(),
+            Arc::downgrade(&(self.cache.clone() as _)),
         );
 
         let cache_key = (key, std::any::TypeId::of::<V>());
@@ -104,7 +104,7 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         let updated = write_transaction.put_wide_column::<K, V>(
             key.clone(),
             None,
-            self.cache.clone(),
+            Arc::downgrade(&(self.cache.clone() as _)),
         );
 
         let cache_key = (key.clone(), std::any::TypeId::of::<V>());

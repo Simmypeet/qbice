@@ -62,11 +62,11 @@ impl<T> Sharded<T> {
         self.shards[shard_index].write()
     }
 
-    pub fn try_write_shard(
+    pub fn try_upgradable_read_shard(
         &self,
         shard_index: usize,
-    ) -> Option<parking_lot::RwLockWriteGuard<'_, T>> {
-        self.shards[shard_index].try_write()
+    ) -> Option<parking_lot::RwLockUpgradableReadGuard<'_, T>> {
+        self.shards[shard_index].try_upgradable_read()
     }
 
     pub fn iter_read_shards(

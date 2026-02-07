@@ -34,7 +34,7 @@ pub struct Policy<K> {
     sketch: Sketch,
 }
 
-const MAX_ATTEMPTS: usize = 5;
+const MAX_ATTEMPTS: usize = 16;
 const WINDOW_RATIO: f64 = 0.01;
 
 impl<K> Policy<K> {
@@ -230,37 +230,27 @@ impl<K> Policy<K> {
 
         let mut cursor = self.probation.least_recent_cursor();
 
-        'outer: while cursor.len() > probation_capacity {
-            // for each entry, we give it maximum MAX_ATTEMPTS to try to evict
-            // it. if we exceed that, we stop trying to evict more entries as
-            // it's likely that the cache is mostly pinned entries.
-            while attempted <= MAX_ATTEMPTS {
-                attempted += 1;
+        while cursor.len() > probation_capacity && attempted <= MAX_ATTEMPTS {
+            attempted += 1;
 
-                let Some(victim_key) = cursor.get() else {
-                    // no more victims to try
-                    break 'outer;
-                };
+            let Some(victim_key) = cursor.get() else {
+                // no more victims to try
+                break;
+            };
 
-                // if can't remove, resuffle and try again
-                if !remove(victim_key) {
-                    cursor.move_to(MoveTo::MoreRecent);
-                    continue;
-                }
-
-                // the main storage has confirmed removal of the victim,
-                // we can evict it safely
-                let evicted_key = cursor.remove(MoveTo::MoreRecent).unwrap();
-                self.location_map.remove(&evicted_key);
-
-                // reset attempt counter for next entry
-                attempted = 0;
-                continue 'outer;
+            // if can't remove, resuffle and try again
+            if !remove(victim_key) {
+                cursor.move_to(MoveTo::MoreRecent);
+                continue;
             }
 
-            // if we reach here, it means we have exceeded MAX_ATTEMPTS
-            // we'll stop trying to evict more entries
-            break;
+            // the main storage has confirmed removal of the victim,
+            // we can evict it safely
+            let evicted_key = cursor.remove(MoveTo::MoreRecent).unwrap();
+            self.location_map.remove(&evicted_key);
+
+            // reset attempt counter for next entry
+            attempted = 0;
         }
     }
 

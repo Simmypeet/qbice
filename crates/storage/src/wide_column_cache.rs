@@ -1,4 +1,8 @@
-use std::{any::TypeId, hash::Hash, sync::atomic::AtomicI32};
+use std::{
+    any::TypeId,
+    hash::Hash,
+    sync::atomic::{AtomicI32, Ordering},
+};
 
 use crate::{
     kv_database::{KvDatabase, WideColumn, WideColumnValue},
@@ -11,8 +15,8 @@ use crate::{
 struct PinnedLifecycleListener;
 
 impl<K, V> LifecycleListener<K, Entry<V>> for PinnedLifecycleListener {
-    fn is_pinned(&self, _key: &K, value: &mut Entry<V>) -> bool {
-        *value.pin_count.get_mut() > 0
+    fn is_pinned(&self, _key: &K, value: &Entry<V>) -> bool {
+        value.pin_count.load(Ordering::SeqCst) > 0
     }
 }
 
@@ -180,13 +184,12 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase>
     write_behind::WideColumnCache<K, V, Db>
     for WideColumnCache<K::Key, V, SingleMapTag>
 {
-    fn flush<'s: 'x, 'i: 'x, 'x>(
-        &'s self,
+    fn flush(
+        &self,
         epoch: Epoch,
-        keys: &'i mut (dyn Iterator<Item = <K as WideColumn>::Key> + Send),
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'x>>
-    {
-        Box::pin(async move { self.flush_staging(epoch, keys) })
+        keys: &mut (dyn Iterator<Item = <K as WideColumn>::Key> + Send),
+    ) {
+        self.flush_staging(epoch, keys);
     }
 }
 
@@ -201,18 +204,15 @@ impl<
 > write_behind::WideColumnCache<K, V, Db>
     for WideColumnCache<(K::Key, TypeId), X, DynamicMapTag>
 {
-    fn flush<'s: 'x, 'i: 'x, 'x>(
-        &'s self,
+    fn flush(
+        &self,
         epoch: Epoch,
-        keys: &'i mut (dyn Iterator<Item = <K as WideColumn>::Key> + Send),
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'x>>
-    {
-        Box::pin(async move {
-            self.flush_staging(
-                epoch,
-                keys.map(|x| (x, std::any::TypeId::of::<V>())),
-            );
-        })
+        keys: &mut (dyn Iterator<Item = <K as WideColumn>::Key> + Send),
+    ) {
+        self.flush_staging(
+            epoch,
+            keys.map(|x| (x, std::any::TypeId::of::<V>())),
+        );
     }
 }
 

@@ -67,7 +67,7 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
         let updated = write_transaction.put_wide_column::<K, V>(
             key.clone(),
             Some(value.clone()),
-            self.cache.clone(),
+            Arc::downgrade(&(self.cache.clone() as _)),
         );
 
         self.cache.insert(key, value, updated);
@@ -81,7 +81,7 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
         let updated = write_transaction.put_wide_column::<K, V>(
             key.clone(),
             None,
-            self.cache.clone(),
+            Arc::downgrade(&(self.cache.clone() as _)),
         );
 
         self.cache.remove(key, updated);

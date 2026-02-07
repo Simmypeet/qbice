@@ -22,7 +22,7 @@ pub trait LifecycleListener<K, V>: Default {
     /// Determines if the given entry is currently pinned.
     ///
     /// If "pinned", the entry will not be evicted from the cache.
-    fn is_pinned(&self, key: &K, value: &mut V) -> bool;
+    fn is_pinned(&self, key: &K, value: &V) -> bool;
 }
 
 /// The default lifecycle listener which does not pin any entries.
@@ -30,7 +30,7 @@ pub trait LifecycleListener<K, V>: Default {
 pub struct DefaultLifecycleListener;
 
 impl<K, V> LifecycleListener<K, V> for DefaultLifecycleListener {
-    fn is_pinned(&self, _key: &K, _value: &mut V) -> bool { false }
+    fn is_pinned(&self, _key: &K, _value: &V) -> bool { false }
 }
 
 /// A TinyLFU (Tiny Least Frequently Used) cache implementation with
@@ -47,6 +47,7 @@ pub struct TinyLFU<K, V, L = DefaultLifecycleListener> {
     policy: parking_lot::Mutex<Policy<K>>,
 
     lifecycle_listener: L,
+    evicted_count: std::sync::atomic::AtomicU64,
     build_hasher: FxBuildHasher,
 }
 
@@ -65,8 +66,22 @@ impl<K, V, L: Default> TinyLFU<K, V, L> {
             message_queue: crossbeam::queue::SegQueue::new(),
             policy: parking_lot::Mutex::new(Policy::new(capacity)),
             lifecycle_listener: L::default(),
+            evicted_count: std::sync::atomic::AtomicU64::new(0),
             build_hasher: FxBuildHasher::default(),
         }
+    }
+}
+
+impl<K, V, L> Drop for TinyLFU<K, V, L> {
+    fn drop(&mut self) {
+        println!(
+            "Dropping TinyLFU cache, with {} items",
+            self.storage.iter_read_shards().map(|x| x.len()).sum::<usize>()
+        );
+        println!(
+            "Dropping TinyLFU cache, evicted {} items",
+            self.evicted_count.load(std::sync::atomic::Ordering::SeqCst)
+        );
     }
 }
 
@@ -281,20 +296,35 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
     fn remove_closure(&self) -> impl Fn(&K) -> bool + '_ {
         // atomically determine if we can remove the key
         |evicted_key| {
-            // IMPORTANT: must obtain exclusive access to
-            // also avoid eviction race
-            let Some(mut shard) = self.storage.try_write_shard(
+            // FAST PATH: asks the lifecycle listener if the entry is pinned
+            // if pinned, skip removal without acquiring any exclusive locks
+            let Some(shard) = self.storage.try_upgradable_read_shard(
                 self.storage.shard_index(self.hash(evicted_key)),
             ) else {
                 // couldn't get the lock, skip removal
                 return false;
             };
 
+            let Some(value) = shard.get(evicted_key) else {
+                // already evicted
+                return true;
+            };
+
+            if self.lifecycle_listener.is_pinned(evicted_key, value) {
+                // pinned, skip removal
+                return false;
+            }
+
+            // SLOW PATH: acquire write lock to perform removal
+            let mut shard =
+                parking_lot::RwLockUpgradableReadGuard::upgrade(shard);
+
             match shard.entry(evicted_key.clone()) {
                 hash_map::Entry::Occupied(mut occupied_entry) => {
                     let can_remove = {
                         let value = occupied_entry.get_mut();
 
+                        // IMPORTANT: we must ask again under the write lock
                         !self.lifecycle_listener.is_pinned(evicted_key, value)
                     };
 
@@ -303,6 +333,8 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
                     // value drop times blocking other
                     // operations
                     let value = if can_remove {
+                        self.evicted_count
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         Some(occupied_entry.remove_entry())
                     } else {
                         None

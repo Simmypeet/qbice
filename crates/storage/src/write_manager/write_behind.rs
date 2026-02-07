@@ -24,9 +24,8 @@ use std::{
     cell::RefCell,
     collections::{BinaryHeap, HashMap},
     ops::Not,
-    pin::Pin,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -49,11 +48,11 @@ pub(crate) trait WideColumnCache<
     Db: KvDatabase,
 >: Send + Sync
 {
-    fn flush<'s: 'x, 'i: 'x, 'x>(
-        &'s self,
+    fn flush(
+        &self,
         epoch: Epoch,
-        keys: &'i mut (dyn Iterator<Item = K::Key> + Send),
-    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'x>>;
+        keys: &mut (dyn Iterator<Item = K::Key> + Send),
+    );
 }
 
 pub(crate) trait KeyOfSetCache<K: KeyOfSetColumn, Db: KvDatabase>:
@@ -84,17 +83,12 @@ struct TypedWideColumnWrites<
     /// `None` indicates a deletion for that key. `Some(value)` indicates
     /// an insertion or update.
     writes: HashMap<C::Key, Option<V>, FxBuildHasher>,
-    original_cache: Arc<dyn WideColumnCache<C, V, Db>>,
-}
-
-enum Task<'s> {
-    Sync,
-    Async(Pin<Box<dyn std::future::Future<Output = ()> + Send + 's>>),
+    original_cache: Weak<dyn WideColumnCache<C, V, Db>>,
 }
 
 trait WriteEntry<Db: KvDatabase>: Any + Send + Sync + 'static {
     fn write_to_db(&self, tx: &mut Db::WriteBatch);
-    fn after_commit(&mut self, epoch: Epoch) -> Task<'_>;
+    fn after_commit(&mut self, epoch: Epoch);
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync);
 }
 
@@ -112,13 +106,14 @@ impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase> WriteEntry<Db>
         }
     }
 
-    fn after_commit(&mut self, epoch: Epoch) -> Task<'_> {
-        Task::Async(Box::pin(async move {
-            let mut drained = self.writes.drain().map(|x| x.0);
-            let original_cache = self.original_cache.clone();
+    fn after_commit(&mut self, epoch: Epoch) {
+        let mut drained = self.writes.drain().map(|x| x.0);
 
-            original_cache.flush(epoch, &mut drained).await;
-        }))
+        let Some(original_cache) = self.original_cache.clone().upgrade() else {
+            return;
+        };
+
+        original_cache.flush(epoch, &mut drained);
     }
 
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync) { self }
@@ -156,7 +151,7 @@ impl<Db: KvDatabase> WideColumnWrites<Db> {
         &mut self,
         key: C::Key,
         value: Option<V>,
-        original_cache: Arc<dyn WideColumnCache<C, V, Db>>,
+        original_cache: Weak<dyn WideColumnCache<C, V, Db>>,
     ) -> bool {
         let id = WideColumnWritesID::of::<C, V>();
 
@@ -169,7 +164,7 @@ impl<Db: KvDatabase> WideColumnWrites<Db> {
                     .expect("type mismatch in WideColumnWrites map");
 
                 assert!(
-                    Arc::ptr_eq(&typed_writes.original_cache, &original_cache),
+                    Weak::ptr_eq(&typed_writes.original_cache, &original_cache),
                     "original_cache mismatch for existing WideColumnWrites \
                      entry"
                 );
@@ -198,14 +193,9 @@ impl<Db: KvDatabase> WideColumnWrites<Db> {
         }
     }
 
-    pub(super) async fn after_commit(&mut self, epoch: Epoch) {
+    pub(super) fn after_commit(&mut self, epoch: Epoch) {
         for write_entry in self.writes.values_mut() {
-            match write_entry.after_commit(epoch) {
-                Task::Sync => {}
-                Task::Async(fut) => {
-                    fut.await;
-                }
-            }
+            write_entry.after_commit(epoch);
         }
     }
 }
@@ -216,12 +206,12 @@ pub enum Operation {
     /// Insert an element into the set.
     Insert,
     /// Delete an element from the set.
-    Delete,
+    Remove,
 }
 
 struct TypedKeyOfSetWrites<C: KeyOfSetColumn, Db: KvDatabase> {
     writes: HashMap<C::Key, HashMap<C::Element, Operation>, FxBuildHasher>,
-    original_cache: Arc<dyn KeyOfSetCache<C, Db>>,
+    original_cache: Weak<dyn KeyOfSetCache<C, Db>>,
 }
 
 impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
@@ -234,7 +224,7 @@ impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
                     Operation::Insert => {
                         tx.insert_member::<C>(key, element);
                     }
-                    Operation::Delete => {
+                    Operation::Remove => {
                         tx.delete_member::<C>(key, element);
                     }
                 }
@@ -242,11 +232,14 @@ impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
         }
     }
 
-    fn after_commit(&mut self, epoch: Epoch) -> Task<'_> {
+    fn after_commit(&mut self, epoch: Epoch) {
         let mut keys = self.writes.drain().map(|x| x.0);
-        self.original_cache.flush(epoch, &mut keys);
 
-        Task::Sync
+        let Some(original_cache) = self.original_cache.clone().upgrade() else {
+            return;
+        };
+
+        original_cache.flush(epoch, &mut keys);
     }
 
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync) { self }
@@ -288,7 +281,7 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
         key: C::Key,
         element: C::Element,
         op: Operation,
-        original_cache: Arc<dyn KeyOfSetCache<C, Db>>,
+        original_cache: Weak<dyn KeyOfSetCache<C, Db>>,
     ) -> bool {
         match self.writes.entry(TypeId::of::<C>()) {
             std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
@@ -299,7 +292,7 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
                     .expect("type mismatch in KeyOfSetWrites map");
 
                 assert!(
-                    Arc::ptr_eq(&typed_writes.original_cache, &original_cache),
+                    Weak::ptr_eq(&typed_writes.original_cache, &original_cache),
                     "original_cache mismatch for existing KeyOfSetWrites entry"
                 );
 
@@ -327,14 +320,9 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
         }
     }
 
-    pub(super) async fn after_commit(&mut self, epoch: Epoch) {
+    pub(super) fn after_commit(&mut self, epoch: Epoch) {
         for write_entry in self.writes.values_mut() {
-            match write_entry.after_commit(epoch) {
-                Task::Sync => {}
-                Task::Async(fut) => {
-                    fut.await;
-                }
-            }
+            write_entry.after_commit(epoch);
         }
     }
 }
@@ -429,16 +417,16 @@ impl<Db: KvDatabase> WriteBatch<Db> {
         self.key_of_set_writes.write_to_db(tx);
     }
 
-    async fn after_commit(&mut self, epoch: Epoch) {
-        self.wide_column_writes.after_commit(epoch).await;
-        self.key_of_set_writes.after_commit(epoch).await;
+    fn after_commit(&mut self, epoch: Epoch) {
+        self.wide_column_writes.after_commit(epoch);
+        self.key_of_set_writes.after_commit(epoch);
     }
 
     pub(crate) fn put_wide_column<C: WideColumn, V: WideColumnValue<C>>(
         &mut self,
         key: C::Key,
         value: Option<V>,
-        original_cache: Arc<dyn WideColumnCache<C, V, Db>>,
+        original_cache: Weak<dyn WideColumnCache<C, V, Db>>,
     ) -> bool {
         self.wide_column_writes.put::<C, V>(key, value, original_cache)
     }
@@ -448,7 +436,7 @@ impl<Db: KvDatabase> WriteBatch<Db> {
         key: C::Key,
         element: C::Element,
         op: Operation,
-        original_cache: Arc<dyn KeyOfSetCache<C, Db>>,
+        original_cache: Weak<dyn KeyOfSetCache<C, Db>>,
     ) -> bool {
         self.key_of_set_writes.put::<C>(key, element, op, original_cache)
     }
@@ -682,22 +670,14 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                 let shutting_down = shutting_down.clone();
                 let pool = pool.clone();
 
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-
                 thread::Builder::new()
                     .name("bg_writer_after_commit".to_string())
                     .spawn(move || {
-                        runtime.block_on(async {
-                            Self::after_commit_worker(
-                                &after_commit_receiver,
-                                &shutting_down,
-                                &pool,
-                            )
-                            .await;
-                        });
+                        Self::after_commit_worker(
+                            &after_commit_receiver,
+                            &shutting_down,
+                            &pool,
+                        );
                     })
                     .unwrap()
             }),
@@ -718,7 +698,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         self.commit_sender.as_ref().unwrap().send(write_task).unwrap();
     }
 
-    async fn after_commit_worker(
+    fn after_commit_worker(
         receiver: &crossbeam_channel::Receiver<AfterCommitTask<Db>>,
         shutting_down: &Arc<AtomicBool>,
         pool: &WriteBufferPool<Db>,
@@ -731,7 +711,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                 continue;
             }
 
-            task.write_buffer.after_commit(epoch).await;
+            task.write_buffer.after_commit(epoch);
             pool.return_buffer(task.write_buffer);
         }
     }
