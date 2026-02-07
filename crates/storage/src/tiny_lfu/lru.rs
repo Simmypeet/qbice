@@ -2,16 +2,35 @@ use std::hash::Hash;
 
 use fxhash::FxHashMap;
 
+/// A `usize` that uses `usize::MAX` as a sentinel for "no value",
+/// allowing `Entry` to store linked-list pointers without the extra
+/// byte of `Option<usize>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NonMax(usize);
+
+impl NonMax {
+    const NONE: Self = Self(usize::MAX);
+
+    fn some(val: usize) -> Self {
+        debug_assert_ne!(val, usize::MAX, "NonMax cannot hold usize::MAX");
+        Self(val)
+    }
+
+    const fn get(self) -> Option<usize> {
+        if self.0 == usize::MAX { None } else { Some(self.0) }
+    }
+}
+
 #[derive(Debug)]
 struct Entry<K> {
     val: K,
-    prev: Option<usize>,
-    next: Option<usize>,
+    prev: NonMax,
+    next: NonMax,
 }
 
 pub struct Cursor<'x, K> {
     lru: &'x mut Lru<K>,
-    current: Option<usize>,
+    current: NonMax,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -23,7 +42,7 @@ pub enum MoveTo {
 
 impl<K: Eq + Hash + Clone> Cursor<'_, K> {
     pub fn move_to(&mut self, direction: MoveTo) {
-        if let Some(current_idx) = self.current {
+        if let Some(current_idx) = self.current.get() {
             let entry = self.lru.entries[current_idx].as_ref().unwrap();
             self.current = match direction {
                 MoveTo::MoreRecent => entry.prev,
@@ -33,12 +52,12 @@ impl<K: Eq + Hash + Clone> Cursor<'_, K> {
     }
 
     pub fn get(&self) -> Option<&K> {
-        let current_idx = self.current?;
+        let current_idx = self.current.get()?;
         Some(&self.lru.entries[current_idx].as_ref().unwrap().val)
     }
 
     pub fn remove(&mut self, move_to: MoveTo) -> Option<K> {
-        let current_idx = self.current?;
+        let current_idx = self.current.get()?;
 
         let entry = self.lru.entries[current_idx].take().unwrap();
 
@@ -50,13 +69,13 @@ impl<K: Eq + Hash + Clone> Cursor<'_, K> {
         self.lru.index_map.remove(&entry.val);
         self.lru.free_list.push(current_idx);
 
-        if let Some(prev_idx) = entry.prev {
+        if let Some(prev_idx) = entry.prev.get() {
             self.lru.entries[prev_idx].as_mut().unwrap().next = entry.next;
         } else {
             self.lru.head = entry.next;
         }
 
-        if let Some(next_idx) = entry.next {
+        if let Some(next_idx) = entry.next.get() {
             self.lru.entries[next_idx].as_mut().unwrap().prev = entry.prev;
         } else {
             self.lru.tail = entry.prev;
@@ -71,8 +90,8 @@ impl<K: Eq + Hash + Clone> Cursor<'_, K> {
 pub struct Lru<K> {
     free_list: Vec<usize>,
 
-    head: Option<usize>,
-    tail: Option<usize>,
+    head: NonMax,
+    tail: NonMax,
 
     entries: Vec<Option<Entry<K>>>,
     index_map: FxHashMap<K, usize>,
@@ -88,8 +107,8 @@ impl<K> Lru<K> {
     pub fn new() -> Self {
         Self {
             free_list: Vec::new(),
-            head: None,
-            tail: None,
+            head: NonMax::NONE,
+            tail: NonMax::NONE,
             entries: Vec::new(),
             index_map: FxHashMap::default(),
         }
@@ -124,7 +143,7 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
 
     /// Pops the least recently used item (from tail).
     pub fn pop_least_recent(&mut self) -> Option<K> {
-        let tail_idx = self.tail?;
+        let tail_idx = self.tail.get()?;
 
         let entry = self.entries[tail_idx].take()?;
         self.index_map.remove(&entry.val);
@@ -132,18 +151,18 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
 
         // Update tail
         self.tail = entry.prev;
-        if let Some(new_tail) = self.tail {
-            self.entries[new_tail].as_mut().unwrap().next = None;
+        if let Some(new_tail) = self.tail.get() {
+            self.entries[new_tail].as_mut().unwrap().next = NonMax::NONE;
         } else {
             // List is now empty
-            self.head = None;
+            self.head = NonMax::NONE;
         }
 
         Some(entry.val)
     }
 
     pub fn peek_least_recent(&self) -> Option<&K> {
-        let tail_idx = self.tail?;
+        let tail_idx = self.tail.get()?;
         Some(&self.entries[tail_idx].as_ref().unwrap().val)
     }
 
@@ -159,7 +178,7 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
     }
 
     fn move_to_head(&mut self, idx: usize) {
-        if self.head == Some(idx) {
+        if self.head == NonMax::some(idx) {
             return; // Already at head
         }
 
@@ -168,59 +187,63 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         let next = entry.next;
 
         // Unlink from current position
-        if let Some(prev_idx) = prev {
+        if let Some(prev_idx) = prev.get() {
             self.entries[prev_idx].as_mut().unwrap().next = next;
         }
-        if let Some(next_idx) = next {
+        if let Some(next_idx) = next.get() {
             self.entries[next_idx].as_mut().unwrap().prev = prev;
         }
 
         // Update tail if this was the tail
-        if self.tail == Some(idx) {
+        if self.tail == NonMax::some(idx) {
             self.tail = prev;
         }
 
         // Move to head
         let old_head = self.head;
-        self.head = Some(idx);
+        self.head = NonMax::some(idx);
 
         let entry = self.entries[idx].as_mut().unwrap();
-        entry.prev = None;
+        entry.prev = NonMax::NONE;
         entry.next = old_head;
 
-        if let Some(old_head_idx) = old_head {
-            self.entries[old_head_idx].as_mut().unwrap().prev = Some(idx);
+        if let Some(old_head_idx) = old_head.get() {
+            self.entries[old_head_idx].as_mut().unwrap().prev =
+                NonMax::some(idx);
         }
     }
 
     fn insert_at_head(&mut self, key: K) {
         let idx = if let Some(free_idx) = self.free_list.pop() {
-            self.entries[free_idx] =
-                Some(Entry { val: key.clone(), prev: None, next: self.head });
+            self.entries[free_idx] = Some(Entry {
+                val: key.clone(),
+                prev: NonMax::NONE,
+                next: self.head,
+            });
             free_idx
         } else {
             let idx = self.entries.len();
             self.entries.push(Some(Entry {
                 val: key.clone(),
-                prev: None,
+                prev: NonMax::NONE,
                 next: self.head,
             }));
             idx
         };
 
-        if let Some(old_head) = self.head {
-            self.entries[old_head].as_mut().unwrap().prev = Some(idx);
+        if let Some(old_head) = self.head.get() {
+            self.entries[old_head].as_mut().unwrap().prev = NonMax::some(idx);
         } else {
             // List was empty, this is also the tail
-            self.tail = Some(idx);
+            self.tail = NonMax::some(idx);
         }
 
-        self.head = Some(idx);
+        self.head = NonMax::some(idx);
         self.index_map.insert(key, idx);
     }
 
     fn move_to_tail(&mut self, idx: usize) {
-        if self.tail == Some(idx) {
+        if self.tail == NonMax::some(idx) {
             return; // Already at tail
         }
 
@@ -229,59 +252,63 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         let next = entry.next;
 
         // Unlink from current position
-        if let Some(prev_idx) = prev {
+        if let Some(prev_idx) = prev.get() {
             self.entries[prev_idx].as_mut().unwrap().next = next;
         }
-        if let Some(next_idx) = next {
+        if let Some(next_idx) = next.get() {
             self.entries[next_idx].as_mut().unwrap().prev = prev;
         }
 
         // Update head if this was head
-        if self.head == Some(idx) {
+        if self.head == NonMax::some(idx) {
             self.head = next;
         }
 
         // Move to tail
         let old_tail = self.tail;
-        self.tail = Some(idx);
+        self.tail = NonMax::some(idx);
 
         let entry = self.entries[idx].as_mut().unwrap();
-        entry.next = None;
+        entry.next = NonMax::NONE;
         entry.prev = old_tail;
 
-        if let Some(old_tail_idx) = old_tail {
-            self.entries[old_tail_idx].as_mut().unwrap().next = Some(idx);
+        if let Some(old_tail_idx) = old_tail.get() {
+            self.entries[old_tail_idx].as_mut().unwrap().next =
+                NonMax::some(idx);
         } else {
             // List was empty (or this was the only element, but we checked
             // tail==idx) If the list is empty, then head must also
             // be None.
-            self.head = Some(idx);
+            self.head = NonMax::some(idx);
         }
     }
 
     fn insert_at_tail(&mut self, key: K) {
         let idx = if let Some(free_idx) = self.free_list.pop() {
-            self.entries[free_idx] =
-                Some(Entry { val: key.clone(), prev: self.tail, next: None });
+            self.entries[free_idx] = Some(Entry {
+                val: key.clone(),
+                prev: self.tail,
+                next: NonMax::NONE,
+            });
             free_idx
         } else {
             let idx = self.entries.len();
             self.entries.push(Some(Entry {
                 val: key.clone(),
                 prev: self.tail,
-                next: None,
+                next: NonMax::NONE,
             }));
             idx
         };
 
-        if let Some(old_tail) = self.tail {
-            self.entries[old_tail].as_mut().unwrap().next = Some(idx);
+        if let Some(old_tail) = self.tail.get() {
+            self.entries[old_tail].as_mut().unwrap().next = NonMax::some(idx);
         } else {
             // List was empty, this is also the head
-            self.head = Some(idx);
+            self.head = NonMax::some(idx);
         }
 
-        self.tail = Some(idx);
+        self.tail = NonMax::some(idx);
         self.index_map.insert(key, idx);
     }
 
@@ -293,14 +320,14 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
             self.free_list.push(idx);
 
             // Unlink from list
-            if let Some(prev_idx) = entry.prev {
+            if let Some(prev_idx) = entry.prev.get() {
                 self.entries[prev_idx].as_mut().unwrap().next = entry.next;
             } else {
                 // This was head
                 self.head = entry.next;
             }
 
-            if let Some(next_idx) = entry.next {
+            if let Some(next_idx) = entry.next.get() {
                 self.entries[next_idx].as_mut().unwrap().prev = entry.prev;
             } else {
                 // This was tail
