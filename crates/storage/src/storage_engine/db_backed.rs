@@ -16,7 +16,7 @@ use crate::{
 #[must_use]
 pub fn default_shard_amount() -> usize {
     std::thread::available_parallelism()
-        .map_or_else(|_| 8, |x| x.get().next_power_of_two() * 8)
+        .map_or_else(|_| 16, |x| x.get().next_power_of_two() * 16)
 }
 
 /// Configuration options for a database-backed storage engine.

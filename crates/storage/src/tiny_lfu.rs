@@ -224,7 +224,7 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
 
             (None, Some(mut lock)) => {
                 // got the lock, process messages
-                self.process_policy_message(&mut lock);
+                self.process_policy_message(&mut lock, None);
             }
 
             // have a message but can't lock, will enqueue
@@ -243,16 +243,17 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
             }
 
             (Some(value), Some(mut lock)) => {
-                // got the lock, process the message first
-                self.process_message(value, &mut lock);
-
                 // then process any queued messages
-                self.process_policy_message(&mut lock);
+                self.process_policy_message(&mut lock, Some(value));
             }
         }
     }
 
-    fn process_policy_message(&self, lock: &mut Policy<K>) {
+    fn process_policy_message(
+        &self,
+        lock: &mut Policy<K>,
+        extra_message: Option<PolicyMessage<K>>,
+    ) {
         let mut processed = 0;
 
         while processed <= MAINTENANCE_BATCH_SIZE {
@@ -263,6 +264,10 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
                 break;
             };
 
+            self.process_message(message, lock);
+        }
+
+        if let Some(message) = extra_message {
             self.process_message(message, lock);
         }
     }
@@ -316,8 +321,12 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
             }
 
             // SLOW PATH: acquire write lock to perform removal
-            let mut shard =
-                parking_lot::RwLockUpgradableReadGuard::upgrade(shard);
+            let Ok(mut shard) =
+                parking_lot::RwLockUpgradableReadGuard::try_upgrade(shard)
+            else {
+                // couldn't get the lock, skip removal
+                return false;
+            };
 
             match shard.entry(evicted_key.clone()) {
                 hash_map::Entry::Occupied(mut occupied_entry) => {

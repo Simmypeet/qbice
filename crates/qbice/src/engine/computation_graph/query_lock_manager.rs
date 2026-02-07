@@ -21,7 +21,7 @@ pub struct OwnedLock(Arc<RwLock<()>>);
 pub struct ActiveLockLifecycleListener;
 
 impl LifecycleListener<QueryID, OwnedLock> for ActiveLockLifecycleListener {
-    fn is_pinned(&self, _key: &QueryID, value: &mut OwnedLock) -> bool {
+    fn is_pinned(&self, _key: &QueryID, value: &OwnedLock) -> bool {
         // Keep locks pinned while they are active (have at least one strong
         // reference).
         Arc::strong_count(&value.0) > 1

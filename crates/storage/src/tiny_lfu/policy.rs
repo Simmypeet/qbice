@@ -88,7 +88,7 @@ impl<K> Policy<K> {
 
                 // demote LRU of protected to probation if over capacity
                 if self.protected.len() > self.protected_capacity
-                    && let Some(lru_key) = self.protected.pop()
+                    && let Some(lru_key) = self.protected.pop_least_recent()
                 {
                     self.location_map
                         .insert(lru_key.clone(), Location::Probation);
@@ -129,7 +129,7 @@ impl<K> Policy<K> {
             return;
         }
 
-        let candidate_key = self.windows.pop().unwrap();
+        let candidate_key = self.windows.pop_least_recent().unwrap();
         let candidate_hash = hasher.hash_one(&candidate_key);
 
         // decide whether to add to main cache or evict
@@ -226,31 +226,21 @@ impl<K> Policy<K> {
     {
         let probation_capacity =
             self.max_capacity - self.window_capacity - self.protected_capacity;
-        let mut attempted = 0;
 
-        let mut cursor = self.probation.least_recent_cursor();
-
-        while cursor.len() > probation_capacity && attempted <= MAX_ATTEMPTS {
-            attempted += 1;
-
-            let Some(victim_key) = cursor.get() else {
+        while self.probation.len() > probation_capacity {
+            let Some(victim_key) = self.probation.peek_least_recent() else {
                 // no more victims to try
                 break;
             };
 
-            // if can't remove, resuffle and try again
             if !remove(victim_key) {
-                cursor.move_to(MoveTo::MoreRecent);
-                continue;
+                break;
             }
 
             // the main storage has confirmed removal of the victim,
             // we can evict it safely
-            let evicted_key = cursor.remove(MoveTo::MoreRecent).unwrap();
+            let evicted_key = self.probation.pop_least_recent().unwrap();
             self.location_map.remove(&evicted_key);
-
-            // reset attempt counter for next entry
-            attempted = 0;
         }
     }
 

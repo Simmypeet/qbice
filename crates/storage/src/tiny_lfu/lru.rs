@@ -64,8 +64,6 @@ impl<K: Eq + Hash + Clone> Cursor<'_, K> {
 
         Some(entry.val)
     }
-
-    pub fn len(&self) -> usize { self.lru.len() }
 }
 
 /// A simple LRU (Least Recently Used) list implementation.
@@ -112,7 +110,7 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
     }
 
     /// Pops the least recently used item (from tail).
-    pub fn pop(&mut self) -> Option<K> {
+    pub fn pop_least_recent(&mut self) -> Option<K> {
         let tail_idx = self.tail?;
 
         let entry = self.entries[tail_idx].take()?;
@@ -129,6 +127,22 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         }
 
         Some(entry.val)
+    }
+
+    pub fn peek_least_recent(&self) -> Option<&K> {
+        let tail_idx = self.tail?;
+        Some(&self.entries[tail_idx].as_ref().unwrap().val)
+    }
+
+    /// Inserts or updates the key to be the least recently used item (moves to
+    /// tail).
+    #[allow(unused)]
+    pub fn push_to_least_recently_used(&mut self, key: &K) {
+        if let Some(&idx) = self.index_map.get(key) {
+            self.move_to_tail(idx);
+        } else {
+            self.insert_at_tail(key.clone());
+        }
     }
 
     fn move_to_head(&mut self, idx: usize) {
@@ -192,6 +206,72 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         self.index_map.insert(key, idx);
     }
 
+    fn move_to_tail(&mut self, idx: usize) {
+        if self.tail == Some(idx) {
+            return; // Already at tail
+        }
+
+        let entry = self.entries[idx].as_mut().unwrap();
+        let prev = entry.prev;
+        let next = entry.next;
+
+        // Unlink from current position
+        if let Some(prev_idx) = prev {
+            self.entries[prev_idx].as_mut().unwrap().next = next;
+        }
+        if let Some(next_idx) = next {
+            self.entries[next_idx].as_mut().unwrap().prev = prev;
+        }
+
+        // Update head if this was head
+        if self.head == Some(idx) {
+            self.head = next;
+        }
+
+        // Move to tail
+        let old_tail = self.tail;
+        self.tail = Some(idx);
+
+        let entry = self.entries[idx].as_mut().unwrap();
+        entry.next = None;
+        entry.prev = old_tail;
+
+        if let Some(old_tail_idx) = old_tail {
+            self.entries[old_tail_idx].as_mut().unwrap().next = Some(idx);
+        } else {
+            // List was empty (or this was the only element, but we checked
+            // tail==idx) If the list is empty, then head must also
+            // be None.
+            self.head = Some(idx);
+        }
+    }
+
+    fn insert_at_tail(&mut self, key: K) {
+        let idx = if let Some(free_idx) = self.free_list.pop() {
+            self.entries[free_idx] =
+                Some(Entry { val: key.clone(), prev: self.tail, next: None });
+            free_idx
+        } else {
+            let idx = self.entries.len();
+            self.entries.push(Some(Entry {
+                val: key.clone(),
+                prev: self.tail,
+                next: None,
+            }));
+            idx
+        };
+
+        if let Some(old_tail) = self.tail {
+            self.entries[old_tail].as_mut().unwrap().next = Some(idx);
+        } else {
+            // List was empty, this is also the head
+            self.head = Some(idx);
+        }
+
+        self.tail = Some(idx);
+        self.index_map.insert(key, idx);
+    }
+
     /// Removes the specified key from the LRU list.
     pub fn remove(&mut self, key: &K) {
         if let Some(&idx) = self.index_map.get(key) {
@@ -231,15 +311,15 @@ mod tests {
     #[test]
     fn test_empty_pop() {
         let mut lru: Lru<i32> = Lru::new();
-        assert_eq!(lru.pop(), None);
+        assert_eq!(lru.pop_least_recent(), None);
     }
 
     #[test]
     fn test_single_insert_and_pop() {
         let mut lru = Lru::new();
         lru.hit(&1);
-        assert_eq!(lru.pop(), Some(1));
-        assert_eq!(lru.pop(), None);
+        assert_eq!(lru.pop_least_recent(), Some(1));
+        assert_eq!(lru.pop_least_recent(), None);
     }
 
     #[test]
@@ -251,10 +331,10 @@ mod tests {
 
         // Order: head -> 3 -> 2 -> 1 -> tail
         // Pop should return 1 (least recently used)
-        assert_eq!(lru.pop(), Some(1));
-        assert_eq!(lru.pop(), Some(2));
-        assert_eq!(lru.pop(), Some(3));
-        assert_eq!(lru.pop(), None);
+        assert_eq!(lru.pop_least_recent(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(2));
+        assert_eq!(lru.pop_least_recent(), Some(3));
+        assert_eq!(lru.pop_least_recent(), None);
     }
 
     #[test]
@@ -268,9 +348,9 @@ mod tests {
         lru.hit(&1);
 
         // Order: head -> 1 -> 3 -> 2 -> tail
-        assert_eq!(lru.pop(), Some(2));
-        assert_eq!(lru.pop(), Some(3));
-        assert_eq!(lru.pop(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(2));
+        assert_eq!(lru.pop_least_recent(), Some(3));
+        assert_eq!(lru.pop_least_recent(), Some(1));
     }
 
     #[test]
@@ -282,8 +362,8 @@ mod tests {
         // Hit 2 (already head), should not change order
         lru.hit(&2);
 
-        assert_eq!(lru.pop(), Some(1));
-        assert_eq!(lru.pop(), Some(2));
+        assert_eq!(lru.pop_least_recent(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(2));
     }
 
     #[test]
@@ -297,9 +377,9 @@ mod tests {
         lru.hit(&2);
 
         // Order: head -> 2 -> 3 -> 1 -> tail
-        assert_eq!(lru.pop(), Some(1));
-        assert_eq!(lru.pop(), Some(3));
-        assert_eq!(lru.pop(), Some(2));
+        assert_eq!(lru.pop_least_recent(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(3));
+        assert_eq!(lru.pop_least_recent(), Some(2));
     }
 
     #[test]
@@ -309,14 +389,14 @@ mod tests {
         lru.hit(&2);
 
         // Pop and insert new element
-        assert_eq!(lru.pop(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(1));
         lru.hit(&3);
 
         // Free slot from 1 should be reused
         assert!(lru.entries.len() <= 2);
 
-        assert_eq!(lru.pop(), Some(2));
-        assert_eq!(lru.pop(), Some(3));
+        assert_eq!(lru.pop_least_recent(), Some(2));
+        assert_eq!(lru.pop_least_recent(), Some(3));
     }
 
     #[test]
@@ -327,8 +407,8 @@ mod tests {
 
         lru.hit(&"hello".to_string());
 
-        assert_eq!(lru.pop(), Some("world".to_string()));
-        assert_eq!(lru.pop(), Some("hello".to_string()));
+        assert_eq!(lru.pop_least_recent(), Some("world".to_string()));
+        assert_eq!(lru.pop_least_recent(), Some("hello".to_string()));
     }
 
     #[test]
@@ -346,13 +426,75 @@ mod tests {
         // Pop all, first 98 should be in reverse insertion order (excluding 0
         // and 50)
         let mut popped = Vec::new();
-        while let Some(val) = lru.pop() {
+        while let Some(val) = lru.pop_least_recent() {
             popped.push(val);
         }
 
         assert_eq!(popped.len(), 100);
         // Last two should be 50 and 0 (most recently hit)
-        assert_eq!(popped[98], 50);
-        assert_eq!(popped[99], 0);
+        assert_eq!(popped[98], 0);
+        assert_eq!(popped[99], 50);
+    }
+
+    #[test]
+    fn test_push_to_least_recently_used() {
+        let mut lru = Lru::new();
+        lru.hit(&1);
+        lru.hit(&2);
+        lru.hit(&3);
+
+        // Insert new element to LRU: should become 0
+        lru.push_to_least_recently_used(&0);
+
+        // Order: head -> 3 -> 2 -> 1 -> 0 -> tail
+
+        assert_eq!(lru.pop_least_recent(), Some(0));
+        assert_eq!(lru.pop_least_recent(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(2));
+        assert_eq!(lru.pop_least_recent(), Some(3));
+    }
+
+    #[test]
+    fn test_push_to_least_recent_moves_existing() {
+        let mut lru = Lru::new();
+        lru.hit(&1);
+        lru.hit(&2);
+        lru.hit(&3);
+        // Order: head -> 3 -> 2 -> 1 -> tail
+
+        // Move 3 (head) to tail
+        lru.push_to_least_recently_used(&3);
+        // Order: head -> 2 -> 1 -> 3 -> tail
+
+        assert_eq!(lru.pop_least_recent(), Some(3));
+        assert_eq!(lru.pop_least_recent(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(2));
+
+        // Test middle move
+        let mut lru = Lru::new();
+        lru.hit(&1);
+        lru.hit(&2);
+        lru.hit(&3);
+        // Order: head -> 3 -> 2 -> 1 -> tail
+
+        // Move 2 (middle) to tail
+        lru.push_to_least_recently_used(&2);
+        // Order: head -> 3 -> 1 -> 2 -> tail
+        assert_eq!(lru.pop_least_recent(), Some(2));
+        assert_eq!(lru.pop_least_recent(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(3));
+
+        // Test tail move (no-op logically, but should remain tail)
+        let mut lru = Lru::new();
+        lru.hit(&1);
+        lru.hit(&2);
+        lru.hit(&3);
+        // Order: head -> 3 -> 2 -> 1 -> tail
+
+        lru.push_to_least_recently_used(&1);
+        // Order: head -> 3 -> 2 -> 1 -> tail
+        assert_eq!(lru.pop_least_recent(), Some(1));
+        assert_eq!(lru.pop_least_recent(), Some(2));
+        assert_eq!(lru.pop_least_recent(), Some(3));
     }
 }
