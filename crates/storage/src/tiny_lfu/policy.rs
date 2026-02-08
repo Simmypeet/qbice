@@ -2,10 +2,7 @@ use std::hash::BuildHasher;
 
 use fxhash::FxBuildHasher;
 
-use crate::tiny_lfu::{
-    lru::{self, MoveTo},
-    sketch::Sketch,
-};
+use crate::tiny_lfu::{lru, sketch::Sketch};
 
 #[derive(Clone)]
 pub enum WriteMessage<K> {
@@ -20,9 +17,7 @@ pub enum PolicyMessage<K> {
 }
 
 pub struct Policy<K> {
-    windows: lru::Lru<K>,
-    probation: lru::Lru<K>,
-    protected: lru::Lru<K>,
+    lru: lru::Lru<K>,
 
     window_capacity: usize,
     protected_capacity: usize,
@@ -31,7 +26,6 @@ pub struct Policy<K> {
     sketch: Sketch,
 }
 
-const MAX_ATTEMPTS: usize = 16;
 const WINDOW_RATIO: f64 = 0.01;
 
 impl<K> Policy<K> {
@@ -52,9 +46,7 @@ impl<K> Policy<K> {
         main_capacity = protected_capacity + probation_capacity;
 
         Self {
-            windows: lru::Lru::new(),
-            probation: lru::Lru::new(),
-            protected: lru::Lru::new(),
+            lru: lru::Lru::new(),
             window_capacity,
             protected_capacity,
             max_capacity: window_capacity + main_capacity,
@@ -64,41 +56,16 @@ impl<K> Policy<K> {
         }
     }
 
-    pub fn on_read_hit(&mut self, key: &K, hash: u64, increment: bool) -> bool
+    pub fn on_read_hit(&mut self, key: &K, hash: u64) -> bool
     where
         K: std::hash::Hash + Eq + Clone,
     {
-        if increment {
-            self.sketch.record_access(hash);
-        }
+        self.sketch.record_access(hash);
 
-        if self.windows.hit_if_exists(key) {
-            return true;
-        }
-
-        if self.protected.hit_if_exists(key) {
-            return true;
-        }
-
-        if self.probation.contains(key) {
-            // promote to protected
-            self.probation.remove(key);
-
-            self.protected.hit(key);
-
-            // demote LRU of protected to probation if over capacity
-            if self.protected.len() > self.protected_capacity
-                && let Some(lru_key) = self.protected.pop_least_recent()
-            {
-                self.probation.hit(&lru_key);
-            }
-
-            return true;
-        }
-
-        false
+        self.lru.hit(key, self.protected_capacity)
     }
 
+    #[allow(clippy::collapsible_else_if)]
     pub fn on_write(
         &mut self,
         key: &K,
@@ -108,138 +75,99 @@ impl<K> Policy<K> {
     ) where
         K: std::hash::Hash + Eq + Clone,
     {
-        self.sketch.record_access(hash);
-
-        if self.on_read_hit(key, hash, false) {
+        // first try read hit
+        if self.on_read_hit(key, hash) {
+            // was already in cache, done
             return;
         }
 
         // insert into window
-        self.windows.hit(key);
+        self.lru.new_entry(key.clone(), lru::Region::Window);
 
         // evict from window if over capacity
-        if self.windows.len() <= self.window_capacity {
+        if self.lru.window_len() <= self.window_capacity {
             return;
         }
 
-        let candidate_key = self.windows.pop_least_recent().unwrap();
-        let candidate_hash = hasher.hash_one(&candidate_key);
-
         // decide whether to add to main cache or evict
-        let main_usage = self.probation.len() + self.protected.len();
+        let main_usage = self.lru.probation_len() + self.lru.protected_len();
         let main_limit = self.max_capacity - self.window_capacity;
 
         if main_usage < main_limit {
             // add to main cache
-            self.probation.hit(&candidate_key);
-
+            self.lru.move_least_recent_of_to_new_region(
+                lru::Region::Window,
+                lru::Region::Probation,
+            );
             return;
         }
 
-        // main cache is full, have to evict an item
+        // The DUEL: LRU probation vs LRU window
 
-        // in case of pinned items (ref_count > 0), we can't evict them, so
-        // we have to resuffle them to the back of the probation LRU.
-        //
-        // In the worst case, we may have to try multiple times to find a
-        // non-pinned item to evict. We limit the number of attempts to avoid
-        // getting stuck at the cost of possibly evicting a better candidate
-        // or growing beyond capacity temporarily.
-        let mut attempt = 0;
-        let mut cursor = self.probation.least_recent_cursor();
+        let candidate_key =
+            self.lru.peek_least_recent(lru::Region::Window).unwrap().clone();
+        let candidate_hash = hasher.hash_one(&candidate_key);
 
-        while attempt <= MAX_ATTEMPTS {
-            attempt += 1;
+        let victim_key =
+            self.lru.peek_least_recent(lru::Region::Probation).unwrap();
+        let victim_hash = hasher.hash_one(victim_key);
 
-            let Some(victim_key) = cursor.get() else {
-                // no more victims to try
-                break;
-            };
+        let candidate_freq = self.sketch.estimate_frequency(candidate_hash);
+        let victim_freq = self.sketch.estimate_frequency(victim_hash);
 
-            let victim_hash = hasher.hash_one(victim_key);
-
-            let candidate_freq = self.sketch.estimate_frequency(candidate_hash);
-            let victim_freq = self.sketch.estimate_frequency(victim_hash);
-
-            if candidate_freq > victim_freq {
-                // can't evict victim, try next
-                if !remove(victim_key) {
-                    cursor.move_to(MoveTo::MoreRecent);
-
-                    continue;
-                }
-
+        // CANDIDATE wins, VICTIM has to go
+        if candidate_freq > victim_freq {
+            // can't evict victim, add it to the pinned region
+            if remove(victim_key) {
                 // the main storage has confirmed removal of the victim,
                 // we can evict it safely
-                let _ = cursor.remove(MoveTo::MoreRecent).unwrap();
-
-                self.probation.hit(&candidate_key);
-
-                return;
+                self.lru.pop_least_recent(lru::Region::Probation);
+            } else {
+                // If the victim is pinned, we move it to pinned region to keep
+                // tracking it.
+                self.lru.move_least_recent_of_to_new_region(
+                    lru::Region::Probation,
+                    lru::Region::Pinned,
+                );
             }
 
-            // candidate loses, evict it
-            if !remove(&candidate_key) {
-                // If the candidate is pinned, we can't evict it.
-                // We force-promote it to probation to keep tracking it.
-                self.probation.hit(&candidate_key);
-                return;
-            }
-
-            return;
+            // promote candidate to probation region
+            self.lru.move_least_recent_of_to_new_region(
+                lru::Region::Window,
+                lru::Region::Probation,
+            );
         }
-
-        // if we reach here, it means we have exceeded MAX_ATTEMPTS and couldn't
-        // find a victim to evict (likely all pinned). So we have to evict the
-        // candidate itself.
-        if !remove(&candidate_key) {
-            // Cannot evict candidate either, so we keep it in probation.
-            self.probation.hit(&candidate_key);
+        // CANDIDATE loses, EVICT it
+        else {
+            if remove(&candidate_key) {
+                // the main storage has confirmed removal of the candidate,
+                // we can evict it safely
+                self.lru.pop_least_recent(lru::Region::Window);
+            } else {
+                // If the candidate is pinned, we move it to pinned region to
+                // keep tracking it.
+                self.lru.move_least_recent_of_to_new_region(
+                    lru::Region::Window,
+                    lru::Region::Pinned,
+                );
+            }
         }
     }
 
-    pub fn attempt_to_trim_overflowing_cache(
+    #[allow(clippy::unused_self)]
+    pub fn attempt_to_trim_overflowing_pinned(
         &mut self,
-        remove: impl Fn(&K) -> bool,
+        _remove: impl Fn(&K) -> bool,
     ) where
         K: std::hash::Hash + Eq + Clone,
     {
-        let probation_capacity =
-            self.max_capacity - self.window_capacity - self.protected_capacity;
-
-        while self.probation.len() > probation_capacity {
-            let Some(victim_key) = self.probation.peek_least_recent() else {
-                // no more victims to try
-                break;
-            };
-
-            if !remove(victim_key) {
-                break;
-            }
-
-            // the main storage has confirmed removal of the victim,
-            // we can evict it safely
-            let _ = self.probation.pop_least_recent().unwrap();
-        }
+        // TODO: periodically scan pinned region to evict unpinned items
     }
 
     pub fn on_removed(&mut self, key: &K)
     where
         K: std::hash::Hash + Eq + Clone,
     {
-        // Try removing from all queues. One of them might have it.
-        // Since the logic guarantees a key is in exactly one queue (or none),
-        // and `remove` is safe (no-op if missing), this works.
-        // However, we can stop early if found.
-
-        // Optimization: most items are in Protected or Probation.
-
-        if self.protected.remove(key).is_some() {
-            return;
-        }
-        if self.probation.remove(key).is_some() {
-            return;
-        }
-        self.windows.remove(key);
+        self.lru.remove(key);
     }
 }

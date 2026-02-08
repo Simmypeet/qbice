@@ -1,544 +1,302 @@
-use std::hash::Hash;
-
-use fxhash::FxHashMap;
-
-/// A `usize` that uses `usize::MAX` as a sentinel for "no value",
-/// allowing `Entry` to store linked-list pointers without the extra
-/// byte of `Option<usize>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NonMax(usize);
-
-impl NonMax {
-    const NONE: Self = Self(usize::MAX);
-
-    fn some(val: usize) -> Self {
-        debug_assert_ne!(val, usize::MAX, "NonMax cannot hold usize::MAX");
-        Self(val)
-    }
-
-    const fn get(self) -> Option<usize> {
-        if self.0 == usize::MAX { None } else { Some(self.0) }
-    }
-}
-
-#[derive(Debug)]
-struct Entry<K> {
-    val: K,
-    prev: NonMax,
-    next: NonMax,
-}
-
-pub struct Cursor<'x, K> {
-    lru: &'x mut Lru<K>,
-    current: NonMax,
-}
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[allow(unused)]
-pub enum MoveTo {
-    MoreRecent,
-    LessRecent,
+#[repr(u8)]
+pub enum Region {
+    Window = 0,
+    Probation = 1,
+    Protected = 2,
+    Pinned = 3,
 }
 
-impl<K: Eq + Hash + Clone> Cursor<'_, K> {
-    pub fn move_to(&mut self, direction: MoveTo) {
-        if let Some(current_idx) = self.current.get() {
-            let entry = self.lru.entries[current_idx].as_ref().unwrap();
-            self.current = match direction {
-                MoveTo::MoreRecent => entry.prev,
-                MoveTo::LessRecent => entry.next,
-            };
+pub type Index = u32;
+pub const NULL: Index = u32::MAX;
+
+pub struct Entry<K> {
+    pub key: K,
+    pub prev: Index,
+    pub next: Index,
+}
+
+struct LruList<K> {
+    nodes: slab::Slab<Entry<K>>,
+
+    // Windows, Protected, Probation, Pinned
+    heads: [Index; 4],
+    tails: [Index; 4],
+    lens: [usize; 4],
+}
+
+impl<K> LruList<K> {
+    pub const fn new() -> Self {
+        Self {
+            nodes: slab::Slab::new(),
+            heads: [NULL; 4],
+            tails: [NULL; 4],
+            lens: [0; 4],
         }
     }
 
-    pub fn get(&self) -> Option<&K> {
-        let current_idx = self.current.get()?;
-        Some(&self.lru.entries[current_idx].as_ref().unwrap().val)
+    // Connects a node to the head of a specific region
+    fn push_head(&mut self, index: u32, region: Region) {
+        let r_idx = region as usize;
+        let index_usize = index as usize;
+
+        let old_head = self.heads[r_idx];
+
+        // Update the node's pointers
+        let node = &mut self.nodes[index_usize];
+        node.next = old_head;
+        node.prev = NULL;
+
+        // Update the old head's prev pointer
+        if old_head != NULL {
+            self.nodes[old_head as usize].prev = index;
+        }
+
+        // Update the struct's pointers
+        self.heads[r_idx] = index;
+        if self.tails[r_idx] == NULL {
+            self.tails[r_idx] = index;
+        }
     }
 
-    pub fn remove(&mut self, move_to: MoveTo) -> Option<K> {
-        let current_idx = self.current.get()?;
+    // Removes a node from its current region
+    fn unlink(&mut self, index: u32, region: Region) {
+        let index_usize = index as usize;
+        let node = &self.nodes[index_usize];
 
-        let entry = self.lru.entries[current_idx].take().unwrap();
+        let prev = node.prev;
+        let next = node.next;
 
-        self.current = match move_to {
-            MoveTo::MoreRecent => entry.prev,
-            MoveTo::LessRecent => entry.next,
-        };
-
-        self.lru.index_map.remove(&entry.val);
-        self.lru.free_list.push(current_idx);
-
-        if let Some(prev_idx) = entry.prev.get() {
-            self.lru.entries[prev_idx].as_mut().unwrap().next = entry.next;
+        // Update the previous node's next pointer
+        if prev == NULL {
+            // We're removing the head
+            self.heads[region as usize] = next;
         } else {
-            self.lru.head = entry.next;
+            self.nodes[prev as usize].next = next;
         }
 
-        if let Some(next_idx) = entry.next.get() {
-            self.lru.entries[next_idx].as_mut().unwrap().prev = entry.prev;
+        // Update the next node's prev pointer
+        if next == NULL {
+            // We're removing the tail
+            self.tails[region as usize] = prev;
         } else {
-            self.lru.tail = entry.prev;
+            self.nodes[next as usize].prev = prev;
+        }
+    }
+
+    fn move_to_head(&mut self, index: u32, region: Region) {
+        let idx = index as usize;
+        let region_idx = region as usize;
+        if self.heads[region_idx] == index {
+            return; // Already at head
         }
 
-        Some(entry.val)
+        let entry = &mut self.nodes[idx];
+        let prev = entry.prev;
+        let next = entry.next;
+
+        // Unlink from current position
+        if prev != NULL {
+            self.nodes[prev as usize].next = next;
+        }
+
+        if next != NULL {
+            self.nodes[next as usize].prev = prev;
+        }
+
+        // Update tail if this was the tail
+        if self.tails[region_idx] == index {
+            self.tails[region_idx] = prev;
+        }
+
+        // Move to head
+        let old_head = self.heads[region_idx];
+        self.heads[region_idx] = index;
+
+        let entry = &mut self.nodes[idx];
+        entry.prev = NULL;
+        entry.next = old_head;
+
+        if old_head != NULL {
+            self.nodes[old_head as usize].prev = index;
+        }
+    }
+
+    fn pop_least_recent(&mut self, region: Region) -> Option<K> {
+        let tail_index = self.tails[region as usize];
+        if tail_index == NULL {
+            return None;
+        }
+
+        let entry = self.nodes.remove(tail_index as usize);
+        let key = entry.key;
+
+        if entry.prev == NULL {
+            // We're removing the only node
+            self.heads[region as usize] = NULL;
+            self.tails[region as usize] = NULL;
+        } else {
+            self.nodes[entry.prev as usize].next = NULL;
+            self.tails[region as usize] = entry.prev;
+        }
+
+        // Decrease length
+        self.lens[region as usize] -= 1;
+
+        Some(key)
     }
 }
 
-/// A simple LRU (Least Recently Used) list implementation.
-#[derive(Debug)]
 pub struct Lru<K> {
-    free_list: Vec<usize>,
-
-    head: NonMax,
-    tail: NonMax,
-
-    entries: Vec<Option<Entry<K>>>,
-    index_map: FxHashMap<K, usize>,
+    list: LruList<K>,
+    map: HashMap<K, (Index, Region)>,
 }
 
-impl Default for Lru<String> {
-    fn default() -> Self { Self::new() }
+impl<K> Entry<K> {
+    pub const fn new(key: K) -> Self { Self { key, prev: NULL, next: NULL } }
 }
 
 impl<K> Lru<K> {
-    /// Creates a new, empty LRU list.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            free_list: Vec::new(),
-            head: NonMax::NONE,
-            tail: NonMax::NONE,
-            entries: Vec::new(),
-            index_map: FxHashMap::default(),
-        }
-    }
+    pub fn new() -> Self { Self { map: HashMap::new(), list: LruList::new() } }
 }
 
 impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
-    /// Inserts or updates the key to be the most recently used item (moves to
-    /// head).
-    pub fn hit(&mut self, key: &K) {
-        if let Some(&idx) = self.index_map.get(key) {
-            // Key exists, move it to the head
-            self.move_to_head(idx);
-        } else {
-            // Key doesn't exist, insert it at the head
-            self.insert_at_head(key.clone());
-        }
-    }
+    pub fn hit(&mut self, key: &K, protected_capacity: usize) -> bool {
+        if let Some((index, region)) = self.map.get_mut(key) {
+            match region {
+                // On a hit, move the node to the head of its region
+                Region::Window => self.list.move_to_head(*index, *region),
 
-    /// Moves the key to the head if it exists. Returns true if it was found.
-    pub fn hit_if_exists(&mut self, key: &K) -> bool {
-        if let Some(&idx) = self.index_map.get(key) {
-            self.move_to_head(idx);
+                // promote to
+                Region::Probation => {
+                    // move to protected
+                    self.list.unlink(*index, Region::Probation);
+                    self.list.push_head(*index, Region::Protected);
+
+                    // update lengths and region
+                    self.list.lens[Region::Probation as usize] -= 1;
+                    self.list.lens[Region::Protected as usize] += 1;
+                    *region = Region::Protected;
+
+                    // if protected over capacity, demote LRU to probation
+                    if self.list.lens[Region::Protected as usize]
+                        > protected_capacity
+                    {
+                        let lru_index =
+                            self.list.tails[Region::Protected as usize];
+
+                        if self.list.tails[Region::Protected as usize] != NULL {
+                            self.list.unlink(lru_index, Region::Protected);
+                            self.list.push_head(lru_index, Region::Probation);
+
+                            let (_, lru_region) = self
+                                .map
+                                .get_mut(
+                                    &self.list.nodes[lru_index as usize].key,
+                                )
+                                .unwrap();
+
+                            // update lengths
+                            self.list.lens[Region::Protected as usize] -= 1;
+                            self.list.lens[Region::Probation as usize] += 1;
+                            *lru_region = Region::Probation;
+                        }
+                    }
+                }
+
+                Region::Protected => {
+                    self.list.move_to_head(*index, *region);
+                }
+
+                Region::Pinned => {
+                    // do nothing
+                }
+            }
+
             true
         } else {
             false
         }
     }
 
-    /// Checks if the key exists in the list.
-    pub fn contains(&self, key: &K) -> bool { self.index_map.contains_key(key) }
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn new_entry(&mut self, key: K, region: Region) {
+        let entry = Entry::new(key.clone());
+        let index = self.list.nodes.insert(entry) as u32;
 
-    /// Pops the least recently used item (from tail).
-    pub fn pop_least_recent(&mut self) -> Option<K> {
-        let tail_idx = self.tail.get()?;
+        assert!(
+            self.map.insert(key, (index, region)).is_none(),
+            "Key already exists in LRU map"
+        );
 
-        let entry = self.entries[tail_idx].take()?;
-        self.index_map.remove(&entry.val);
-        self.free_list.push(tail_idx);
-
-        // Update tail
-        self.tail = entry.prev;
-        if let Some(new_tail) = self.tail.get() {
-            self.entries[new_tail].as_mut().unwrap().next = NonMax::NONE;
-        } else {
-            // List is now empty
-            self.head = NonMax::NONE;
-        }
-
-        Some(entry.val)
+        self.list.push_head(index, region);
+        self.list.lens[region as usize] += 1;
     }
 
-    pub fn peek_least_recent(&self) -> Option<&K> {
-        let tail_idx = self.tail.get()?;
-        Some(&self.entries[tail_idx].as_ref().unwrap().val)
+    pub const fn window_len(&self) -> usize {
+        self.list.lens[Region::Window as usize]
     }
 
-    /// Inserts or updates the key to be the least recently used item (moves to
-    /// tail).
-    #[allow(unused)]
-    pub fn push_to_least_recently_used(&mut self, key: &K) {
-        if let Some(&idx) = self.index_map.get(key) {
-            self.move_to_tail(idx);
+    pub const fn probation_len(&self) -> usize {
+        self.list.lens[Region::Probation as usize]
+    }
+
+    pub const fn protected_len(&self) -> usize {
+        self.list.lens[Region::Protected as usize]
+    }
+
+    pub fn peek_least_recent(&self, region: Region) -> Option<&K> {
+        let tail_index = self.list.tails[region as usize];
+        if tail_index == NULL {
+            None
         } else {
-            self.insert_at_tail(key.clone());
+            Some(&self.list.nodes[tail_index as usize].key)
         }
     }
 
-    fn move_to_head(&mut self, idx: usize) {
-        if self.head == NonMax::some(idx) {
-            return; // Already at head
+    pub fn pop_least_recent(&mut self, region: Region) -> Option<K> {
+        let entry = self.list.pop_least_recent(region);
+
+        if let Some(ref key) = entry {
+            self.map.remove(key);
         }
 
-        let entry = self.entries[idx].as_mut().unwrap();
-        let prev = entry.prev;
-        let next = entry.next;
-
-        // Unlink from current position
-        if let Some(prev_idx) = prev.get() {
-            self.entries[prev_idx].as_mut().unwrap().next = next;
-        }
-        if let Some(next_idx) = next.get() {
-            self.entries[next_idx].as_mut().unwrap().prev = prev;
-        }
-
-        // Update tail if this was the tail
-        if self.tail == NonMax::some(idx) {
-            self.tail = prev;
-        }
-
-        // Move to head
-        let old_head = self.head;
-        self.head = NonMax::some(idx);
-
-        let entry = self.entries[idx].as_mut().unwrap();
-        entry.prev = NonMax::NONE;
-        entry.next = old_head;
-
-        if let Some(old_head_idx) = old_head.get() {
-            self.entries[old_head_idx].as_mut().unwrap().prev =
-                NonMax::some(idx);
-        }
+        entry
     }
 
-    fn insert_at_head(&mut self, key: K) {
-        let idx = if let Some(free_idx) = self.free_list.pop() {
-            self.entries[free_idx] = Some(Entry {
-                val: key.clone(),
-                prev: NonMax::NONE,
-                next: self.head,
-            });
-            free_idx
-        } else {
-            let idx = self.entries.len();
-            self.entries.push(Some(Entry {
-                val: key.clone(),
-                prev: NonMax::NONE,
-                next: self.head,
-            }));
-            idx
-        };
-
-        if let Some(old_head) = self.head.get() {
-            self.entries[old_head].as_mut().unwrap().prev = NonMax::some(idx);
-        } else {
-            // List was empty, this is also the tail
-            self.tail = NonMax::some(idx);
+    pub fn move_least_recent_of_to_new_region(
+        &mut self,
+        from_region: Region,
+        to_region: Region,
+    ) {
+        let tail_index = self.list.tails[from_region as usize];
+        if tail_index == NULL {
+            return;
         }
 
-        self.head = NonMax::some(idx);
-        self.index_map.insert(key, idx);
+        self.list.unlink(tail_index, from_region);
+        self.list.push_head(tail_index, to_region);
+
+        // Update lengths
+        self.list.lens[from_region as usize] -= 1;
+        self.list.lens[to_region as usize] += 1;
+
+        let key = &self.list.nodes[tail_index as usize].key;
+        let (_, region) = self.map.get_mut(key).unwrap();
+
+        *region = to_region;
     }
 
-    fn move_to_tail(&mut self, idx: usize) {
-        if self.tail == NonMax::some(idx) {
-            return; // Already at tail
-        }
-
-        let entry = self.entries[idx].as_mut().unwrap();
-        let prev = entry.prev;
-        let next = entry.next;
-
-        // Unlink from current position
-        if let Some(prev_idx) = prev.get() {
-            self.entries[prev_idx].as_mut().unwrap().next = next;
-        }
-        if let Some(next_idx) = next.get() {
-            self.entries[next_idx].as_mut().unwrap().prev = prev;
-        }
-
-        // Update head if this was head
-        if self.head == NonMax::some(idx) {
-            self.head = next;
-        }
-
-        // Move to tail
-        let old_tail = self.tail;
-        self.tail = NonMax::some(idx);
-
-        let entry = self.entries[idx].as_mut().unwrap();
-        entry.next = NonMax::NONE;
-        entry.prev = old_tail;
-
-        if let Some(old_tail_idx) = old_tail.get() {
-            self.entries[old_tail_idx].as_mut().unwrap().next =
-                NonMax::some(idx);
-        } else {
-            // List was empty (or this was the only element, but we checked
-            // tail==idx) If the list is empty, then head must also
-            // be None.
-            self.head = NonMax::some(idx);
-        }
-    }
-
-    fn insert_at_tail(&mut self, key: K) {
-        let idx = if let Some(free_idx) = self.free_list.pop() {
-            self.entries[free_idx] = Some(Entry {
-                val: key.clone(),
-                prev: self.tail,
-                next: NonMax::NONE,
-            });
-            free_idx
-        } else {
-            let idx = self.entries.len();
-            self.entries.push(Some(Entry {
-                val: key.clone(),
-                prev: self.tail,
-                next: NonMax::NONE,
-            }));
-            idx
-        };
-
-        if let Some(old_tail) = self.tail.get() {
-            self.entries[old_tail].as_mut().unwrap().next = NonMax::some(idx);
-        } else {
-            // List was empty, this is also the head
-            self.head = NonMax::some(idx);
-        }
-
-        self.tail = NonMax::some(idx);
-        self.index_map.insert(key, idx);
-    }
-
-    /// Removes the specified key from the LRU list.
     pub fn remove(&mut self, key: &K) -> Option<K> {
-        if let Some(&idx) = self.index_map.get(key) {
-            let entry = self.entries[idx].take().unwrap();
-            self.index_map.remove(key);
-            self.free_list.push(idx);
-
-            // Unlink from list
-            if let Some(prev_idx) = entry.prev.get() {
-                self.entries[prev_idx].as_mut().unwrap().next = entry.next;
-            } else {
-                // This was head
-                self.head = entry.next;
-            }
-
-            if let Some(next_idx) = entry.next.get() {
-                self.entries[next_idx].as_mut().unwrap().prev = entry.prev;
-            } else {
-                // This was tail
-                self.tail = entry.prev;
-            }
-
-            Some(entry.val)
+        if let Some((index, region)) = self.map.remove(key) {
+            self.list.unlink(index, region);
+            self.list.lens[region as usize] -= 1;
+            let entry = self.list.nodes.remove(index as usize);
+            Some(entry.key)
         } else {
             None
         }
-    }
-
-    pub fn len(&self) -> usize { self.index_map.len() }
-
-    pub const fn least_recent_cursor(&mut self) -> Cursor<'_, K> {
-        let tail = self.tail;
-        Cursor { lru: self, current: tail }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_empty_pop() {
-        let mut lru: Lru<i32> = Lru::new();
-        assert_eq!(lru.pop_least_recent(), None);
-    }
-
-    #[test]
-    fn test_single_insert_and_pop() {
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        assert_eq!(lru.pop_least_recent(), None);
-    }
-
-    #[test]
-    fn test_lru_order() {
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-        lru.hit(&3);
-
-        // Order: head -> 3 -> 2 -> 1 -> tail
-        // Pop should return 1 (least recently used)
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        assert_eq!(lru.pop_least_recent(), Some(2));
-        assert_eq!(lru.pop_least_recent(), Some(3));
-        assert_eq!(lru.pop_least_recent(), None);
-    }
-
-    #[test]
-    fn test_hit_moves_to_head() {
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-        lru.hit(&3);
-
-        // Now hit 1 again, moving it to head
-        lru.hit(&1);
-
-        // Order: head -> 1 -> 3 -> 2 -> tail
-        assert_eq!(lru.pop_least_recent(), Some(2));
-        assert_eq!(lru.pop_least_recent(), Some(3));
-        assert_eq!(lru.pop_least_recent(), Some(1));
-    }
-
-    #[test]
-    fn test_hit_existing_head() {
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-
-        // Hit 2 (already head), should not change order
-        lru.hit(&2);
-
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        assert_eq!(lru.pop_least_recent(), Some(2));
-    }
-
-    #[test]
-    fn test_hit_middle_element() {
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-        lru.hit(&3);
-
-        // Hit 2 (middle element)
-        lru.hit(&2);
-
-        // Order: head -> 2 -> 3 -> 1 -> tail
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        assert_eq!(lru.pop_least_recent(), Some(3));
-        assert_eq!(lru.pop_least_recent(), Some(2));
-    }
-
-    #[test]
-    fn test_reuse_free_slots() {
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-
-        // Pop and insert new element
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        lru.hit(&3);
-
-        // Free slot from 1 should be reused
-        assert!(lru.entries.len() <= 2);
-
-        assert_eq!(lru.pop_least_recent(), Some(2));
-        assert_eq!(lru.pop_least_recent(), Some(3));
-    }
-
-    #[test]
-    fn test_string_keys() {
-        let mut lru = Lru::new();
-        lru.hit(&"hello".to_string());
-        lru.hit(&"world".to_string());
-
-        lru.hit(&"hello".to_string());
-
-        assert_eq!(lru.pop_least_recent(), Some("world".to_string()));
-        assert_eq!(lru.pop_least_recent(), Some("hello".to_string()));
-    }
-
-    #[test]
-    fn test_many_operations() {
-        let mut lru = Lru::new();
-
-        for i in 0..100 {
-            lru.hit(&i);
-        }
-
-        // Hit some elements to move them to head
-        lru.hit(&0);
-        lru.hit(&50);
-
-        // Pop all, first 98 should be in reverse insertion order (excluding 0
-        // and 50)
-        let mut popped = Vec::new();
-        while let Some(val) = lru.pop_least_recent() {
-            popped.push(val);
-        }
-
-        assert_eq!(popped.len(), 100);
-        // Last two should be 50 and 0 (most recently hit)
-        assert_eq!(popped[98], 0);
-        assert_eq!(popped[99], 50);
-    }
-
-    #[test]
-    fn test_push_to_least_recently_used() {
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-        lru.hit(&3);
-
-        // Insert new element to LRU: should become 0
-        lru.push_to_least_recently_used(&0);
-
-        // Order: head -> 3 -> 2 -> 1 -> 0 -> tail
-
-        assert_eq!(lru.pop_least_recent(), Some(0));
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        assert_eq!(lru.pop_least_recent(), Some(2));
-        assert_eq!(lru.pop_least_recent(), Some(3));
-    }
-
-    #[test]
-    fn test_push_to_least_recent_moves_existing() {
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-        lru.hit(&3);
-        // Order: head -> 3 -> 2 -> 1 -> tail
-
-        // Move 3 (head) to tail
-        lru.push_to_least_recently_used(&3);
-        // Order: head -> 2 -> 1 -> 3 -> tail
-
-        assert_eq!(lru.pop_least_recent(), Some(3));
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        assert_eq!(lru.pop_least_recent(), Some(2));
-
-        // Test middle move
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-        lru.hit(&3);
-        // Order: head -> 3 -> 2 -> 1 -> tail
-
-        // Move 2 (middle) to tail
-        lru.push_to_least_recently_used(&2);
-        // Order: head -> 3 -> 1 -> 2 -> tail
-        assert_eq!(lru.pop_least_recent(), Some(2));
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        assert_eq!(lru.pop_least_recent(), Some(3));
-
-        // Test tail move (no-op logically, but should remain tail)
-        let mut lru = Lru::new();
-        lru.hit(&1);
-        lru.hit(&2);
-        lru.hit(&3);
-        // Order: head -> 3 -> 2 -> 1 -> tail
-
-        lru.push_to_least_recently_used(&1);
-        // Order: head -> 3 -> 2 -> 1 -> tail
-        assert_eq!(lru.pop_least_recent(), Some(1));
-        assert_eq!(lru.pop_least_recent(), Some(2));
-        assert_eq!(lru.pop_least_recent(), Some(3));
     }
 }

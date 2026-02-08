@@ -385,7 +385,7 @@ impl<
         }
 
         // before dropping the lock, we can try to overflow trimming
-        lock.attempt_to_trim_overflowing_cache(self.remove_closure());
+        lock.attempt_to_trim_overflowing_pinned(self.remove_closure());
     }
 
     fn process_write(&self, message: WriteMessage<K>, lock: &mut Policy<K>) {
@@ -410,7 +410,7 @@ impl<
         match message {
             PolicyMessage::ReadHit(key) => {
                 let hash = self.hash(&key);
-                lock.on_read_hit(&key, hash, true);
+                lock.on_read_hit(&key, hash);
             }
 
             PolicyMessage::Write(WriteMessage::Insert(key)) => {
