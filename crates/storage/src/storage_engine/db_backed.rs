@@ -29,7 +29,7 @@ pub struct Configuration {
     ///
     /// Higher values allow more data to be cached in memory, reducing
     /// database reads but increasing memory usage.
-    #[builder(default = 2u64.pow(20))]
+    #[builder(default = 2u64.pow(18))]
     pub cache_capacity: u64,
 
     /// The number of worker threads for serialization and write processing.
@@ -93,7 +93,10 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     > = CacheKeyOfSetMap<K, C, Db>;
 
     fn new_write_manager(&self) -> Self::WriteManager {
-        write_behind::WriteBehind::new(self.backing_db.clone())
+        write_behind::WriteBehind::new(
+            &self.backing_db,
+            self.configuration.serialization_workers,
+        )
     }
 
     fn new_single_map<K: WideColumn, V: WideColumnValue<K>>(

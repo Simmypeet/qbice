@@ -36,8 +36,8 @@ use thread_local::ThreadLocal;
 
 use crate::{
     kv_database::{
-        KeyOfSetColumn, KvDatabase, WideColumn, WideColumnValue,
-        WriteBatch as _,
+        KeyOfSetColumn, KvDatabase, SerializationBuffer as _, WideColumn,
+        WideColumnValue, WriteBatch as _,
     },
     write_batch, write_manager,
 };
@@ -87,7 +87,7 @@ struct TypedWideColumnWrites<
 }
 
 trait WriteEntry<Db: KvDatabase>: Any + Send + Sync + 'static {
-    fn write_to_db(&self, tx: &mut Db::WriteBatch);
+    fn write_to_db(&self, tx: &mut Db::SerializationBuffer);
     fn after_commit(&mut self, epoch: Epoch);
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync);
 }
@@ -95,7 +95,7 @@ trait WriteEntry<Db: KvDatabase>: Any + Send + Sync + 'static {
 impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase> WriteEntry<Db>
     for TypedWideColumnWrites<C, V, Db>
 {
-    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
+    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::SerializationBuffer) {
         for (key, value_opt) in &self.writes {
             match value_opt {
                 Some(value) => tx.put(key, value),
@@ -187,7 +187,10 @@ impl<Db: KvDatabase> WideColumnWrites<Db> {
         }
     }
 
-    pub(super) fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
+    pub(super) fn write_to_db(
+        &self,
+        tx: &mut <Db as KvDatabase>::SerializationBuffer,
+    ) {
         for write_entry in self.writes.values() {
             write_entry.write_to_db(tx);
         }
@@ -217,7 +220,7 @@ struct TypedKeyOfSetWrites<C: KeyOfSetColumn, Db: KvDatabase> {
 impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
     for TypedKeyOfSetWrites<C, Db>
 {
-    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
+    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::SerializationBuffer) {
         for (key, element_map) in &self.writes {
             for (element, op) in element_map {
                 match op {
@@ -314,7 +317,10 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
         }
     }
 
-    pub(super) fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
+    pub(super) fn write_to_db(
+        &self,
+        tx: &mut <Db as KvDatabase>::SerializationBuffer,
+    ) {
         for write_entry in self.writes.values() {
             write_entry.write_to_db(tx);
         }
@@ -412,7 +418,7 @@ impl<Db: KvDatabase> std::fmt::Debug for WriteBatch<Db> {
 }
 
 impl<Db: KvDatabase> WriteBatch<Db> {
-    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::WriteBatch) {
+    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::SerializationBuffer) {
         self.wide_column_writes.write_to_db(tx);
         self.key_of_set_writes.write_to_db(tx);
     }
@@ -536,8 +542,10 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 /// drop(write_manager);
 /// ```
 pub struct WriteBehind<Db: KvDatabase> {
-    commit_sender: Option<crossbeam_channel::Sender<WriteTask<Db>>>,
     commit_handle: Option<thread::JoinHandle<()>>,
+
+    serialize_sender: Option<crossbeam_channel::Sender<SerializeTask<Db>>>,
+    serialize_handles: Vec<thread::JoinHandle<()>>,
 
     after_commit_handle: Option<thread::JoinHandle<()>>,
     shutting_down: Arc<AtomicBool>,
@@ -564,7 +572,7 @@ impl<Db: KvDatabase> std::fmt::Debug for WriteBehind<Db> {
 }
 
 struct CurrentBatch<Db: KvDatabase> {
-    processed_logical_batch: Vec<WriteTask<Db>>,
+    processed_logical_batch: Vec<WriteBatch<Db>>,
     db_write_batch: Db::WriteBatch,
     expected_epoch: Epoch,
 }
@@ -589,12 +597,10 @@ impl<Db: KvDatabase> CurrentBatch<Db> {
         for mut logical_batch in to_commit_logical_batches {
             if shutting_down.load(Ordering::SeqCst).not() {
                 after_commit_sender
-                    .send(AfterCommitTask {
-                        write_buffer: logical_batch.write_buffer,
-                    })
+                    .send(AfterCommitTask { write_buffer: logical_batch })
                     .unwrap();
             } else {
-                logical_batch.write_buffer.active = false;
+                logical_batch.active = false;
             }
         }
     }
@@ -637,9 +643,11 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     /// // Shutdown gracefully on drop
     /// drop(writer);
     /// ```
-    pub fn new(db: Db) -> Self {
+    pub fn new(db: &Db, serialize_worker_count: usize) -> Self {
         let (commit_sender, commit_receiver) =
             crossbeam_channel::unbounded::<WriteTask<Db>>();
+        let (serialize_sender, serialize_receiver) =
+            crossbeam_channel::unbounded::<SerializeTask<Db>>();
         let (after_commit_sender, after_commit_receiver) =
             crossbeam_channel::unbounded::<AfterCommitTask<Db>>();
 
@@ -647,10 +655,10 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         let shutting_down = Arc::new(AtomicBool::new(false));
 
         Self {
-            commit_sender: Some(commit_sender),
             commit_handle: Some({
                 let commit_receiver = commit_receiver;
                 let shutting_down = shutting_down.clone();
+                let db = db.clone();
 
                 thread::Builder::new()
                     .name("bg_writer_commit".to_string())
@@ -664,6 +672,26 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                     })
                     .unwrap()
             }),
+
+            serialize_sender: Some(serialize_sender),
+            serialize_handles: (0..serialize_worker_count)
+                .map(|i| {
+                    let serialize_receiver = serialize_receiver.clone();
+                    let commit_sender = commit_sender.clone();
+                    let db = db.clone();
+
+                    thread::Builder::new()
+                        .name(format!("bg_writer_ser_{i}"))
+                        .spawn(move || {
+                            Self::serialize_worker(
+                                &serialize_receiver,
+                                &commit_sender,
+                                &db,
+                            );
+                        })
+                        .unwrap()
+                })
+                .collect(),
 
             after_commit_handle: Some({
                 let after_commit_receiver = after_commit_receiver;
@@ -693,9 +721,9 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
     /// Submits a write buffer to be processed by the background writer.
     pub fn submit_write_batch(&self, write_buffer: WriteBatch<Db>) {
-        let write_task = WriteTask { write_buffer };
+        let write_task = SerializeTask { write_buffer };
 
-        self.commit_sender.as_ref().unwrap().send(write_task).unwrap();
+        self.serialize_sender.as_ref().unwrap().send(write_task).unwrap();
     }
 
     fn after_commit_worker(
@@ -713,6 +741,24 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
             task.write_buffer.after_commit(epoch);
             pool.return_buffer(task.write_buffer);
+        }
+    }
+
+    fn serialize_worker(
+        receiver: &crossbeam_channel::Receiver<SerializeTask<Db>>,
+        sender: &crossbeam_channel::Sender<WriteTask<Db>>,
+        db: &Db,
+    ) {
+        while let Ok(task) = receiver.recv() {
+            let mut serialization_buffer = db.serialization_buffer();
+            task.write_buffer.write_to_db(&mut serialization_buffer);
+
+            sender
+                .send(WriteTask {
+                    write_buffer: task.write_buffer,
+                    serialize_buffer: serialization_buffer,
+                })
+                .unwrap();
         }
     }
 
@@ -772,11 +818,12 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             if top.write_buffer.epoch == current_batch.expected_epoch {
                 let task = pending_commits.pop().unwrap();
 
-                task.write_buffer
-                    .write_to_db(&mut current_batch.db_write_batch);
+                current_batch
+                    .db_write_batch
+                    .consume_serialization_buffer(task.serialize_buffer);
 
                 // push into current batch
-                current_batch.processed_logical_batch.push(task);
+                current_batch.processed_logical_batch.push(task.write_buffer);
 
                 current_batch.expected_epoch.0 += 1;
 
@@ -795,9 +842,19 @@ impl<Db: KvDatabase> Drop for WriteBehind<Db> {
     fn drop(&mut self) {
         self.shutting_down.store(true, Ordering::SeqCst);
 
-        let _ = self.commit_sender.take().unwrap();
+        // close serialize sender
+        drop(self.serialize_sender.take());
+
+        // serialization workers should exit, close all commit senders
+        for handle in self.serialize_handles.drain(..) {
+            let _ = handle.join();
+        }
+
+        // commit sender should be closed now, wait for commit thread to exit
+        // this will also close after commit sender
         let _ = self.commit_handle.take().unwrap().join();
 
+        // after commit thread should exit now
         let _ = self.after_commit_handle.take().unwrap().join();
     }
 }
@@ -806,8 +863,13 @@ struct AfterCommitTask<Db: KvDatabase> {
     write_buffer: WriteBatch<Db>,
 }
 
+struct SerializeTask<Db: KvDatabase> {
+    write_buffer: WriteBatch<Db>,
+}
+
 struct WriteTask<Db: KvDatabase> {
     write_buffer: WriteBatch<Db>,
+    serialize_buffer: Db::SerializationBuffer,
 }
 
 impl<Db: KvDatabase> PartialEq for WriteTask<Db> {
