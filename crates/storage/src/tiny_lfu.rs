@@ -1,20 +1,29 @@
 //! Contains the TinyLFU cache implementation designed specifically for
 //! write-behind caching layers.
 
-use std::{collections::hash_map, hash::BuildHasher};
+use std::{
+    collections::hash_map,
+    hash::{BuildHasher, Hash},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize},
+    },
+};
 
 use crossbeam_utils::CachePadded;
 use fxhash::{FxBuildHasher, FxHashMap};
 
 use crate::{
     sharded::Sharded,
-    tiny_lfu::policy::{Policy, PolicyMessage},
+    tiny_lfu::policy::{Policy, PolicyMessage, WriteMessage},
 };
 
 mod lru;
 mod policy;
+mod read_buffer;
 mod single_flight;
 mod sketch;
+mod write_buffer;
 
 const MAINTENANCE_BATCH_SIZE: usize = 32;
 
@@ -41,7 +50,130 @@ impl<K, V> LifecycleListener<K, V> for DefaultLifecycleListener {
 /// where entries may be temporarily pinned to avoid eviction during ongoing
 /// write operations, and negative caching is used to remember absent entries
 /// without storing actual values.
-pub struct TinyLFU<K, V, L = DefaultLifecycleListener> {
+pub struct TinyLFU<
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static = DefaultLifecycleListener,
+> {
+    inner: Arc<TinyLFUInner<K, V, L>>,
+
+    sender: Option<crossbeam::channel::Sender<()>>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl<
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> std::fmt::Debug for TinyLFU<K, V, L>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TinyLFU").finish_non_exhaustive()
+    }
+}
+
+impl<
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> TinyLFU<K, V, L>
+{
+    /// Creates a new TinyLFU cache with the specified capacity and shard
+    /// count.
+    #[must_use]
+    pub fn new(capacity: usize, shard_count: usize) -> Self {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        let inner = Arc::new(TinyLFUInner::new(capacity, shard_count));
+
+        Self {
+            inner: inner.clone(),
+            sender: Some(sender),
+            join_handle: Some(Self::maintenance_loop(inner, receiver)),
+        }
+    }
+}
+
+impl<
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> Drop for TinyLFU<K, V, L>
+{
+    fn drop(&mut self) {
+        // signal the maintenance thread to exit
+        drop(self.sender.take());
+        self.join_handle.take().unwrap().join().unwrap();
+    }
+}
+
+impl<
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> TinyLFU<K, V, L>
+{
+    fn maintenance_loop(
+        inner: Arc<TinyLFUInner<K, V, L>>,
+        receiver: crossbeam::channel::Receiver<()>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::Builder::new()
+            .name("tiny_lfu_maintenance".to_string())
+            .spawn(move || {
+                while receiver.recv() == Ok(()) {
+                    let mut lock = inner.policy.lock();
+                    inner.process_policy_message(&mut lock);
+
+                    inner
+                        .maintenance_flag
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+            .expect("Failed to spawn TinyLFU maintenance thread")
+    }
+
+    fn try_maintenance(&self, policy_message: Option<PolicyMessage<K>>) {
+        match policy_message {
+            Some(PolicyMessage::ReadHit(hit)) => {
+                self.inner.read_buffer.push(hit);
+            }
+            Some(PolicyMessage::Write(write_message)) => {
+                self.inner.write_buffer.push(write_message);
+            }
+            None => {}
+        }
+
+        // not yet reached the maintenance threshold
+        if self.inner.write_buffer.len() <= MAINTENANCE_BATCH_SIZE
+            && self.inner.read_buffer.len() <= MAINTENANCE_BATCH_SIZE
+        {
+            return;
+        }
+
+        // attempt to acquire the maintenance flag
+        if self.inner.maintenance_flag.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) == Ok(false)
+        {
+            self.sender
+                .as_ref()
+                .expect("TinyLFU sender missing")
+                .try_send(())
+                .expect("Failed to send TinyLFU maintenance signal");
+        }
+    }
+}
+
+/// A TinyLFU (Tiny Least Frequently Used) cache implementation with
+/// support for pinned entries and negative caching.
+///
+/// This designed specifically for caching layers with write-behind semantics,
+/// where entries may be temporarily pinned to avoid eviction during ongoing
+/// write operations, and negative caching is used to remember absent entries
+/// without storing actual values.
+struct TinyLFUInner<K, V, L = DefaultLifecycleListener> {
     storage: CachePadded<Sharded<FxHashMap<K, V>>>,
     read_buffer: CachePadded<read_buffer::ReadBuffer<K>>,
     write_buffer: CachePadded<write_buffer::WriteBuffer<K>>,
@@ -49,18 +181,24 @@ pub struct TinyLFU<K, V, L = DefaultLifecycleListener> {
 
     max_write_per_maintenance: usize,
 
+    // true=running, false=idle
+    maintenance_flag: AtomicBool,
+
+    evicted_count: AtomicUsize,
+
     lifecycle_listener: L,
     build_hasher: FxBuildHasher,
 }
 
-impl<K, V, L> std::fmt::Debug for TinyLFU<K, V, L> {
+impl<K, V, L> std::fmt::Debug for TinyLFUInner<K, V, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TinyLFU").finish_non_exhaustive()
+        f.debug_struct("TinyLFUInner").finish_non_exhaustive()
     }
 }
 
-impl<K, V, L: Default> TinyLFU<K, V, L> {
-    /// Creates a new TinyLFU cache with the specified capacity and shard count.
+impl<K, V, L: Default> TinyLFUInner<K, V, L> {
+    /// Creates a new TinyLFUInner cache with the specified capacity and shard
+    /// count.
     #[must_use]
     pub fn new(capacity: usize, shard_count: usize) -> Self {
         Self {
@@ -82,7 +220,25 @@ impl<K, V, L: Default> TinyLFU<K, V, L> {
             ))),
             lifecycle_listener: L::default(),
             build_hasher: FxBuildHasher::default(),
+            evicted_count: AtomicUsize::new(0),
+            maintenance_flag: AtomicBool::new(false),
         }
+    }
+}
+
+impl<K, V, L> Drop for TinyLFUInner<K, V, L> {
+    fn drop(&mut self) {
+        println!(
+            "TinyLFU<{}, {}> evicted {} items during its lifetime with {} \
+             entries left in cache.\n",
+            std::any::type_name::<K>(),
+            std::any::type_name::<V>(),
+            self.evicted_count.load(std::sync::atomic::Ordering::Relaxed),
+            self.storage
+                .iter_read_shards()
+                .map(|shard| shard.len())
+                .sum::<usize>(),
+        );
     }
 }
 
@@ -157,8 +313,11 @@ impl<K, V> std::fmt::Debug for Entry<'_, '_, K, V> {
     }
 }
 
-impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
-    TinyLFU<K, V, L>
+impl<
+    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> TinyLFU<K, V, L>
 {
     /// Retrieves a value from the cache by key.
     #[inline]
@@ -173,8 +332,9 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
     /// function.
     #[inline]
     pub fn get_map<T>(&self, key: &K, f: impl Fn(&V) -> T) -> Option<T> {
-        let hash = self.hash(key);
-        let shard = self.storage.read_shard(self.storage.shard_index(hash));
+        let hash = self.inner.hash(key);
+        let shard =
+            self.inner.storage.read_shard(self.inner.storage.shard_index(hash));
 
         let entry = shard.get(key).map(f);
 
@@ -194,9 +354,11 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
         key: K,
         f: impl FnOnce(Entry<'_, '_, K, V>) -> T,
     ) -> T {
-        let hash = self.hash(&key);
-        let mut shard =
-            self.storage.write_shard(self.storage.shard_index(hash));
+        let hash = self.inner.hash(&key);
+        let mut shard = self
+            .inner
+            .storage
+            .write_shard(self.inner.storage.shard_index(hash));
 
         let mut message = None;
 
@@ -219,29 +381,14 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
 
         t
     }
+}
 
-    fn try_maintenance(&self, policy_message: Option<PolicyMessage<K>>) {
-        match policy_message {
-            Some(PolicyMessage::ReadHit(hit)) => {
-                self.read_buffer.push(hit);
-            }
-            Some(PolicyMessage::Write(write_message)) => {
-                self.write_buffer.push(write_message);
-            }
-            None => {}
-        }
-
-        if self.write_buffer.len() > MAINTENANCE_BATCH_SIZE
-            || self.read_buffer.len() > MAINTENANCE_BATCH_SIZE
-        {
-            let Some(mut lock) = self.policy.try_lock() else {
-                return;
-            };
-
-            self.process_policy_message(&mut lock);
-        }
-    }
-
+impl<
+    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> TinyLFUInner<K, V, L>
+{
     fn process_policy_message(&self, lock: &mut Policy<K>) {
         let mut processed = 0;
         while processed <= self.max_write_per_maintenance {
@@ -308,7 +455,20 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
         // atomically determine if we can remove the key
         |evicted_key| {
             let shard_index = self.storage.shard_index(self.hash(evicted_key));
-            let mut shard = self.storage.write_shard(shard_index);
+            let shard = self.storage.upgradable_read_shard(shard_index);
+
+            if let Some(value) = shard.get(evicted_key) {
+                // the element still exists, check if it is pinned
+                if self.lifecycle_listener.is_pinned(evicted_key, value) {
+                    return false;
+                }
+            } else {
+                // has already been removed
+                return true;
+            }
+
+            let mut shard =
+                parking_lot::RwLockUpgradableReadGuard::upgrade(shard);
 
             match shard.entry(evicted_key.clone()) {
                 hash_map::Entry::Occupied(mut occupied_entry) => {
@@ -324,6 +484,9 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
                     // value drop times blocking other
                     // operations
                     let value = if can_remove {
+                        self.evicted_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                         Some(occupied_entry.remove_entry())
                     } else {
                         None

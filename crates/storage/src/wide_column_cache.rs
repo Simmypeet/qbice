@@ -1,7 +1,7 @@
 use std::{
     any::TypeId,
     hash::Hash,
-    sync::atomic::{AtomicI32, Ordering},
+    sync::atomic::{AtomicI32, AtomicUsize, Ordering},
 };
 
 use crate::{
@@ -20,6 +20,7 @@ impl<K, V> LifecycleListener<K, Entry<V>> for PinnedLifecycleListener {
     }
 }
 
+#[derive(Debug)]
 struct Entry<V> {
     value: Option<V>,
     pin_count: AtomicI32,
@@ -27,23 +28,43 @@ struct Entry<V> {
 
 #[derive(Debug)]
 pub struct WideColumnCache<
-    K: Eq + Hash + Send + Sync + 'static,
+    K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
     T,
 > {
+    some_fetched: AtomicUsize,
+    none_fetched: AtomicUsize,
     tiny_lfu: TinyLFU<K, Entry<V>, PinnedLifecycleListener>,
     single_flight: single_flight::SingleFlight<K>,
 
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<K: Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static, T>
+impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static, T>
+    Drop for WideColumnCache<K, V, T>
+{
+    fn drop(&mut self) {
+        println!(
+            "WideColumnCache<{}, {}, {}> stats: some_fetched={} \
+             none_fetched={}\n",
+            std::any::type_name::<K>(),
+            std::any::type_name::<V>(),
+            std::any::type_name::<T>(),
+            self.some_fetched.load(Ordering::Relaxed),
+            self.none_fetched.load(Ordering::Relaxed),
+        );
+    }
+}
+
+impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static, T>
     WideColumnCache<K, V, T>
 {
     #[allow(clippy::cast_possible_truncation)]
     pub fn new(capacity: u64, shard_amount: usize) -> Self {
         Self {
             tiny_lfu: TinyLFU::new(capacity as usize, shard_amount),
+            some_fetched: AtomicUsize::new(0),
+            none_fetched: AtomicUsize::new(0),
             single_flight: single_flight::SingleFlight::new(shard_amount),
             _phantom: std::marker::PhantomData,
         }
@@ -72,6 +93,12 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static, T>
             self.single_flight
                 .wait_or_work(key, || {
                     let value = init();
+
+                    if value.is_some() {
+                        self.some_fetched.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        self.none_fetched.fetch_add(1, Ordering::Relaxed);
+                    }
 
                     self.tiny_lfu.entry(key.clone(), |entry| match entry {
                         tiny_lfu::Entry::Vacant(vaccant_entry) => {
