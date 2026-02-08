@@ -35,7 +35,10 @@
 //! 5. **Query**: Execute queries through `TrackedEngine`
 //! 6. **Update**: Drop `TrackedEngine`, modify inputs, repeat from step 4
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use qbice_serialize::Plugin;
 use qbice_stable_hash::{
@@ -239,7 +242,7 @@ impl<C: Config> Engine<C> {
 fn default_shard_amount() -> usize {
     static SHARD_AMOUNT: OnceLock<usize> = OnceLock::new();
     *SHARD_AMOUNT.get_or_init(|| {
-        (std::thread::available_parallelism().map_or(1, usize::from) * 16)
+        (std::thread::available_parallelism().map_or(1, usize::from) * 32)
             .next_power_of_two()
     })
 }
@@ -311,8 +314,11 @@ impl<C: Config> Engine<C> {
         database_factory: F,
         stable_hasher: C::BuildStableHasher,
     ) -> Result<Self, F::Error> {
-        let shared_interner =
-            Interner::new(default_shard_amount(), stable_hasher.clone());
+        let shared_interner = Interner::new_with_vacuum(
+            default_shard_amount(),
+            stable_hasher.clone(),
+            Duration::from_secs(2),
+        );
 
         assert!(
             serialization_plugin.insert(shared_interner.clone()).is_none(),
