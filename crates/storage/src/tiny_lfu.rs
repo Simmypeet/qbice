@@ -11,7 +11,6 @@ use std::{
 
 use crossbeam_utils::CachePadded;
 use fxhash::FxBuildHasher;
-use rust_rocksdb::perf::MemoryUsageStats;
 
 use crate::tiny_lfu::policy::{Policy, PolicyMessage, WriteMessage};
 
@@ -195,8 +194,6 @@ struct TinyLFUInner<K: Hash + Eq, V, L = DefaultLifecycleListener> {
 
     policy: CachePadded<parking_lot::Mutex<Policy<K>>>,
 
-    max_write_per_maintenance: usize,
-
     // true=running, false=idle
     maintenance_flag: AtomicBool,
 
@@ -232,9 +229,6 @@ impl<K: Hash + Eq, V, L: Default> TinyLFUInner<K, V, L> {
                     .unwrap_or(4),
                 64,
             )),
-            max_write_per_maintenance: std::thread::available_parallelism()
-                .map(|n| n.get() * 128)
-                .unwrap_or(128),
             write_buffer: CachePadded::new(write_buffer::UnboundedBuffer::new()),
 
             policy: CachePadded::new(parking_lot::Mutex::new(Policy::new(
@@ -252,12 +246,13 @@ impl<K: Hash + Eq, V, L: Default> TinyLFUInner<K, V, L> {
 impl<K: Hash + Eq, V, L> Drop for TinyLFUInner<K, V, L> {
     fn drop(&mut self) {
         println!(
-            "TinyLFU<{}, {}> evicted {} items during its lifetime with {} \
-             entries left in cache.\n",
+            "TinyLFU<{}, {}> evicted {} items during its lifetime, {} entries \
+             left in cache, and {} message leeft in the cache.\n",
             std::any::type_name::<K>(),
             std::any::type_name::<V>(),
             self.evicted_count.load(std::sync::atomic::Ordering::Relaxed),
-            self.storage.len()
+            self.storage.len(),
+            self.write_buffer.len(),
         );
     }
 }
