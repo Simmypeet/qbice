@@ -28,6 +28,7 @@ use std::{
     collections::HashMap,
     hash::{BuildHasher, Hash},
     marker::PhantomData,
+    mem::ManuallyDrop,
     pin::Pin,
     sync::Arc,
 };
@@ -520,63 +521,101 @@ type WriteTransaction<C> =
 
 #[allow(clippy::type_complexity)]
 pub struct Database<C: Config> {
-    sync: sync::Sync<C>,
+    sync: ManuallyDrop<sync::Sync<C>>,
 
-    last_verified: SingleMap<C, QueryNodeColumn, LastVerified>,
-    forward_edge_order: SingleMap<C, QueryNodeColumn, ForwardEdgeOrder>,
+    last_verified: ManuallyDrop<SingleMap<C, QueryNodeColumn, LastVerified>>,
+    forward_edge_order:
+        ManuallyDrop<SingleMap<C, QueryNodeColumn, ForwardEdgeOrder>>,
     forward_edge_observation:
-        SingleMap<C, QueryNodeColumn, ForwardEdgeObservation<C>>,
+        ManuallyDrop<SingleMap<C, QueryNodeColumn, ForwardEdgeObservation<C>>>,
 
-    query_kind: SingleMap<C, QueryNodeColumn, QueryKind>,
-    node_info: SingleMap<C, QueryNodeColumn, NodeInfo>,
+    query_kind: ManuallyDrop<SingleMap<C, QueryNodeColumn, QueryKind>>,
+    node_info: ManuallyDrop<SingleMap<C, QueryNodeColumn, NodeInfo>>,
     pending_backward_projection:
-        SingleMap<C, QueryNodeColumn, PendingBackwardProjection>,
+        ManuallyDrop<SingleMap<C, QueryNodeColumn, PendingBackwardProjection>>,
 
-    dirty_edge_set: SingleMap<C, DirtySetColumn, Unit>,
+    dirty_edge_set: ManuallyDrop<SingleMap<C, DirtySetColumn, Unit>>,
 
-    query_store: DynamicMap<C, QueryStoreColumn>,
+    query_store: ManuallyDrop<DynamicMap<C, QueryStoreColumn>>,
 
-    backward_edges: KeyOfSetMap<
-        C,
-        BackwardEdgeColumn<C>,
-        CompressedBackwardEdgeSet<C::BuildHasher>,
+    backward_edges: ManuallyDrop<
+        KeyOfSetMap<
+            C,
+            BackwardEdgeColumn<C>,
+            CompressedBackwardEdgeSet<C::BuildHasher>,
+        >,
     >,
 
-    external_input_queries: KeyOfSetMap<
-        C,
-        ExternalInputColumn<C>,
-        Arc<DashSet<Compact128, C::BuildHasher>>,
+    external_input_queries: ManuallyDrop<
+        KeyOfSetMap<
+            C,
+            ExternalInputColumn<C>,
+            Arc<DashSet<Compact128, C::BuildHasher>>,
+        >,
     >,
 }
 
 impl<C: Config> Database<C> {
     pub async fn new(db: &C::StorageEngine) -> Self {
         Self {
-            last_verified: db.new_single_map::<QueryNodeColumn, LastVerified>(),
+            last_verified: ManuallyDrop::new(db.new_single_map::<QueryNodeColumn, LastVerified>()),
             forward_edge_order:
-                db.new_single_map::<QueryNodeColumn, ForwardEdgeOrder>(),
-            forward_edge_observation: db
-                .new_single_map::<QueryNodeColumn, ForwardEdgeObservation<C>>(),
-            query_kind: db.new_single_map::<QueryNodeColumn, QueryKind>(),
-            node_info: db.new_single_map::<QueryNodeColumn, NodeInfo>(),
-            pending_backward_projection: db
-                .new_single_map::<QueryNodeColumn, PendingBackwardProjection>(),
+                ManuallyDrop::new(db.new_single_map::<QueryNodeColumn, ForwardEdgeOrder>()),
+            forward_edge_observation: ManuallyDrop::new(db
+                .new_single_map::<QueryNodeColumn, ForwardEdgeObservation<C>>()),
+            query_kind: ManuallyDrop::new(db.new_single_map::<QueryNodeColumn, QueryKind>()),
+            node_info: ManuallyDrop::new(db.new_single_map::<QueryNodeColumn, NodeInfo>()),
+            pending_backward_projection: ManuallyDrop::new(db
+                .new_single_map::<QueryNodeColumn, PendingBackwardProjection>()),
 
-            dirty_edge_set: db.new_single_map::<DirtySetColumn, Unit>(),
+            dirty_edge_set: ManuallyDrop::new(db.new_single_map::<DirtySetColumn, Unit>()),
 
-            query_store: db.new_dynamic_map::<QueryStoreColumn>(),
+            query_store: ManuallyDrop::new(db.new_dynamic_map::<QueryStoreColumn>()),
 
-            backward_edges: db.new_key_of_set_map::<
+            backward_edges: ManuallyDrop::new(db.new_key_of_set_map::<
                 BackwardEdgeColumn<C>,
                 CompressedBackwardEdgeSet<C::BuildHasher>,
-            >(),
-
-            external_input_queries: db.new_key_of_set_map::<
+            >()),
+                
+            external_input_queries: ManuallyDrop::new(db.new_key_of_set_map::<
                 ExternalInputColumn<C>,
                 Arc<DashSet<Compact128, C::BuildHasher>>,
-            >(),
+            >()),
 
-            sync: sync::Sync::new(db).await,
+            sync: ManuallyDrop::new(sync::Sync::new(db).await),
+        }
+    }
+}
+
+impl<C: Config> Drop for Database<C> {
+    fn drop(&mut self) {
+        unsafe {
+            // These are the heavy data structures that take time to drop.
+            let sync = ManuallyDrop::take(&mut self.sync);
+            let forward_edge_order = ManuallyDrop::take(&mut self.forward_edge_order);
+            let forward_edge_observation =
+                ManuallyDrop::take(&mut self.forward_edge_observation);
+            let query_kind = ManuallyDrop::take(&mut self.query_kind);
+            let node_info = ManuallyDrop::take(&mut self.node_info);
+            let pending_backward_projection =
+                ManuallyDrop::take(&mut self.pending_backward_projection);
+            let dirty_edge_set = ManuallyDrop::take(&mut self.dirty_edge_set);
+            let query_store = ManuallyDrop::take(&mut self.query_store);
+            let backward_edges = ManuallyDrop::take(&mut self.backward_edges);
+            let external_input_queries =
+                ManuallyDrop::take(&mut self.external_input_queries);
+            
+            
+            tokio::task::spawn_blocking(|| drop(sync));
+            tokio::task::spawn_blocking(|| drop(forward_edge_order));
+            tokio::task::spawn_blocking(|| drop(forward_edge_observation));
+            tokio::task::spawn_blocking(|| drop(query_kind));
+            tokio::task::spawn_blocking(|| drop(node_info));
+            tokio::task::spawn_blocking(|| drop(pending_backward_projection));
+            tokio::task::spawn_blocking(|| drop(dirty_edge_set));
+            tokio::task::spawn_blocking(|| drop(query_store));
+            tokio::task::spawn_blocking(|| drop(backward_edges));
+            tokio::task::spawn_blocking(|| drop(external_input_queries));
         }
     }
 }
