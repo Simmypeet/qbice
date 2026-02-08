@@ -247,6 +247,10 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         self.list.lens[Region::Protected as usize]
     }
 
+    pub const fn pinned_len(&self) -> usize {
+        self.list.lens[Region::Pinned as usize]
+    }
+
     pub fn peek_least_recent(&self, region: Region) -> Option<&K> {
         let tail_index = self.list.tails[region as usize];
         if tail_index == NULL {
@@ -298,5 +302,14 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         } else {
             None
         }
+    }
+
+    pub fn shuffle_tail_to_head(&mut self, region: Region) {
+        let tail_index = self.list.tails[region as usize];
+        if tail_index == NULL {
+            return;
+        }
+
+        self.list.move_to_head(tail_index, region);
     }
 }

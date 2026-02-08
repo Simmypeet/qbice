@@ -105,8 +105,8 @@ impl<K> Policy<K> {
         // The DUEL: LRU probation vs LRU window
 
         let candidate_key =
-            self.lru.peek_least_recent(lru::Region::Window).unwrap().clone();
-        let candidate_hash = hasher.hash_one(&candidate_key);
+            self.lru.peek_least_recent(lru::Region::Window).unwrap();
+        let candidate_hash = hasher.hash_one(candidate_key);
 
         let victim_key =
             self.lru.peek_least_recent(lru::Region::Probation).unwrap();
@@ -139,7 +139,7 @@ impl<K> Policy<K> {
         }
         // CANDIDATE loses, EVICT it
         else {
-            if remove(&candidate_key) {
+            if remove(candidate_key) {
                 // the main storage has confirmed removal of the candidate,
                 // we can evict it safely
                 self.lru.pop_least_recent(lru::Region::Window);
@@ -157,11 +157,20 @@ impl<K> Policy<K> {
     #[allow(clippy::unused_self)]
     pub fn attempt_to_trim_overflowing_pinned(
         &mut self,
-        _remove: impl Fn(&K) -> bool,
+        remove: impl Fn(&K) -> bool,
     ) where
         K: std::hash::Hash + Eq + Clone,
     {
-        // TODO: periodically scan pinned region to evict unpinned items
+        while self.lru.pinned_len() > 0 {
+            let key = self.lru.peek_least_recent(lru::Region::Pinned).unwrap();
+
+            if remove(key) {
+                self.lru.pop_least_recent(lru::Region::Pinned);
+            } else {
+                self.lru.shuffle_tail_to_head(lru::Region::Pinned);
+                break;
+            }
+        }
     }
 
     pub fn on_removed(&mut self, key: &K)
