@@ -32,6 +32,7 @@ bon.workspace = true
 tracing.workspace = true
 crossbeam-skiplist.workspace = true
 crossbeam.workspace = true
+scc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
