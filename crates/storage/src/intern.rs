@@ -1275,6 +1275,7 @@ impl std::fmt::Debug for Repr {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn vacuum_shard<T: ?Sized + 'static>(shard: &dyn Any) {
     let typed_shard = shard
         .downcast_ref::<TypedShard<T>>()
@@ -1282,6 +1283,12 @@ fn vacuum_shard<T: ?Sized + 'static>(shard: &dyn Any) {
 
     for mut write_shard in typed_shard.iter_write_shards() {
         write_shard.retain(|_, weak_value| weak_value.upgrade().is_some());
+
+        let ratio = write_shard.len() as f64 / write_shard.capacity() as f64;
+        if ratio < 0.25 {
+            let halved = write_shard.capacity() / 2;
+            write_shard.shrink_to(halved);
+        }
     }
 }
 
