@@ -58,7 +58,9 @@ impl<K> Policy<K> {
             window_capacity,
             protected_capacity,
             max_capacity: window_capacity + main_capacity,
-            sketch: Sketch::new(capacity),
+
+            // prepare for the burst traffic by allocating a larger sketch
+            sketch: Sketch::new(capacity * 16),
         }
     }
 
