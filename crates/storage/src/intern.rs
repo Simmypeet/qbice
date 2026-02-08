@@ -1281,7 +1281,7 @@ fn vacuum_shard<T: ?Sized + 'static>(shard: &dyn Any) {
         .downcast_ref::<TypedShard<T>>()
         .expect("invalid shard type for vacuum");
 
-    for mut write_shard in typed_shard.iter_write_shards() {
+    for mut write_shard in typed_shard.try_iter_write_shards() {
         write_shard.retain(|_, weak_value| weak_value.upgrade().is_some());
 
         let ratio = write_shard.len() as f64 / write_shard.capacity() as f64;
@@ -1294,7 +1294,7 @@ fn vacuum_shard<T: ?Sized + 'static>(shard: &dyn Any) {
 
 /// Vacuum all shards in the interner, removing dead weak references.
 fn vacuum_shards(shards: &WholeShard) {
-    for read_shard in shards.iter_read_shards() {
+    for read_shard in shards.try_iter_read_shards() {
         for shard in read_shard.values() {
             (shard.vacuum_fn)(&*shard.typed_shard);
         }

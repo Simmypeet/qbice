@@ -75,10 +75,16 @@ impl<T> Sharded<T> {
         self.shards.iter().map(|shard| shard.read())
     }
 
-    pub fn iter_write_shards(
+    pub fn try_iter_read_shards(
+        &self,
+    ) -> impl Iterator<Item = parking_lot::RwLockReadGuard<'_, T>> {
+        self.shards.iter().filter_map(|shard| shard.try_read())
+    }
+
+    pub fn try_iter_write_shards(
         &self,
     ) -> impl Iterator<Item = parking_lot::RwLockWriteGuard<'_, T>> {
-        self.shards.iter().map(|shard| shard.write())
+        self.shards.iter().filter_map(|shard| shard.try_write())
     }
 
     #[allow(clippy::cast_possible_truncation)]
