@@ -8,10 +8,15 @@ use crate::tiny_lfu::{
 };
 
 #[derive(Clone)]
+pub enum WriteMessage<K> {
+    Insert(K),
+    Removed(K),
+}
+
+#[derive(Clone)]
 pub enum PolicyMessage<K> {
     ReadHit(K),
-    Write(K),
-    Removed(K),
+    Write(WriteMessage<K>),
 }
 
 pub struct Policy<K> {

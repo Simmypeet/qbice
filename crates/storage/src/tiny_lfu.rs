@@ -43,8 +43,11 @@ impl<K, V> LifecycleListener<K, V> for DefaultLifecycleListener {
 /// without storing actual values.
 pub struct TinyLFU<K, V, L = DefaultLifecycleListener> {
     storage: CachePadded<Sharded<FxHashMap<K, V>>>,
-    message_queue: CachePadded<crossbeam::queue::SegQueue<PolicyMessage<K>>>,
+    read_buffer: CachePadded<read_buffer::ReadBuffer<K>>,
+    write_buffer: CachePadded<write_buffer::WriteBuffer<K>>,
     policy: CachePadded<parking_lot::Mutex<Policy<K>>>,
+
+    max_write_per_maintenance: usize,
 
     lifecycle_listener: L,
     build_hasher: FxBuildHasher,
@@ -64,7 +67,16 @@ impl<K, V, L: Default> TinyLFU<K, V, L> {
             storage: CachePadded::new(Sharded::new(shard_count, |_| {
                 FxHashMap::default()
             })),
-            message_queue: CachePadded::new(crossbeam::queue::SegQueue::new()),
+            read_buffer: CachePadded::new(read_buffer::ReadBuffer::new(
+                std::thread::available_parallelism()
+                    .map(std::num::NonZero::get)
+                    .unwrap_or(4),
+                64,
+            )),
+            max_write_per_maintenance: std::thread::available_parallelism()
+                .map(|n| n.get() * 128)
+                .unwrap_or(128),
+            write_buffer: CachePadded::new(write_buffer::WriteBuffer::new()),
             policy: CachePadded::new(parking_lot::Mutex::new(Policy::new(
                 capacity,
             ))),
@@ -101,7 +113,7 @@ impl<K: Clone + std::hash::Hash + Eq, V> OccupiedEntry<'_, '_, K, V> {
     pub fn remove(self) -> V {
         let key = self.entry.key().clone();
         let v = self.entry.remove();
-        *self.message = Some(PolicyMessage::Removed(key));
+        *self.message = Some(PolicyMessage::Write(WriteMessage::Removed(key)));
 
         v
     }
@@ -127,7 +139,7 @@ impl<K: Clone + std::hash::Hash + Eq, V> VacantEntry<'_, '_, K, V> {
 
         self.entry.insert(value);
 
-        *self.message = Some(PolicyMessage::Write(key));
+        *self.message = Some(PolicyMessage::Write(WriteMessage::Insert(key)));
     }
 }
 
@@ -149,6 +161,7 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
     TinyLFU<K, V, L>
 {
     /// Retrieves a value from the cache by key.
+    #[inline]
     pub fn get(&self, key: &K) -> Option<V>
     where
         V: Clone,
@@ -158,6 +171,7 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
 
     /// Retrieves a mapped value from the cache by key using the provided
     /// function.
+    #[inline]
     pub fn get_map<T>(&self, key: &K, f: impl Fn(&V) -> T) -> Option<T> {
         let hash = self.hash(key);
         let shard = self.storage.read_shard(self.storage.shard_index(hash));
@@ -207,67 +221,51 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
     }
 
     fn try_maintenance(&self, policy_message: Option<PolicyMessage<K>>) {
-        match (
-            policy_message,
-            (self.message_queue.len() > MAINTENANCE_BATCH_SIZE)
-                .then(|| self.policy.try_lock())
-                .and_then(|x| x),
-        ) {
-            // no message and can't lock, can't do anything
-            (None, None) => {}
-
-            (None, Some(mut lock)) => {
-                // got the lock, process messages
-                self.process_policy_message(&mut lock, None);
+        match policy_message {
+            Some(PolicyMessage::ReadHit(hit)) => {
+                self.read_buffer.push(hit);
             }
-
-            // have a message but can't lock, will enqueue
-            (Some(value), None) => {
-                // will enqueue later
-                self.message_queue.push(value);
+            Some(PolicyMessage::Write(write_message)) => {
+                self.write_buffer.push(write_message);
             }
+            None => {}
+        }
 
-            (Some(value), Some(mut lock)) => {
-                // then process any queued messages
-                self.process_policy_message(&mut lock, Some(value));
-            }
+        if self.write_buffer.len() > MAINTENANCE_BATCH_SIZE
+            || self.read_buffer.len() > MAINTENANCE_BATCH_SIZE
+        {
+            let Some(mut lock) = self.policy.try_lock() else {
+                return;
+            };
+
+            self.process_policy_message(&mut lock);
         }
     }
 
-    fn process_policy_message(
-        &self,
-        lock: &mut Policy<K>,
-        extra_message: Option<PolicyMessage<K>>,
-    ) {
+    fn process_policy_message(&self, lock: &mut Policy<K>) {
         let mut processed = 0;
-
-        while processed <= MAINTENANCE_BATCH_SIZE {
+        while processed <= self.max_write_per_maintenance {
             processed += 1;
 
             // Pop a message
-            let Some(message) = self.message_queue.pop() else {
+            let Some(message) = self.write_buffer.pop() else {
                 break;
             };
 
-            self.process_message(message, lock);
+            self.process_write(message, lock);
         }
 
-        if let Some(message) = extra_message {
-            self.process_message(message, lock);
+        for read_k in self.read_buffer.drain() {
+            self.process_message(PolicyMessage::ReadHit(read_k), lock);
         }
 
         // before dropping the lock, we can try to overflow trimming
         lock.attempt_to_trim_overflowing_cache(self.remove_closure());
     }
 
-    fn process_message(&self, message: PolicyMessage<K>, lock: &mut Policy<K>) {
+    fn process_write(&self, message: WriteMessage<K>, lock: &mut Policy<K>) {
         match message {
-            PolicyMessage::ReadHit(key) => {
-                let hash = self.hash(&key);
-                lock.on_read_hit(&key, hash, true);
-            }
-
-            PolicyMessage::Write(key) => {
+            WriteMessage::Insert(key) => {
                 let hash = self.hash(&key);
                 lock.on_write(
                     &key,
@@ -277,7 +275,30 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
                 );
             }
 
-            PolicyMessage::Removed(key) => {
+            WriteMessage::Removed(key) => {
+                lock.on_removed(&key);
+            }
+        }
+    }
+
+    fn process_message(&self, message: PolicyMessage<K>, lock: &mut Policy<K>) {
+        match message {
+            PolicyMessage::ReadHit(key) => {
+                let hash = self.hash(&key);
+                lock.on_read_hit(&key, hash, true);
+            }
+
+            PolicyMessage::Write(WriteMessage::Insert(key)) => {
+                let hash = self.hash(&key);
+                lock.on_write(
+                    &key,
+                    hash,
+                    &self.build_hasher,
+                    self.remove_closure(),
+                );
+            }
+
+            PolicyMessage::Write(WriteMessage::Removed(key)) => {
                 lock.on_removed(&key);
             }
         }
@@ -286,32 +307,8 @@ impl<K: std::hash::Hash + Eq + Clone, V, L: LifecycleListener<K, V>>
     fn remove_closure(&self) -> impl Fn(&K) -> bool + '_ {
         // atomically determine if we can remove the key
         |evicted_key| {
-            // FAST PATH: asks the lifecycle listener if the entry is pinned
-            // if pinned, skip removal without acquiring any exclusive locks
-            let Some(shard) = self.storage.try_upgradable_read_shard(
-                self.storage.shard_index(self.hash(evicted_key)),
-            ) else {
-                // couldn't get the lock, skip removal
-                return false;
-            };
-
-            let Some(value) = shard.get(evicted_key) else {
-                // already evicted
-                return true;
-            };
-
-            if self.lifecycle_listener.is_pinned(evicted_key, value) {
-                // pinned, skip removal
-                return false;
-            }
-
-            // SLOW PATH: acquire write lock to perform removal
-            let Ok(mut shard) =
-                parking_lot::RwLockUpgradableReadGuard::try_upgrade(shard)
-            else {
-                // couldn't get the lock, skip removal
-                return false;
-            };
+            let shard_index = self.storage.shard_index(self.hash(evicted_key));
+            let mut shard = self.storage.write_shard(shard_index);
 
             match shard.entry(evicted_key.clone()) {
                 hash_map::Entry::Occupied(mut occupied_entry) => {
