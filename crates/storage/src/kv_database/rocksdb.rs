@@ -22,7 +22,6 @@ use crate::{
     kv_database::{
         DiscriminantEncoding, KeyOfSetColumn, KvDatabase, KvDatabaseFactory,
         SerializationBuffer, WideColumn, WideColumnValue, WriteBatch,
-        buffer_pool::BufferPool,
     },
     sharded::default_shard_amount,
 };
@@ -68,9 +67,6 @@ struct Impl {
     ///
     /// This is used to avoid repeated lookups for the same column family.
     column_families: DashMap<StableTypeID, String>,
-
-    /// Buffer pool for reusing encoding/decoding buffers.
-    buffer_pool: BufferPool,
 }
 
 /// Factory for creating [`RocksDB`] instances.
@@ -157,7 +153,6 @@ impl RocksDB {
             db,
             plugin: Arc::new(plugin),
             column_families: DashMap::with_shard_amount(default_shard_amount()),
-            buffer_pool: BufferPool::new(),
         })))
     }
 
@@ -445,8 +440,8 @@ impl WriteBatch for RocksDBWriteBatch {
     ) {
         let cf = self.db.get_or_create_cf::<W>(ColumnKind::WideColumn);
 
-        let mut key_buffer = self.db.buffer_pool.get_buffer();
-        let mut value_buffer = self.db.buffer_pool.get_buffer();
+        let mut key_buffer = Vec::new();
+        let mut value_buffer = Vec::new();
 
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
         self.db.encode_value(value, &mut value_buffer);
@@ -455,15 +450,12 @@ impl WriteBatch for RocksDBWriteBatch {
 
         // accumulate estimated size
         self.estimated_size += key_buffer.len() + value_buffer.len();
-
-        self.db.buffer_pool.return_buffer(key_buffer);
-        self.db.buffer_pool.return_buffer(value_buffer);
     }
 
     fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key) {
         let cf = self.db.get_or_create_cf::<W>(ColumnKind::WideColumn);
 
-        let mut key_buffer = self.db.buffer_pool.get_buffer();
+        let mut key_buffer = Vec::new();
 
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
 
@@ -471,8 +463,6 @@ impl WriteBatch for RocksDBWriteBatch {
 
         // accumulate estimated size
         self.estimated_size += key_buffer.len();
-
-        self.db.buffer_pool.return_buffer(key_buffer);
     }
 
     fn insert_member<C: KeyOfSetColumn>(
@@ -481,7 +471,7 @@ impl WriteBatch for RocksDBWriteBatch {
         value: &C::Element,
     ) {
         let cf = self.db.get_or_create_cf::<C>(ColumnKind::KeyOfSet);
-        let mut buffer = self.db.buffer_pool.get_buffer();
+        let mut buffer = Vec::new();
 
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer);
@@ -492,8 +482,6 @@ impl WriteBatch for RocksDBWriteBatch {
 
         // accumulate estimated size
         self.estimated_size += buffer.len();
-
-        self.db.buffer_pool.return_buffer(buffer);
     }
 
     fn delete_member<C: KeyOfSetColumn>(
@@ -502,7 +490,7 @@ impl WriteBatch for RocksDBWriteBatch {
         value: &C::Element,
     ) {
         let cf = self.db.get_or_create_cf::<C>(ColumnKind::KeyOfSet);
-        let mut buffer = self.db.buffer_pool.get_buffer();
+        let mut buffer = Vec::new();
 
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer);
@@ -511,8 +499,6 @@ impl WriteBatch for RocksDBWriteBatch {
 
         // accumulate estimated size
         self.estimated_size += buffer.len();
-
-        self.db.buffer_pool.return_buffer(buffer);
     }
 
     fn consume_serialization_buffer(
@@ -530,9 +516,6 @@ impl WriteBatch for RocksDBWriteBatch {
 
                     self.batch.put_cf(&cf_handle, &key, &value);
                     self.estimated_size += key.len() + value.len();
-
-                    self.db.buffer_pool.return_buffer(key);
-                    self.db.buffer_pool.return_buffer(value);
                 }
 
                 Operation::DeleteMember { cf, key }
@@ -545,8 +528,6 @@ impl WriteBatch for RocksDBWriteBatch {
 
                     self.batch.delete_cf(&cf_handle, &key);
                     self.estimated_size += key.len();
-
-                    self.db.buffer_pool.return_buffer(key);
                 }
 
                 Operation::InsertMember { cf, key } => {
@@ -558,8 +539,6 @@ impl WriteBatch for RocksDBWriteBatch {
 
                     self.batch.put_cf(&cf_handle, &key, []);
                     self.estimated_size += key.len();
-
-                    self.db.buffer_pool.return_buffer(key);
                 }
             }
         }
@@ -593,7 +572,7 @@ impl KvDatabase for RocksDB {
     ) -> Option<C> {
         let cf = self.0.get_or_create_cf::<W>(ColumnKind::WideColumn);
 
-        let mut buffer = self.0.buffer_pool.get_buffer();
+        let mut buffer = Vec::new();
         self.0.encode_wide_column_key::<W, C>(key, &mut buffer);
 
         match self.0.db.get_cf(&cf, &buffer) {
@@ -605,13 +584,9 @@ impl KvDatabase for RocksDB {
                     .decode::<C>(&self.0.plugin)
                     .expect("decoding should not fail");
 
-                self.0.buffer_pool.return_buffer(buffer);
                 Some(value)
             }
-            Ok(None) => {
-                self.0.buffer_pool.return_buffer(buffer);
-                None
-            }
+            Ok(None) => None,
             Err(err) => {
                 panic!("RocksDB get error: {err}");
             }
@@ -624,7 +599,7 @@ impl KvDatabase for RocksDB {
     ) -> ScanMembersIterator<C> {
         let ither =
             OwnedScannedMembersIterator::new(self.0.clone(), move |x| {
-                let mut prefix_buffer = x.buffer_pool.get_buffer();
+                let mut prefix_buffer = Vec::new();
                 x.encode_value_length_prefixed(key, &mut prefix_buffer);
 
                 let prefix_upper_bound =
@@ -753,8 +728,8 @@ impl SerializationBuffer for RocksDBSerializationBuffer {
         key: &W::Key,
         value: &C,
     ) {
-        let mut key_buffer = self.db.buffer_pool.get_buffer();
-        let mut value_buffer = self.db.buffer_pool.get_buffer();
+        let mut key_buffer = Vec::new();
+        let mut value_buffer = Vec::new();
 
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
         self.db.encode_value(value, &mut value_buffer);
@@ -770,7 +745,7 @@ impl SerializationBuffer for RocksDBSerializationBuffer {
     }
 
     fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key) {
-        let mut key_buffer = self.db.buffer_pool.get_buffer();
+        let mut key_buffer = Vec::new();
 
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
 
@@ -788,7 +763,7 @@ impl SerializationBuffer for RocksDBSerializationBuffer {
         key: &C::Key,
         value: &C::Element,
     ) {
-        let mut buffer = self.db.buffer_pool.get_buffer();
+        let mut buffer = Vec::new();
 
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer);
@@ -807,7 +782,7 @@ impl SerializationBuffer for RocksDBSerializationBuffer {
         key: &C::Key,
         value: &C::Element,
     ) {
-        let mut buffer = self.db.buffer_pool.get_buffer();
+        let mut buffer = Vec::new();
 
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer);

@@ -9,6 +9,7 @@ license.workspace = true
 
 [features]
 rocksdb = ["dep:rust-rocksdb"]
+fjall = ["dep:fjall"]
 
 [dependencies]
 qbice_serialize = { version = "0.1.3", path = "../serialize" }
@@ -24,6 +25,7 @@ crossbeam-channel.workspace = true
 crossbeam-deque.workspace = true
 enum-as-inner.workspace = true
 rust-rocksdb = { workspace = true, optional = true }
+fjall = { workspace = true, optional = true }
 thread_local.workspace = true
 tokio.workspace = true
 rayon.workspace = true
@@ -32,6 +34,7 @@ bon.workspace = true
 tracing.workspace = true
 crossbeam-skiplist.workspace = true
 crossbeam.workspace = true
+scc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

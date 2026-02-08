@@ -7,17 +7,11 @@ use crate::{
         KeyOfSetColumn, KvDatabase, KvDatabaseFactory, WideColumn,
         WideColumnValue,
     },
+    sharded::default_shard_amount,
     single_map::cache::CacheSingleMap,
     storage_engine::{StorageEngine, StorageEngineFactory},
     write_manager::write_behind,
 };
-
-/// Returns the default number of shards for caches.
-#[must_use]
-pub fn default_shard_amount() -> usize {
-    std::thread::available_parallelism()
-        .map_or_else(|_| 32, |x| x.get().next_power_of_two() * 32)
-}
 
 /// Configuration options for a database-backed storage engine.
 ///

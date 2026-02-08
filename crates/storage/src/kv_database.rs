@@ -9,10 +9,11 @@ use std::{fmt::Debug, hash::Hash};
 use qbice_serialize::{Decode, Encode, Plugin};
 use qbice_stable_type_id::Identifiable;
 
-mod buffer_pool;
-
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb;
+
+#[cfg(feature = "fjall")]
+pub mod fjall;
 
 /// A buffer for accumulating serialization operations that can be later applied
 /// to write batch efficiently.

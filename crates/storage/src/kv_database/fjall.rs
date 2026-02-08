@@ -7,7 +7,6 @@ use std::{path::Path, sync::Arc};
 
 use dashmap::{DashMap, Entry};
 use fjall::Keyspace;
-use parking_lot::Mutex;
 use qbice_serialize::{
     Decoder, Encode, Encoder, Plugin, PostcardDecoder, PostcardEncoder,
 };
@@ -15,7 +14,7 @@ use qbice_stable_type_id::{Identifiable, StableTypeID};
 
 use crate::kv_database::{
     DiscriminantEncoding, KeyOfSetColumn, KvDatabase, KvDatabaseFactory,
-    WideColumn, WideColumnValue, WriteBatch, buffer_pool::BufferPool,
+    SerializationBuffer, WideColumn, WideColumnValue, WriteBatch,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -40,7 +39,7 @@ enum ColumnKind {
 /// # Thread Safety
 ///
 /// This implementation is fully thread-safe and can be shared across threads.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Fjall(Arc<Impl>);
 
 struct Impl {
@@ -54,9 +53,6 @@ struct Impl {
     ///
     /// This is used to avoid repeated lookups for the same keyspace.
     keyspaces: DashMap<StableTypeID, Keyspace>,
-
-    /// Buffer pool for reusing encoding/decoding buffers.
-    buffer_pool: BufferPool,
 }
 
 impl std::fmt::Debug for Impl {
@@ -64,7 +60,6 @@ impl std::fmt::Debug for Impl {
         f.debug_struct("Impl")
             .field("db", &"<Database>")
             .field("plugin", &self.plugin)
-            .field("buffer_pool", &self.buffer_pool)
             .finish_non_exhaustive()
     }
 }
@@ -74,6 +69,9 @@ impl std::fmt::Debug for Impl {
 pub struct FjallFactory<P> {
     path: P,
 }
+
+/// Error type for Fjall operations.
+pub type FjallError = fjall::Error;
 
 impl<P: AsRef<Path>> KvDatabaseFactory for FjallFactory<P> {
     type KvDatabase = Fjall;
@@ -120,12 +118,7 @@ impl Fjall {
 
         let db = fjall::Database::open(config)?;
 
-        Ok(Self(Arc::new(Impl {
-            db,
-            plugin,
-            keyspaces: DashMap::new(),
-            buffer_pool: BufferPool::new(),
-        })))
+        Ok(Self(Arc::new(Impl { db, plugin, keyspaces: DashMap::new() })))
     }
 
     /// Creates a factory for opening or creating a `Fjall` database.
@@ -260,15 +253,19 @@ pub struct FjallWriteBatch {
     db: Arc<Impl>,
 
     /// The write batch accumulating all operations.
-    batch: Mutex<fjall::OwnedWriteBatch>,
+    batch: fjall::OwnedWriteBatch,
+
+    bytes_written: usize,
 }
+
+const BATCH_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 
 impl std::fmt::Debug for FjallWriteBatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FjallWriteTransaction")
             .field("db", &self.db)
             .field("batch", &"<Batch>")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -277,89 +274,121 @@ impl FjallWriteBatch {
     fn new(db: &Arc<Impl>) -> Self {
         let batch = db.db.batch().durability(None);
 
-        Self { db: db.clone(), batch: Mutex::new(batch) }
+        Self { db: db.clone(), batch, bytes_written: 0 }
     }
 }
 
 impl WriteBatch for FjallWriteBatch {
+    type SerializationBuffer = FjallSerializationBuffer;
+
     fn put<W: WideColumn, C: WideColumnValue<W>>(
-        &self,
+        &mut self,
         key: &W::Key,
         value: &C,
     ) {
         let keyspace =
             self.db.get_or_create_keyspace::<W>(ColumnKind::WideColumn);
 
-        let mut key_buffer = self.db.buffer_pool.get_buffer();
-        let mut value_buffer = self.db.buffer_pool.get_buffer();
+        let mut key_buffer = Vec::new();
+        let mut value_buffer = Vec::new();
 
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
         self.db.encode_value(value, &mut value_buffer, false);
 
-        self.batch.lock().insert(&keyspace, &key_buffer, &value_buffer);
+        self.batch.insert(&keyspace, &key_buffer, &value_buffer);
 
-        self.db.buffer_pool.return_buffer(key_buffer);
-        self.db.buffer_pool.return_buffer(value_buffer);
+        self.bytes_written += key_buffer.len() + value_buffer.len();
     }
 
-    fn delete<W: WideColumn, C: WideColumnValue<W>>(&self, key: &W::Key) {
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key) {
         let keyspace =
             self.db.get_or_create_keyspace::<W>(ColumnKind::WideColumn);
 
-        let mut key_buffer = self.db.buffer_pool.get_buffer();
+        let mut key_buffer = Vec::new();
 
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
 
-        self.batch.lock().remove(&keyspace, &key_buffer);
+        self.batch.remove(&keyspace, &key_buffer);
 
-        self.db.buffer_pool.return_buffer(key_buffer);
+        self.bytes_written += key_buffer.len();
     }
 
     fn insert_member<C: KeyOfSetColumn>(
-        &self,
+        &mut self,
         key: &C::Key,
         value: &C::Element,
     ) {
         let keyspace =
             self.db.get_or_create_keyspace::<C>(ColumnKind::KeyOfSet);
-        let mut buffer = self.db.buffer_pool.get_buffer();
+        let mut buffer = Vec::new();
 
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer, false);
 
         // For set membership, the value is empty (presence indicates
         // membership)
-        self.batch.lock().insert(&keyspace, &buffer, []);
+        self.batch.insert(&keyspace, &buffer, []);
 
-        self.db.buffer_pool.return_buffer(buffer);
+        self.bytes_written += buffer.len();
     }
 
     fn delete_member<C: KeyOfSetColumn>(
-        &self,
+        &mut self,
         key: &C::Key,
         value: &C::Element,
     ) {
         let keyspace =
             self.db.get_or_create_keyspace::<C>(ColumnKind::KeyOfSet);
-        let mut buffer = self.db.buffer_pool.get_buffer();
+        let mut buffer = Vec::new();
 
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer, false);
 
-        self.batch.lock().remove(&keyspace, &buffer);
+        self.batch.remove(&keyspace, &buffer);
 
-        self.db.buffer_pool.return_buffer(buffer);
+        self.bytes_written += buffer.len();
     }
 
     fn commit(self) {
-        let batch = self.batch.into_inner().durability(None);
+        let batch = self.batch.durability(None);
 
         batch.commit().expect("write should not fail");
     }
+
+    fn consume_serialization_buffer(
+        &mut self,
+        buffer: Self::SerializationBuffer,
+    ) {
+        for operation in buffer.operations {
+            match operation {
+                Operation::WideColumnPut { cf, key, value } => {
+                    self.batch.insert(&cf, &key, &value);
+                    self.bytes_written += key.len() + value.len();
+                }
+
+                Operation::WideColumnDelete { cf, key }
+                | Operation::DeleteMember { cf, key } => {
+                    self.batch.remove(&cf, &key);
+                    self.bytes_written += key.len();
+                }
+
+                Operation::InsertMember { cf, key } => {
+                    self.batch.insert(&cf, &key, []);
+                    self.bytes_written += key.len();
+                }
+            }
+        }
+    }
+
+    fn should_write_more(&self) -> bool { self.bytes_written < BATCH_SIZE }
 }
 
 impl KvDatabase for Fjall {
     type WriteBatch = FjallWriteBatch;
+
+    type SerializationBuffer = FjallSerializationBuffer;
+
+    type ScanMemberIterator<C: KeyOfSetColumn> = ScanMemberIterator<C>;
 
     fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
         &self,
@@ -368,7 +397,7 @@ impl KvDatabase for Fjall {
         let keyspace =
             self.0.get_or_create_keyspace::<W>(ColumnKind::WideColumn);
 
-        let mut buffer = self.0.buffer_pool.get_buffer();
+        let mut buffer = Vec::new();
         self.0.encode_wide_column_key::<W, C>(key, &mut buffer);
 
         match keyspace.get(&buffer) {
@@ -381,13 +410,10 @@ impl KvDatabase for Fjall {
                     .decode::<C>(&self.0.plugin)
                     .expect("decoding should not fail");
 
-                self.0.buffer_pool.return_buffer(buffer);
                 Some(value)
             }
-            Ok(None) => {
-                self.0.buffer_pool.return_buffer(buffer);
-                None
-            }
+            Ok(None) => None,
+
             Err(err) => {
                 panic!("Fjall get error: {err}");
             }
@@ -398,34 +424,147 @@ impl KvDatabase for Fjall {
     fn scan_members<'s, C: KeyOfSetColumn>(
         &'s self,
         key: &'s C::Key,
-    ) -> impl Iterator<Item = C::Element> {
+    ) -> Self::ScanMemberIterator<C> {
         let keyspace = self.0.get_or_create_keyspace::<C>(ColumnKind::KeyOfSet);
-        let mut prefix_buffer = self.0.buffer_pool.get_buffer();
+        let mut prefix_buffer = Vec::new();
         self.0.encode_value_length_prefixed(key, &mut prefix_buffer);
 
         // Use prefix iterator
         let iter = keyspace.prefix(prefix_buffer.as_slice());
 
-        iter.filter_map(move |entry| {
-            entry.key().ok().map(|key| {
-                let key_bytes = key.as_ref();
-
-                let length = u64::from_le_bytes(
-                    key_bytes[0..8]
-                        .try_into()
-                        .expect("length prefix should be 8 bytes"),
-                ) as usize;
-
-                let mut decoder = PostcardDecoder::new(std::io::Cursor::new(
-                    &key_bytes[8 + length..],
-                ));
-
-                decoder
-                    .decode::<C::Element>(&self.0.plugin)
-                    .expect("decoding should not fail")
-            })
-        })
+        ScanMemberIterator {
+            iter,
+            db: self.0.clone(),
+            _marker: std::marker::PhantomData,
+        }
     }
 
     fn write_batch(&self) -> Self::WriteBatch { FjallWriteBatch::new(&self.0) }
+
+    fn serialization_buffer(&self) -> Self::SerializationBuffer {
+        FjallSerializationBuffer { operations: Vec::new(), db: self.0.clone() }
+    }
+}
+
+enum Operation {
+    WideColumnPut { cf: Keyspace, key: Vec<u8>, value: Vec<u8> },
+    WideColumnDelete { cf: Keyspace, key: Vec<u8> },
+    InsertMember { cf: Keyspace, key: Vec<u8> },
+    DeleteMember { cf: Keyspace, key: Vec<u8> },
+}
+
+/// Serialization buffer for batching Fjall operations.
+pub struct FjallSerializationBuffer {
+    operations: Vec<Operation>,
+    db: Arc<Impl>,
+}
+
+impl std::fmt::Debug for FjallSerializationBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FjallSerializationBuffer").finish_non_exhaustive()
+    }
+}
+
+impl SerializationBuffer for FjallSerializationBuffer {
+    fn put<W: WideColumn, C: WideColumnValue<W>>(
+        &mut self,
+        key: &W::Key,
+        value: &C,
+    ) {
+        let mut key_buffer = Vec::new();
+        let mut value_buffer = Vec::new();
+
+        self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
+        self.db.encode_value(value, &mut value_buffer, false);
+
+        self.operations.push(Operation::WideColumnPut {
+            cf: self.db.get_or_create_keyspace::<W>(ColumnKind::WideColumn),
+            key: key_buffer,
+            value: value_buffer,
+        });
+    }
+
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key) {
+        let mut key_buffer = Vec::new();
+
+        self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
+
+        self.operations.push(Operation::WideColumnDelete {
+            cf: self.db.get_or_create_keyspace::<W>(ColumnKind::WideColumn),
+            key: key_buffer,
+        });
+    }
+
+    fn insert_member<C: KeyOfSetColumn>(
+        &mut self,
+        key: &C::Key,
+        value: &C::Element,
+    ) {
+        let mut buffer = Vec::new();
+
+        self.db.encode_value_length_prefixed(key, &mut buffer);
+        self.db.encode_value(value, &mut buffer, false);
+
+        self.operations.push(Operation::InsertMember {
+            cf: self.db.get_or_create_keyspace::<C>(ColumnKind::KeyOfSet),
+            key: buffer,
+        });
+    }
+
+    fn delete_member<C: KeyOfSetColumn>(
+        &mut self,
+        key: &C::Key,
+        value: &C::Element,
+    ) {
+        let mut buffer = Vec::new();
+
+        self.db.encode_value_length_prefixed(key, &mut buffer);
+        self.db.encode_value(value, &mut buffer, false);
+
+        self.operations.push(Operation::DeleteMember {
+            cf: self.db.get_or_create_keyspace::<C>(ColumnKind::KeyOfSet),
+            key: buffer,
+        });
+    }
+}
+
+/// Iterator created [`KvDatabase::scan_members`] for the Fjall backend.
+pub struct ScanMemberIterator<C> {
+    iter: fjall::Iter,
+    db: Arc<Impl>,
+    _marker: std::marker::PhantomData<C>,
+}
+
+impl<C> std::fmt::Debug for ScanMemberIterator<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScanMemberIterator").finish_non_exhaustive()
+    }
+}
+
+impl<C: KeyOfSetColumn> Iterator for ScanMemberIterator<C> {
+    type Item = C::Element;
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn next(&mut self) -> Option<Self::Item> {
+        let guard = self.iter.next()?;
+        let key = guard.key().ok()?;
+
+        let key_bytes = key.as_ref();
+
+        let length = u64::from_le_bytes(
+            key_bytes[0..8]
+                .try_into()
+                .expect("length prefix should be 8 bytes"),
+        ) as usize;
+
+        let mut decoder = PostcardDecoder::new(std::io::Cursor::new(
+            &key_bytes[8 + length..],
+        ));
+
+        Some(
+            decoder
+                .decode::<C::Element>(&self.db.plugin)
+                .expect("decoding should not fail"),
+        )
+    }
 }

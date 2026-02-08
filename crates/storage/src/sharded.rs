@@ -7,7 +7,7 @@ pub fn default_shard_amount() -> usize {
     static DEFAULT_SHARD_AMOUNT: OnceLock<usize> = OnceLock::new();
 
     *DEFAULT_SHARD_AMOUNT.get_or_init(|| {
-        (std::thread::available_parallelism().map_or(1, usize::from) * 8)
+        (std::thread::available_parallelism().map_or(32, usize::from) * 32)
             .next_power_of_two()
     })
 }
@@ -55,6 +55,7 @@ impl<T> Sharded<T> {
         self.shards[shard_index].read_recursive()
     }
 
+    #[allow(unused)]
     pub fn upgradable_read_shard(
         &self,
         shard_index: usize,
@@ -69,6 +70,7 @@ impl<T> Sharded<T> {
         self.shards[shard_index].write()
     }
 
+    #[allow(unused)]
     pub fn iter_read_shards(
         &self,
     ) -> impl Iterator<Item = parking_lot::RwLockReadGuard<'_, T>> {
