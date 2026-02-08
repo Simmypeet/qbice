@@ -11,6 +11,7 @@ use std::{
 
 use crossbeam_utils::CachePadded;
 use fxhash::FxBuildHasher;
+use rust_rocksdb::perf::MemoryUsageStats;
 
 use crate::tiny_lfu::policy::{Policy, PolicyMessage, WriteMessage};
 
@@ -20,6 +21,18 @@ mod read_buffer;
 mod single_flight;
 mod sketch;
 mod write_buffer;
+
+/// Specifies the strategy for unpining entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UnpinStrategy {
+    /// Periodically asks the lifecycle listener if the entry has already
+    /// unpinned by calling [`LifecycleListener::is_pinned`]
+    Poll,
+
+    /// The client is responsible for unpining entries by calling
+    /// [`TinyLFU::unpin`]
+    Notify,
+}
 
 const MAINTENANCE_BATCH_SIZE: usize = 32;
 
@@ -77,9 +90,14 @@ impl<
     /// Creates a new TinyLFU cache with the specified capacity and shard
     /// count.
     #[must_use]
-    pub fn new(capacity: usize, shard_count: usize) -> Self {
+    pub fn new(
+        capacity: usize,
+        shard_count: usize,
+        unpin_strategy: UnpinStrategy,
+    ) -> Self {
         let (sender, receiver) = crossbeam::channel::bounded(1);
-        let inner = Arc::new(TinyLFUInner::new(capacity, shard_count));
+        let inner =
+            Arc::new(TinyLFUInner::new(capacity, shard_count, unpin_strategy));
 
         Self {
             inner: inner.clone(),
@@ -171,8 +189,10 @@ impl<
 /// without storing actual values.
 struct TinyLFUInner<K: Hash + Eq, V, L = DefaultLifecycleListener> {
     storage: CachePadded<scc::HashMap<K, V, FxBuildHasher>>,
+
     read_buffer: CachePadded<read_buffer::ReadBuffer<K>>,
-    write_buffer: CachePadded<write_buffer::WriteBuffer<K>>,
+    write_buffer: CachePadded<write_buffer::UnboundedBuffer<WriteMessage<K>>>,
+
     policy: CachePadded<parking_lot::Mutex<Policy<K>>>,
 
     max_write_per_maintenance: usize,
@@ -181,6 +201,7 @@ struct TinyLFUInner<K: Hash + Eq, V, L = DefaultLifecycleListener> {
     maintenance_flag: AtomicBool,
 
     evicted_count: AtomicUsize,
+    unpin_strategy: UnpinStrategy,
 
     lifecycle_listener: L,
     build_hasher: FxBuildHasher,
@@ -196,7 +217,11 @@ impl<K: Hash + Eq, V, L: Default> TinyLFUInner<K, V, L> {
     /// Creates a new TinyLFUInner cache with the specified capacity and shard
     /// count.
     #[must_use]
-    pub fn new(capacity: usize, _shard_count: usize) -> Self {
+    pub fn new(
+        capacity: usize,
+        _shard_count: usize,
+        unpin_strategy: UnpinStrategy,
+    ) -> Self {
         Self {
             storage: CachePadded::new(scc::HashMap::with_hasher(
                 FxBuildHasher::default(),
@@ -210,11 +235,13 @@ impl<K: Hash + Eq, V, L: Default> TinyLFUInner<K, V, L> {
             max_write_per_maintenance: std::thread::available_parallelism()
                 .map(|n| n.get() * 128)
                 .unwrap_or(128),
-            write_buffer: CachePadded::new(write_buffer::WriteBuffer::new()),
+            write_buffer: CachePadded::new(write_buffer::UnboundedBuffer::new()),
+
             policy: CachePadded::new(parking_lot::Mutex::new(Policy::new(
                 capacity,
             ))),
             lifecycle_listener: L::default(),
+            unpin_strategy,
             build_hasher: FxBuildHasher::default(),
             evicted_count: AtomicUsize::new(0),
             maintenance_flag: AtomicBool::new(false),
@@ -359,6 +386,14 @@ impl<
 
         t
     }
+
+    /// Notifies the cache that a key has been unpinned and should be removed or
+    /// reinserted into the cache.
+    pub fn unpin(&self, key: K) {
+        self.try_maintenance(Some(PolicyMessage::Write(
+            WriteMessage::Unpinned(key),
+        )));
+    }
 }
 
 impl<
@@ -368,15 +403,7 @@ impl<
 > TinyLFUInner<K, V, L>
 {
     fn process_policy_message(&self, lock: &mut Policy<K>) {
-        let mut processed = 0;
-        while processed <= self.max_write_per_maintenance {
-            processed += 1;
-
-            // Pop a message
-            let Some(message) = self.write_buffer.pop() else {
-                break;
-            };
-
+        while let Some(message) = self.write_buffer.pop() {
             self.process_write(message, lock);
         }
 
@@ -384,8 +411,10 @@ impl<
             self.process_message(PolicyMessage::ReadHit(read_k), lock);
         }
 
-        // before dropping the lock, we can try to overflow trimming
-        lock.attempt_to_trim_overflowing_pinned(self.remove_closure());
+        if self.unpin_strategy == UnpinStrategy::Poll {
+            // before dropping the lock, we can try to overflow trimming
+            lock.attempt_to_trim_overflowing_pinned(self.remove_closure());
+        }
     }
 
     fn process_write(&self, message: WriteMessage<K>, lock: &mut Policy<K>) {
@@ -400,6 +429,10 @@ impl<
                 );
             }
 
+            WriteMessage::Unpinned(key) => {
+                lock.unpin(&key, &self.build_hasher, self.remove_closure());
+            }
+
             WriteMessage::Removed(key) => {
                 lock.on_removed(&key);
             }
@@ -411,6 +444,10 @@ impl<
             PolicyMessage::ReadHit(key) => {
                 let hash = self.hash(&key);
                 lock.on_read_hit(&key, hash);
+            }
+
+            PolicyMessage::Write(WriteMessage::Unpinned(key)) => {
+                lock.unpin(&key, &self.build_hasher, self.remove_closure());
             }
 
             PolicyMessage::Write(WriteMessage::Insert(key)) => {

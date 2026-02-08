@@ -234,8 +234,16 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
     #[allow(clippy::cast_possible_truncation)]
     pub fn new(cap: u64, shard_amount: usize) -> Self {
         Self {
-            staging: TinyLFU::new(2048, shard_amount),
-            cache: TinyLFU::new(cap as usize, shard_amount),
+            staging: TinyLFU::new(
+                2048,
+                shard_amount,
+                tiny_lfu::UnpinStrategy::Notify,
+            ),
+            cache: TinyLFU::new(
+                cap as usize,
+                shard_amount,
+                tiny_lfu::UnpinStrategy::Poll,
+            ),
             single_flight: single_flight::SingleFlight::new(shard_amount),
         }
     }

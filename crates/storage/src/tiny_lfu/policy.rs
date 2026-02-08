@@ -8,6 +8,7 @@ use crate::tiny_lfu::{lru, sketch::Sketch};
 pub enum WriteMessage<K> {
     Insert(K),
     Removed(K),
+    Unpinned(K),
 }
 
 #[derive(Clone)]
@@ -151,6 +152,58 @@ impl<K> Policy<K> {
                     lru::Region::Pinned,
                 );
             }
+        }
+    }
+
+    pub fn unpin(
+        &mut self,
+        unpin: &K,
+        build_hash: &FxBuildHasher,
+        remove: impl Fn(&K) -> bool,
+    ) where
+        K: std::hash::Hash + Eq + Clone,
+    {
+        // If the candidate is not pinned, we do nothing.
+        if !self.lru.check_is_in_region(unpin, lru::Region::Pinned) {
+            return;
+        }
+
+        let victim =
+            self.lru.peek_least_recent(lru::Region::Probation).unwrap();
+
+        let (pinned_frequency, victim_frequency) = {
+            let pinned_hash = build_hash.hash_one(unpin);
+            let victim_hash = build_hash.hash_one(victim);
+
+            let pinned_frequency = self.sketch.estimate_frequency(pinned_hash);
+            let victim_frequency = self.sketch.estimate_frequency(victim_hash);
+
+            (pinned_frequency, victim_frequency)
+        };
+
+        if pinned_frequency > victim_frequency {
+            // the pinned frequency wins, we move it back to probation
+            if remove(victim) {
+                // the storage has confirmed removal of the victim
+                self.lru.pop_least_recent(lru::Region::Probation).unwrap();
+            } else {
+                // the storage has not confirmed removal of the victim
+                // we need to move victim to pinned
+                self.lru.move_least_recent_of_to_new_region(
+                    lru::Region::Probation,
+                    lru::Region::Pinned,
+                );
+            }
+
+            // move the pinned key to the head of the probation region
+            self.lru.move_key_to_head_of_region(unpin, lru::Region::Probation);
+        } else {
+            // the pinned item lost, we evict it
+            if remove(unpin) {
+                self.lru.remove(unpin);
+            }
+
+            // otherwise, keep it
         }
     }
 

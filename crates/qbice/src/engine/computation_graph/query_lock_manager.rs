@@ -45,7 +45,11 @@ impl QueryLockManager {
     /// Create a new LockManager with the given capacity for the hot cache.
     #[allow(clippy::cast_possible_truncation)]
     pub fn new(capacity: u64) -> Self {
-        let cache = TinyLFU::new(capacity as usize, default_shard_amount());
+        let cache = TinyLFU::new(
+            capacity as usize,
+            default_shard_amount(),
+            qbice_storage::tiny_lfu::UnpinStrategy::Poll,
+        );
 
         Self { hot: cache }
     }

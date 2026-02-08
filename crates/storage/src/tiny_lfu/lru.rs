@@ -304,6 +304,14 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         }
     }
 
+    pub fn check_is_in_region(&self, key: &K, region: Region) -> bool {
+        if let Some((_, found)) = self.map.get(key) {
+            *found == region
+        } else {
+            false
+        }
+    }
+
     pub fn shuffle_tail_to_head(&mut self, region: Region) {
         let tail_index = self.list.tails[region as usize];
         if tail_index == NULL {
@@ -311,5 +319,22 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         }
 
         self.list.move_to_head(tail_index, region);
+    }
+
+    pub fn move_key_to_head_of_region(&mut self, key: &K, new_region: Region) {
+        let (index, region) = self.map.get_mut(key).unwrap();
+
+        assert!(
+            *region != new_region,
+            "Key is already in the specified region"
+        );
+
+        self.list.unlink(*index, *region);
+        self.list.push_head(*index, new_region);
+
+        self.list.lens[new_region as usize] += 1;
+        self.list.lens[*region as usize] -= 1;
+
+        *region = new_region;
     }
 }

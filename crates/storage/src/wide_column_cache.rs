@@ -62,7 +62,11 @@ impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static, T>
     #[allow(clippy::cast_possible_truncation)]
     pub fn new(capacity: u64, shard_amount: usize) -> Self {
         Self {
-            tiny_lfu: TinyLFU::new(capacity as usize, shard_amount),
+            tiny_lfu: TinyLFU::new(
+                capacity as usize,
+                shard_amount,
+                tiny_lfu::UnpinStrategy::Notify,
+            ),
             some_fetched: AtomicUsize::new(0),
             none_fetched: AtomicUsize::new(0),
             single_flight: single_flight::SingleFlight::new(shard_amount),
@@ -197,9 +201,17 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static, T>
         keys: impl IntoIterator<Item = K>,
     ) {
         for key in keys {
-            self.tiny_lfu.get_map(&key, |x| {
-                x.pin_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let unpin = self.tiny_lfu.get_map(&key, |x| {
+                let count = x
+                    .pin_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+
+                count == 1 // unpin
             });
+
+            if unpin == Some(true) {
+                self.tiny_lfu.unpin(key);
+            }
         }
     }
 }

@@ -1,13 +1,11 @@
 use crossbeam::queue::SegQueue;
 
-use crate::tiny_lfu::policy::WriteMessage;
-
-pub struct WriteBuffer<T> {
-    queue: SegQueue<WriteMessage<T>>,
+pub struct UnboundedBuffer<T> {
+    queue: SegQueue<T>,
     len: std::sync::atomic::AtomicUsize,
 }
 
-impl<T> WriteBuffer<T> {
+impl<T> UnboundedBuffer<T> {
     pub const fn new() -> Self {
         Self {
             queue: SegQueue::new(),
@@ -15,12 +13,12 @@ impl<T> WriteBuffer<T> {
         }
     }
 
-    pub fn push(&self, item: WriteMessage<T>) {
+    pub fn push(&self, item: T) {
         self.queue.push(item);
         self.len.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn pop(&self) -> Option<WriteMessage<T>> {
+    pub fn pop(&self) -> Option<T> {
         let result = self.queue.pop();
         if result.is_some() {
             self.len.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
