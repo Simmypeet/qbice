@@ -476,33 +476,39 @@ impl<
         // Step 1: Write to Staging (The Anchor)
         // We ensure the log exists and push the op.
         let log = {
-            self.repr.staging.get_map(key, |x| {
-                if updated {
-                    x.dirty.fetch_add(1, Ordering::SeqCst);
-                }
+            self.repr
+                .staging
+                .get_map(key, |x| {
+                    if updated {
+                        x.dirty.fetch_add(1, Ordering::SeqCst);
+                    }
 
-                x.log.clone()
-            });
+                    x.log.clone()
+                })
+                .unwrap_or_else(|| {
+                    let tracked_log = TrackedConcurrentLog {
+                        log: Arc::new(ConcurrentLog::new()),
+                        dirty: AtomicUsize::new(usize::from(updated)),
+                    };
 
-            let tracked_log = TrackedConcurrentLog {
-                log: Arc::new(ConcurrentLog::new()),
-                dirty: AtomicUsize::new(usize::from(updated)),
-            };
+                    self.repr.staging.entry(key.clone(), |entry| match entry {
+                        tiny_lfu::Entry::Vacant(vacant_entry) => {
+                            let log = tracked_log.log.clone();
+                            vacant_entry.insert(tracked_log);
 
-            self.repr.staging.entry(key.clone(), |entry| match entry {
-                tiny_lfu::Entry::Vacant(vacant_entry) => {
-                    let log = tracked_log.log.clone();
-                    vacant_entry.insert(tracked_log);
+                            log
+                        }
 
-                    log
-                }
+                        tiny_lfu::Entry::Occupied(occupied_entry) => {
+                            occupied_entry
+                                .get()
+                                .dirty
+                                .fetch_add(1, Ordering::SeqCst);
 
-                tiny_lfu::Entry::Occupied(occupied_entry) => {
-                    occupied_entry.get().dirty.fetch_add(1, Ordering::SeqCst);
-
-                    occupied_entry.get().log.clone()
-                }
-            })
+                            occupied_entry.get().log.clone()
+                        }
+                    })
+                })
         };
 
         // apply the operation to the log
