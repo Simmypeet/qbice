@@ -21,7 +21,8 @@ use rust_rocksdb::{
 use crate::{
     kv_database::{
         DiscriminantEncoding, KeyOfSetColumn, KvDatabase, KvDatabaseFactory,
-        WideColumn, WideColumnValue, WriteBatch, buffer_pool::BufferPool,
+        SerializationBuffer, WideColumn, WideColumnValue, WriteBatch,
+        buffer_pool::BufferPool,
     },
     sharded::default_shard_amount,
 };
@@ -187,30 +188,28 @@ impl Impl {
         }
     }
 
-    /// Gets or creates a column family for the given column type.
-    fn get_or_create_cf<C: Identifiable>(
+    fn get_or_create_cf_from_cf_identifier(
         &self,
+        stable_type_id: StableTypeID,
         kind: ColumnKind,
     ) -> Arc<BoundColumnFamily<'_>> {
-        let id = C::STABLE_TYPE_ID;
-
         // Check if we already have this column family cached
-        if let Some(cf_name) = self.column_families.get(&id)
+        if let Some(cf_name) = self.column_families.get(&stable_type_id)
             && let Some(cf) = self.db.cf_handle(&cf_name)
         {
             return cf;
         }
 
         // Create the column family if it doesn't exist
-        let cf_name = Self::cf_name_from_id(id, kind);
+        let cf_name = Self::cf_name_from_id(stable_type_id, kind);
 
         // Try to get existing CF first
         if let Some(cf) = self.db.cf_handle(&cf_name) {
-            self.column_families.insert(id, cf_name);
+            self.column_families.insert(stable_type_id, cf_name);
             return cf;
         }
 
-        match self.column_families.entry(id) {
+        match self.column_families.entry(stable_type_id) {
             dashmap::Entry::Occupied(occupied_entry) => {
                 self.db.cf_handle(occupied_entry.get()).unwrap_or_else(|| {
                     self.db
@@ -240,6 +239,15 @@ impl Impl {
                 }
             }
         }
+    }
+
+    /// Gets or creates a column family for the given column type.
+    fn get_or_create_cf<C: Identifiable>(
+        &self,
+        kind: ColumnKind,
+    ) -> Arc<BoundColumnFamily<'_>> {
+        let stable_type_id = C::STABLE_TYPE_ID;
+        self.get_or_create_cf_from_cf_identifier(stable_type_id, kind)
     }
 
     /// Encodes a key using the postcard format.
@@ -428,6 +436,8 @@ impl RocksDBWriteBatch {
 const PREFERRED_WRITE_BATCH_SIZE: usize = 4 * 1024 * 1024; // 4MB
 
 impl WriteBatch for RocksDBWriteBatch {
+    type SerializationBuffer = RocksDBSerializationBuffer;
+
     fn put<W: WideColumn, C: WideColumnValue<W>>(
         &mut self,
         key: &W::Key,
@@ -505,6 +515,56 @@ impl WriteBatch for RocksDBWriteBatch {
         self.db.buffer_pool.return_buffer(buffer);
     }
 
+    fn consume_serialization_buffer(
+        &mut self,
+        buffer: Self::SerializationBuffer,
+    ) {
+        for op in buffer.operations {
+            match op {
+                Operation::WideColumnPut { cf, key, value } => {
+                    let cf_handle =
+                        self.db.get_or_create_cf_from_cf_identifier(
+                            cf.stable_type_id,
+                            cf.kind,
+                        );
+
+                    self.batch.put_cf(&cf_handle, &key, &value);
+                    self.estimated_size += key.len() + value.len();
+
+                    self.db.buffer_pool.return_buffer(key);
+                    self.db.buffer_pool.return_buffer(value);
+                }
+
+                Operation::DeleteMember { cf, key }
+                | Operation::WideColumnDelete { cf, key } => {
+                    let cf_handle =
+                        self.db.get_or_create_cf_from_cf_identifier(
+                            cf.stable_type_id,
+                            cf.kind,
+                        );
+
+                    self.batch.delete_cf(&cf_handle, &key);
+                    self.estimated_size += key.len();
+
+                    self.db.buffer_pool.return_buffer(key);
+                }
+
+                Operation::InsertMember { cf, key } => {
+                    let cf_handle =
+                        self.db.get_or_create_cf_from_cf_identifier(
+                            cf.stable_type_id,
+                            cf.kind,
+                        );
+
+                    self.batch.put_cf(&cf_handle, &key, []);
+                    self.estimated_size += key.len();
+
+                    self.db.buffer_pool.return_buffer(key);
+                }
+            }
+        }
+    }
+
     fn commit(self) {
         let mut write_opts = rust_rocksdb::WriteOptions::default();
         write_opts.disable_wal(true);
@@ -522,6 +582,8 @@ impl WriteBatch for RocksDBWriteBatch {
 
 impl KvDatabase for RocksDB {
     type WriteBatch = RocksDBWriteBatch;
+
+    type SerializationBuffer = RocksDBSerializationBuffer;
 
     type ScanMemberIterator<C: KeyOfSetColumn> = ScanMembersIterator<C>;
 
@@ -597,6 +659,13 @@ impl KvDatabase for RocksDB {
     fn write_batch(&self) -> Self::WriteBatch {
         RocksDBWriteBatch::new(self.0.clone())
     }
+
+    fn serialization_buffer(&self) -> Self::SerializationBuffer {
+        RocksDBSerializationBuffer {
+            operations: Vec::new(),
+            db: self.0.clone(),
+        }
+    }
 }
 
 #[self_referencing]
@@ -654,6 +723,102 @@ impl<C: KeyOfSetColumn> Iterator for ScanMembersIterator<C> {
                 .decode::<C::Element>(&self.inner_db.plugin)
                 .expect("decoding should not fail"),
         )
+    }
+}
+
+#[derive(Debug)]
+struct CfIdentifier {
+    stable_type_id: StableTypeID,
+    kind: ColumnKind,
+}
+
+#[derive(Debug)]
+enum Operation {
+    WideColumnPut { cf: CfIdentifier, key: Vec<u8>, value: Vec<u8> },
+    WideColumnDelete { cf: CfIdentifier, key: Vec<u8> },
+    InsertMember { cf: CfIdentifier, key: Vec<u8> },
+    DeleteMember { cf: CfIdentifier, key: Vec<u8> },
+}
+
+/// Serialization buffer for batching RocksDB operations.
+#[derive(Debug)]
+pub struct RocksDBSerializationBuffer {
+    operations: Vec<Operation>,
+    db: Arc<Impl>,
+}
+
+impl SerializationBuffer for RocksDBSerializationBuffer {
+    fn put<W: WideColumn, C: WideColumnValue<W>>(
+        &mut self,
+        key: &W::Key,
+        value: &C,
+    ) {
+        let mut key_buffer = self.db.buffer_pool.get_buffer();
+        let mut value_buffer = self.db.buffer_pool.get_buffer();
+
+        self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
+        self.db.encode_value(value, &mut value_buffer);
+
+        self.operations.push(Operation::WideColumnPut {
+            cf: CfIdentifier {
+                stable_type_id: W::STABLE_TYPE_ID,
+                kind: ColumnKind::WideColumn,
+            },
+            key: key_buffer,
+            value: value_buffer,
+        });
+    }
+
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key) {
+        let mut key_buffer = self.db.buffer_pool.get_buffer();
+
+        self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
+
+        self.operations.push(Operation::WideColumnDelete {
+            cf: CfIdentifier {
+                stable_type_id: W::STABLE_TYPE_ID,
+                kind: ColumnKind::WideColumn,
+            },
+            key: key_buffer,
+        });
+    }
+
+    fn insert_member<C: KeyOfSetColumn>(
+        &mut self,
+        key: &C::Key,
+        value: &C::Element,
+    ) {
+        let mut buffer = self.db.buffer_pool.get_buffer();
+
+        self.db.encode_value_length_prefixed(key, &mut buffer);
+        self.db.encode_value(value, &mut buffer);
+
+        self.operations.push(Operation::InsertMember {
+            cf: CfIdentifier {
+                stable_type_id: C::STABLE_TYPE_ID,
+                kind: ColumnKind::KeyOfSet,
+            },
+            key: buffer,
+        });
+    }
+
+    fn delete_member<C: KeyOfSetColumn>(
+        &mut self,
+        key: &C::Key,
+        value: &C::Element,
+    ) {
+        let mut buffer = self.db.buffer_pool.get_buffer();
+
+        self.db.encode_value_length_prefixed(key, &mut buffer);
+        self.db.encode_value(value, &mut buffer);
+
+        self.operations.push(Operation::DeleteMember {
+            cf: CfIdentifier {
+                stable_type_id: C::STABLE_TYPE_ID,
+                kind: ColumnKind::KeyOfSet,
+            },
+            key: buffer,
+        });
     }
 }
 

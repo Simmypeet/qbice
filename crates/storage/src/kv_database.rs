@@ -14,6 +14,40 @@ mod buffer_pool;
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb;
 
+/// A buffer for accumulating serialization operations that can be later applied
+/// to write batch efficiently.
+///
+/// This abstraction allows for decoupling the serialization logic from
+/// the actual write operations, enabling optimizations such as distributing
+/// serialization work across threads or batching multiple operations together.
+pub trait SerializationBuffer {
+    /// Inserts or updates a value in a wide column.
+    fn put<W: WideColumn, C: WideColumnValue<W>>(
+        &mut self,
+        key: &W::Key,
+        value: &C,
+    );
+
+    /// Deletes a value from a wide column.
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key);
+
+    /// Inserts a member into the set associated with the given key in a
+    /// [`KeyOfSetColumn`] mode.
+    fn insert_member<C: KeyOfSetColumn>(
+        &mut self,
+        key: &C::Key,
+        value: &C::Element,
+    );
+
+    /// Deletes a member from the set associated with the given key in a
+    /// [`KeyOfSetColumn`] mode.
+    fn delete_member<C: KeyOfSetColumn>(
+        &mut self,
+        key: &C::Key,
+        value: &C::Element,
+    );
+}
+
 /// A write batch for accumulating multiple write operations that are committed
 /// atomically.
 ///
@@ -45,6 +79,9 @@ pub mod rocksdb;
 /// batch.commit();
 /// ```
 pub trait WriteBatch {
+    /// The type of serialization buffer used to accumulate operations.
+    type SerializationBuffer: SerializationBuffer + Send + Sync;
+
     /// Inserts or updates a value in a wide column.
     fn put<W: WideColumn, C: WideColumnValue<W>>(
         &mut self,
@@ -69,6 +106,13 @@ pub trait WriteBatch {
         &mut self,
         key: &C::Key,
         value: &C::Element,
+    );
+
+    /// Consumes the given serialization buffer, applying all accumulated
+    /// operations to this write batch.
+    fn consume_serialization_buffer(
+        &mut self,
+        buffer: Self::SerializationBuffer,
     );
 
     /// Commits all pending write operations to the database.
@@ -140,7 +184,12 @@ pub trait KvDatabaseFactory {
 /// - Efficient batching for better performance
 pub trait KvDatabase: 'static + Send + Sync + Clone {
     /// The type of write transaction provided by this database implementation.
-    type WriteBatch: WriteBatch + Send + Sync;
+    type WriteBatch: WriteBatch<SerializationBuffer = Self::SerializationBuffer>
+        + Send
+        + Sync;
+
+    /// The type of serialization buffer used for accumulating operations.
+    type SerializationBuffer: SerializationBuffer + Send + Sync;
 
     /// The iterator type returned when scanning members of a key-of-set column.
     type ScanMemberIterator<C: KeyOfSetColumn>: Iterator<Item = C::Element>
@@ -184,6 +233,9 @@ pub trait KvDatabase: 'static + Send + Sync + Clone {
     ///
     /// [`WriteTransaction::commit`]: crate::kv_database::WriteBatch::commit
     fn write_batch(&self) -> Self::WriteBatch;
+
+    /// Creates a new serialization buffer for accumulating operations.
+    fn serialization_buffer(&self) -> Self::SerializationBuffer;
 }
 
 /// Specifies how discriminants are encoded in composite keys for wide columns.
