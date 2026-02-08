@@ -254,14 +254,18 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
         keys: impl IntoIterator<Item = K::Key>,
     ) {
         for key in keys {
-            let log = self.staging.get_map(&key, |x| {
-                x.dirty.fetch_sub(1, Ordering::SeqCst);
+            let result = self.staging.get_map(&key, |x| {
+                let count = x.dirty.fetch_sub(1, Ordering::SeqCst);
 
-                x.log.clone()
+                (x.log.clone(), count == 1)
             });
 
-            if let Some(log) = log {
+            if let Some((log, unpinned)) = result {
                 log.apply_message(ConcurrentLogMessage::FlushUpTo(epoch));
+
+                if unpinned {
+                    self.staging.unpin(key);
+                }
             }
         }
     }
