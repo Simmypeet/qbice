@@ -576,7 +576,7 @@ impl<C: Config> Database<C> {
                 BackwardEdgeColumn<C>,
                 CompressedBackwardEdgeSet<C::BuildHasher>,
             >()),
-                
+
             external_input_queries: ManuallyDrop::new(db.new_key_of_set_map::<
                 ExternalInputColumn<C>,
                 Arc<DashSet<Compact128, C::BuildHasher>>,
@@ -592,7 +592,8 @@ impl<C: Config> Drop for Database<C> {
         unsafe {
             // These are the heavy data structures that take time to drop.
             let sync = ManuallyDrop::take(&mut self.sync);
-            let forward_edge_order = ManuallyDrop::take(&mut self.forward_edge_order);
+            let forward_edge_order =
+                ManuallyDrop::take(&mut self.forward_edge_order);
             let forward_edge_observation =
                 ManuallyDrop::take(&mut self.forward_edge_observation);
             let query_kind = ManuallyDrop::take(&mut self.query_kind);
@@ -604,18 +605,19 @@ impl<C: Config> Drop for Database<C> {
             let backward_edges = ManuallyDrop::take(&mut self.backward_edges);
             let external_input_queries =
                 ManuallyDrop::take(&mut self.external_input_queries);
-            
-            
-            tokio::task::spawn_blocking(|| drop(sync));
-            tokio::task::spawn_blocking(|| drop(forward_edge_order));
-            tokio::task::spawn_blocking(|| drop(forward_edge_observation));
-            tokio::task::spawn_blocking(|| drop(query_kind));
-            tokio::task::spawn_blocking(|| drop(node_info));
-            tokio::task::spawn_blocking(|| drop(pending_backward_projection));
-            tokio::task::spawn_blocking(|| drop(dirty_edge_set));
-            tokio::task::spawn_blocking(|| drop(query_store));
-            tokio::task::spawn_blocking(|| drop(backward_edges));
-            tokio::task::spawn_blocking(|| drop(external_input_queries));
+
+            rayon::scope(|scope| {
+                scope.spawn(|_| drop(sync));
+                scope.spawn(|_| drop(forward_edge_order));
+                scope.spawn(|_| drop(forward_edge_observation));
+                scope.spawn(|_| drop(query_kind));
+                scope.spawn(|_| drop(node_info));
+                scope.spawn(|_| drop(pending_backward_projection));
+                scope.spawn(|_| drop(dirty_edge_set));
+                scope.spawn(|_| drop(query_store));
+                scope.spawn(|_| drop(backward_edges));
+                scope.spawn(|_| drop(external_input_queries));
+            });
         }
     }
 }

@@ -1,12 +1,9 @@
 use std::sync::Arc;
 
-use qbice_storage::{
-    storage_engine::db_backed::default_shard_amount,
-    tiny_lfu::{LifecycleListener, TinyLFU},
-};
+use qbice_storage::tiny_lfu::{LifecycleListener, TinyLFU};
 use tokio::sync::RwLock;
 
-use crate::query::QueryID;
+use crate::{engine::default_shard_amount, query::QueryID};
 
 #[derive(Debug)]
 pub enum QueryLock {
