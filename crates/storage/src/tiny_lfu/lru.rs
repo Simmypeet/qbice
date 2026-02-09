@@ -1,5 +1,7 @@
 use std::{collections::HashMap, ptr::NonNull};
 
+use fxhash::FxBuildHasher;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Region {
@@ -173,7 +175,7 @@ impl<K> Drop for LruList<K> {
 
 pub struct Lru<K> {
     list: LruList<K>,
-    map: HashMap<K, (NonNull<Node<K>>, Region)>,
+    map: HashMap<K, (NonNull<Node<K>>, Region), FxBuildHasher>,
 }
 
 // Safety: We properly manage the Node pointers through Box allocation.
@@ -182,7 +184,9 @@ unsafe impl<K: Send> Send for Lru<K> {}
 unsafe impl<K: Sync> Sync for Lru<K> {}
 
 impl<K> Lru<K> {
-    pub fn new() -> Self { Self { map: HashMap::new(), list: LruList::new() } }
+    pub fn new() -> Self {
+        Self { map: HashMap::default(), list: LruList::new() }
+    }
 }
 
 impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
