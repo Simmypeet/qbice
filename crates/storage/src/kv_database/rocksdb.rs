@@ -334,7 +334,7 @@ impl Impl {
 
     fn get_point_lookup_options() -> Options {
         let mut opts = Options::default();
-        opts.set_compaction_style(DBCompactionStyle::Universal);
+        opts.set_compaction_style(DBCompactionStyle::Level);
 
         // Low latency block settings
         let mut table_opts = BlockBasedOptions::default();
@@ -357,7 +357,7 @@ impl Impl {
 
     fn get_key_of_set_options() -> Options {
         let mut opts = Options::default();
-        opts.set_compaction_style(DBCompactionStyle::Universal);
+        opts.set_compaction_style(DBCompactionStyle::Level);
 
         let mut table_opts = BlockBasedOptions::default();
 
@@ -608,6 +608,7 @@ impl KvDatabase for RocksDB {
                 // Use an iterator with prefix seek
                 let mut read_opts = rust_rocksdb::ReadOptions::default();
                 read_opts.set_iterate_upper_bound(prefix_upper_bound);
+                read_opts.set_verify_checksums(false);
 
                 x.db.iterator_cf_opt(
                     &x.get_or_create_cf::<C>(ColumnKind::KeyOfSet),
