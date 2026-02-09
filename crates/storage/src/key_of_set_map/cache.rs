@@ -275,10 +275,15 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
 ///
 /// This struct holds the elements that were loaded before the threshold
 /// was exceeded, along with an iterator for the remaining database elements.
-#[derive(Debug)]
-pub struct Spilled<C, I> {
-    half_constructed: C,
+pub struct Spilled<C: ConcurrentSet + 'static, I> {
+    half_constructed: OwnedIterator<C>,
     rest_iterator: I,
+}
+
+impl<C: ConcurrentSet + 'static, I> std::fmt::Debug for Spilled<C, I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Spilled").finish_non_exhaustive()
+    }
 }
 
 impl<
@@ -423,7 +428,7 @@ impl<
 
             if count > 1024 {
                 *spilled = Some(Spilled {
-                    half_constructed: new_set,
+                    half_constructed: OwnedIterator::new(new_set, |x| x.iter()),
                     rest_iterator: iter,
                 });
 
@@ -587,7 +592,7 @@ impl<
 ///   data
 /// - `OwnedIterator`: Full set is cached in memory
 /// - `Streaming`: Set is too large; streams directly from database
-pub enum MergeIterator<C, I, E, J> {
+pub enum MergeIterator<C: ConcurrentSet + 'static, I, E, J> {
     /// Set data was partially loaded before exceeding the size threshold.
     Spilled(Spilled<C, I>, StagingShapshotIntoIter<E>),
     /// Full set data is available in memory.
@@ -596,7 +601,9 @@ pub enum MergeIterator<C, I, E, J> {
     Streaming(I, StagingShapshotIntoIter<E>),
 }
 
-impl<C, I, E, J> std::fmt::Debug for MergeIterator<C, I, E, J> {
+impl<C: ConcurrentSet + 'static, I, E, J> std::fmt::Debug
+    for MergeIterator<C, I, E, J>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Spilled(_, _) => f.debug_tuple("Spilled").finish(),
@@ -619,7 +626,7 @@ impl<
         match self {
             Self::Spilled(spilled, snapshot) => {
                 // First drain from half_constructed
-                if let Some(item) = spilled.half_constructed.iter().next() {
+                if let Some(item) = spilled.half_constructed.next() {
                     let item = item;
 
                     if snapshot.removed.contains(&item).not() {

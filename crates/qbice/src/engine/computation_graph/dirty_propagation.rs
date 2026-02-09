@@ -4,7 +4,7 @@ use crossbeam::utils::CachePadded;
 use dashmap::DashSet;
 use tokio::sync::{
     Mutex, Notify,
-    mpsc::{Receiver, Sender},
+    mpsc::{UnboundedReceiver, UnboundedSender},
 };
 
 use crate::{
@@ -53,7 +53,7 @@ pub struct DirtyTask<C: Config> {
 
 /// Distributed dirty propagation worker pool.
 pub struct DirtyWorker<C: Config> {
-    shards: Arc<[CachePadded<Sender<Message<C>>>]>,
+    shards: Arc<[CachePadded<UnboundedSender<Message<C>>>]>,
     mask: usize,
 }
 
@@ -74,7 +74,7 @@ impl<C: Config> DirtyWorker<C> {
 
         // create worker tasks
         for _ in 0..parallelism {
-            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             shards.push(CachePadded::new(tx));
             receivers.push(rx);
         }
@@ -105,36 +105,33 @@ impl<C: Config> DirtyWorker<C> {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    pub async fn submit_task(&self, dirty_task: DirtyTask<C>) {
+    pub fn submit_task(&self, dirty_task: DirtyTask<C>) {
         let shard_idx =
             dirty_task.to.compact_hash_128().low() as usize & self.mask;
 
         // submit to the appropriate shard
-        self.shards[shard_idx]
-            .send(Message::DirtyTask(dirty_task))
-            .await
-            .unwrap();
+        self.shards[shard_idx].send(Message::DirtyTask(dirty_task)).unwrap();
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    async fn submit_task_from(
-        shards: &[CachePadded<Sender<Message<C>>>],
+    fn submit_task_from(
+        shards: &[CachePadded<UnboundedSender<Message<C>>>],
         mask: usize,
         dirty_task: DirtyTask<C>,
     ) {
         let shard_idx = dirty_task.to.compact_hash_128().low() as usize & mask;
 
         // submit to the appropriate shard
-        shards[shard_idx].send(Message::DirtyTask(dirty_task)).await.unwrap();
+        shards[shard_idx].send(Message::DirtyTask(dirty_task)).unwrap();
     }
 
     async fn worker_loop(
         database: &Database<C>,
         statistic: &Statistic,
         dirtied_queries: &DashSet<QueryID, C::BuildHasher>,
-        shards: &[CachePadded<Sender<Message<C>>>],
+        shards: &[CachePadded<UnboundedSender<Message<C>>>],
         mask: usize,
-        mut receiver: Receiver<Message<C>>,
+        mut receiver: UnboundedReceiver<Message<C>>,
     ) {
         while let Some(task) = receiver.recv().await {
             let task = match task {
@@ -160,10 +157,6 @@ impl<C: Config> DirtyWorker<C> {
                     .await;
             }
 
-            let backward_edges = unsafe {
-                database.get_backward_edges_unchecked(&task.to).await
-            };
-
             // if this firewall or projection node, then we stop
             let query_kind = database.get_query_kind(&task.to).await;
 
@@ -178,6 +171,10 @@ impl<C: Config> DirtyWorker<C> {
                 continue;
             }
 
+            let backward_edges = unsafe {
+                database.get_backward_edges_unchecked(&task.to).await
+            };
+
             // propagate to callers
             for caller in backward_edges {
                 let work_tracker = task.work_tracker.clone();
@@ -190,8 +187,7 @@ impl<C: Config> DirtyWorker<C> {
                     from: Some(task.to),
                     write_tx: write_tx.clone(),
                     work_tracker: work_tracker.clone(),
-                })
-                .await;
+                });
             }
 
             // done with this task
@@ -203,7 +199,7 @@ impl<C: Config> DirtyWorker<C> {
 impl<C: Config> Drop for DirtyWorker<C> {
     fn drop(&mut self) {
         for shard in self.shards.iter() {
-            let _ = shard.blocking_send(Message::Shutdown);
+            let _ = shard.send(Message::Shutdown);
         }
     }
 }
@@ -220,26 +216,28 @@ impl<C: Config> Engine<C> {
         });
         let write_tx = Arc::new(Mutex::new(trasnaction));
         let notified = work_tracker.notify.clone().notified_owned();
+        let mut is_empty = true;
 
         for query_id in query_id {
+            is_empty = false;
+
             let work_tracker = work_tracker.clone();
             let write_tx = write_tx.clone();
 
             work_tracker.new_task();
 
-            self.computation_graph
-                .dirty_worker
-                .submit_task(DirtyTask {
-                    to: query_id,
-                    from: None,
-                    write_tx: write_tx.clone(),
-                    work_tracker: work_tracker.clone(),
-                })
-                .await;
+            self.computation_graph.dirty_worker.submit_task(DirtyTask {
+                to: query_id,
+                from: None,
+                write_tx: write_tx.clone(),
+                work_tracker: work_tracker.clone(),
+            });
         }
 
-        // wait for all tasks to complete
-        notified.await;
+        if !is_empty {
+            // wait for all tasks to complete
+            notified.await;
+        }
 
         Arc::try_unwrap(write_tx)
             .unwrap_or_else(|_| {
