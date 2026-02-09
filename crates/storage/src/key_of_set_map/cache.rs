@@ -238,11 +238,13 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
                 2048,
                 shard_amount,
                 tiny_lfu::UnpinStrategy::Notify,
+                tiny_lfu::MaintenanceMode::Piggyback,
             ),
             cache: TinyLFU::new(
                 cap as usize,
                 shard_amount,
                 tiny_lfu::UnpinStrategy::Poll,
+                tiny_lfu::MaintenanceMode::Piggyback,
             ),
             single_flight: single_flight::SingleFlight::new(shard_amount),
         }

@@ -30,6 +30,16 @@ pub enum UnpinStrategy {
     Notify,
 }
 
+/// Specifies the maintenance mode for the TinyLFU cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MaintenanceMode {
+    /// Every cache operation attempts to perform maintenance work.
+    Piggyback,
+
+    /// A dedicated maintenance thread performs maintenance work.
+    DedicatedThread,
+}
+
 const MAINTENANCE_BATCH_SIZE: usize = 32;
 
 /// A listener trait for cache entry lifecycle events.
@@ -64,6 +74,8 @@ pub struct TinyLFU<
 
     sender: Option<crossbeam::channel::Sender<()>>,
     join_handle: Option<std::thread::JoinHandle<()>>,
+
+    maintenance_mode: MaintenanceMode,
 }
 
 impl<
@@ -90,16 +102,24 @@ impl<
         capacity: usize,
         shard_count: usize,
         unpin_strategy: UnpinStrategy,
+        maintenance_mode: MaintenanceMode,
     ) -> Self {
-        let (sender, receiver) = crossbeam::channel::bounded(1);
         let inner =
             Arc::new(TinyLFUInner::new(capacity, shard_count, unpin_strategy));
 
-        Self {
-            inner: inner.clone(),
-            sender: Some(sender),
-            join_handle: Some(Self::maintenance_loop(inner, receiver)),
-        }
+        let (sender, join_handle) = match maintenance_mode {
+            MaintenanceMode::Piggyback => (None, None),
+            MaintenanceMode::DedicatedThread => {
+                let (sender, receiver) = crossbeam::channel::bounded(1);
+
+                (
+                    Some(sender),
+                    Some(Self::maintenance_loop(inner.clone(), receiver)),
+                )
+            }
+        };
+
+        Self { inner, sender, join_handle, maintenance_mode }
     }
 }
 
@@ -112,7 +132,10 @@ impl<
     fn drop(&mut self) {
         // signal the maintenance thread to exit
         drop(self.sender.take());
-        self.join_handle.take().unwrap().join().unwrap();
+
+        if let Some(x) = self.join_handle.take() {
+            x.join().unwrap();
+        }
     }
 }
 
@@ -159,19 +182,30 @@ impl<
             return;
         }
 
-        // attempt to acquire the maintenance flag
-        if self.inner.maintenance_flag.compare_exchange(
-            false,
-            true,
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-        ) == Ok(false)
-        {
-            self.sender
-                .as_ref()
-                .expect("TinyLFU sender missing")
-                .try_send(())
-                .expect("Failed to send TinyLFU maintenance signal");
+        match self.maintenance_mode {
+            MaintenanceMode::Piggyback => {
+                let Some(mut lock) = self.inner.policy.try_lock() else {
+                    return;
+                };
+
+                self.inner.process_policy_message(&mut lock);
+            }
+            MaintenanceMode::DedicatedThread => {
+                // attempt to acquire the maintenance flag
+                if self.inner.maintenance_flag.compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                ) == Ok(false)
+                {
+                    self.sender
+                        .as_ref()
+                        .expect("TinyLFU sender missing")
+                        .try_send(())
+                        .expect("Failed to send TinyLFU maintenance signal");
+                }
+            }
         }
     }
 }

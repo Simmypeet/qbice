@@ -46,6 +46,7 @@ impl QueryLockManager {
             capacity as usize,
             default_shard_amount(),
             qbice_storage::tiny_lfu::UnpinStrategy::Poll,
+            qbice_storage::tiny_lfu::MaintenanceMode::Piggyback,
         );
 
         Self { hot: cache }

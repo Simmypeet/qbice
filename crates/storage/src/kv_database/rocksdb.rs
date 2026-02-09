@@ -14,8 +14,8 @@ use qbice_serialize::{
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 use rust_rocksdb::{
     BlockBasedOptions, BoundColumnFamily, ColumnFamilyDescriptor,
-    DBCompactionStyle, DBCompressionType, DBWithThreadMode, DataBlockIndexType,
-    IteratorMode, MultiThreaded, Options, SliceTransform,
+    DBCompactionStyle, DBWithThreadMode, DataBlockIndexType, IteratorMode,
+    MultiThreaded, Options, SliceTransform,
 };
 
 use crate::{
@@ -94,12 +94,6 @@ fn configure_rocksdb_for_small_kv_high_writes() -> Options {
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
     opts.set_atomic_flush(true);
-
-    // Shared Memtable Budget (e.g., 512MB total for all CFs)
-    opts.set_db_write_buffer_size(512 * 1024 * 1024);
-    opts.set_max_background_jobs(6);
-    // Use LZ4 for speed
-    opts.set_compression_type(DBCompressionType::Lz4);
 
     opts
 }

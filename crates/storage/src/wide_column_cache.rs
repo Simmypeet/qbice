@@ -48,6 +48,7 @@ impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static, T>
                 capacity as usize,
                 shard_amount,
                 tiny_lfu::UnpinStrategy::Notify,
+                tiny_lfu::MaintenanceMode::Piggyback,
             ),
             single_flight: single_flight::SingleFlight::new(shard_amount),
             _phantom: std::marker::PhantomData,
