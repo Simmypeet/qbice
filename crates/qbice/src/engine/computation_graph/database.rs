@@ -631,23 +631,6 @@ pub struct Observation {
 }
 
 impl<C: Config> Engine<C> {
-    pub(super) async fn mark_dirty_forward_edge(
-        &self,
-        from: QueryID,
-        to: QueryID,
-        tx: &mut WriteTransaction<C>,
-    ) {
-        let edge = Edge { from, to };
-
-        self.computation_graph
-            .database
-            .dirty_edge_set
-            .insert(edge, Unit, tx)
-            .await;
-
-        self.computation_graph.add_dirtied_edge_count();
-    }
-
     pub(super) async fn is_edge_dirty(
         &self,
         from: QueryID,
@@ -691,14 +674,6 @@ impl<C: Config> Engine<C> {
         query_id: &QueryID,
     ) -> NodeInfo {
         self.computation_graph.database.node_info.get(query_id).await.unwrap()
-    }
-
-    /// Directly access the backward edges without any lock.
-    pub(super) async unsafe fn get_backward_edges_unchecked(
-        &self,
-        query_id: &QueryID,
-    ) -> impl Iterator<Item = QueryID> + Send {
-        self.computation_graph.database.backward_edges.get(query_id).await
     }
 
     pub(super) async fn get_external_input_queries(
@@ -768,6 +743,14 @@ impl<C: Config> Engine<C> {
     ) -> Pin<Box<dyn std::future::Future<Output = Option<QueryDebug>> + 's>>
     {
         Box::pin(async move { self.get_query_debug::<Q>(query_id).await })
+    }
+
+    /// Directly access the backward edges without any lock.
+    pub(super) async unsafe fn get_backward_edges_unchecked(
+        &self,
+        query_id: &QueryID,
+    ) -> impl Iterator<Item = QueryID> + Send {
+        self.computation_graph.database.backward_edges.get(query_id).await
     }
 }
 
@@ -1103,5 +1086,32 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         }
         .guarded()
         .await;
+    }
+}
+
+impl<C: Config> Database<C> {
+    pub(super) async fn mark_dirty_forward_edge(
+        &self,
+        from: QueryID,
+        to: QueryID,
+        tx: &mut WriteTransaction<C>,
+    ) {
+        let edge = Edge { from, to };
+
+        self.dirty_edge_set.insert(edge, Unit, tx).await;
+    }
+
+    /// Directly access the backward edges without any lock.
+    pub(super) async unsafe fn get_backward_edges_unchecked(
+        &self,
+        query_id: &QueryID,
+    ) -> impl Iterator<Item = QueryID> + Send {
+        self.backward_edges.get(query_id).await
+    }
+
+    /// Retrieving the query kind from a global database is safe since the
+    /// query kind is immutable once created.
+    pub(super) async fn get_query_kind(&self, query_id: &QueryID) -> QueryKind {
+        self.query_kind.get(query_id).await.unwrap()
     }
 }

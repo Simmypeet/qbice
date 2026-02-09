@@ -9,13 +9,14 @@ pub struct Statistic {
     dirtied_edge_count: AtomicUsize,
 }
 
-impl<C: Config> ComputationGraph<C> {
+impl Statistic {
     pub(super) fn add_dirtied_edge_count(&self) {
-        self.statistic
-            .dirtied_edge_count
+        self.dirtied_edge_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+}
 
+impl<C: Config> ComputationGraph<C> {
     pub(super) fn reset_statistic(&self) {
         self.statistic
             .dirtied_edge_count

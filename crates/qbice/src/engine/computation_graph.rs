@@ -18,6 +18,7 @@ use crate::{
         caller::CallerKind,
         computing::Computing,
         database::{ActiveComputationGuard, Database},
+        dirty_propagation::DirtyWorker,
         fast_path::FastPathResult,
         query_lock_manager::QueryLockManager,
         statistic::Statistic,
@@ -74,21 +75,39 @@ impl QueryKind {
 }
 
 pub struct ComputationGraph<C: Config> {
-    database: Database<C>,
+    // NOTE: we drop the dirty worker first as it holds Arc references to
+    // `database`, `statistic`, and `dirtied_queries`.
+    dirty_worker: DirtyWorker<C>,
+
+    dirtied_queries: Arc<DashSet<QueryID, C::BuildHasher>>,
+
+    database: Arc<Database<C>>,
+    statistic: Arc<Statistic>,
+
     computing: Computing<C>,
     lock_manager: QueryLockManager,
-    dirtied_queries: DashSet<QueryID, C::BuildHasher>,
-    statistic: Statistic,
 }
 
 impl<C: Config> ComputationGraph<C> {
     pub async fn new(db: &C::StorageEngine) -> Self {
+        let database = Arc::new(Database::new(db).await);
+        let statistic = Arc::new(Statistic::default());
+        let dirtied_queries =
+            Arc::new(DashSet::with_hasher(C::BuildHasher::default()));
+
         Self {
-            database: Database::new(db).await,
-            lock_manager: QueryLockManager::new(2u64.pow(14)),
-            dirtied_queries: DashSet::default(),
-            statistic: Statistic::default(),
+            dirty_worker: DirtyWorker::new(
+                &database,
+                &statistic,
+                &dirtied_queries,
+            ),
+
+            database,
+            dirtied_queries,
+            statistic,
+
             computing: Computing::new(),
+            lock_manager: QueryLockManager::new(2u64.pow(14)),
         }
     }
 }

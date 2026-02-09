@@ -1,146 +1,251 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize};
 
-use tokio::{
-    sync::{Mutex, Semaphore},
-    task::JoinSet,
+use crossbeam::utils::CachePadded;
+use dashmap::DashSet;
+use tokio::sync::{
+    Mutex, Notify,
+    mpsc::{Receiver, Sender},
 };
 
 use crate::{
     Engine, ExecutionStyle,
     config::{Config, WriteTransaction},
-    engine::computation_graph::QueryKind,
+    engine::computation_graph::{
+        QueryKind, database::Database, statistic::Statistic,
+    },
     query::QueryID,
 };
 
-impl<C: Config> Engine<C> {
-    #[allow(clippy::manual_async_fn, clippy::await_holding_lock)]
-    fn dirty_propagate_async<'a>(
-        self: &'a Arc<Self>,
-        query_id: &'a QueryID,
-        bound: &'a Arc<Semaphore>,
-        tx: &'a Arc<Mutex<WriteTransaction<C>>>,
-    ) -> impl Future<Output = ()> + 'a + Send {
-        async move {
-            // has already been marked dirty
-            if !self.insert_dirty_query(query_id) {
-                return;
-            }
+pub struct WorkTracker {
+    active_task_count: AtomicUsize,
+    notify: Arc<Notify>,
+}
 
-            let backward_edges =
-                unsafe { self.get_backward_edges_unchecked(query_id).await };
+impl WorkTracker {
+    pub fn done(&self) {
+        let count = self
+            .active_task_count
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
-            let mut join_sets = JoinSet::new();
-
-            for caller in backward_edges {
-                let permit_attempt = bound.clone().try_acquire_owned();
-
-                // can spawn a new task
-                if let Ok(permit) = permit_attempt {
-                    let engine = self.clone();
-                    let bound = bound.clone();
-                    let query_id = *query_id;
-                    let tx = tx.clone();
-
-                    join_sets.spawn(async move {
-                        let _permit = permit;
-
-                        if engine.stem_child(&caller, &query_id, &tx).await {
-                            engine
-                                .dirty_propagate_async(&caller, &bound, &tx)
-                                .await;
-                        }
-                    });
-                }
-                // has to run in current task
-                else if self.stem_child(&caller, query_id, tx).await {
-                    Box::pin(self.dirty_propagate_async(&caller, bound, tx))
-                        .await;
-                }
-            }
-
-            while let Some(res) = join_sets.join_next().await {
-                res.expect("Task panicked during dirty propagation");
-            }
+        if count == 1 {
+            self.notify.notify_waiters();
         }
     }
 
-    #[allow(clippy::similar_names)]
-    async fn stem_child(
-        self: &Arc<Self>,
-        caller: &QueryID,
-        callee: &QueryID,
-        tx: &Arc<Mutex<WriteTransaction<C>>>,
-    ) -> bool {
-        self.mark_dirty_forward_edge(*caller, *callee, &mut *tx.lock().await)
-            .await;
+    pub fn new_task(&self) {
+        self.active_task_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
-        let query_kind = self.get_query_kind(caller).await;
+pub enum Message<C: Config> {
+    DirtyTask(DirtyTask<C>),
+    Shutdown,
+}
 
-        // if this is a firewall node or projection node, then we stop
-        // propagation here.
-        !matches!(
-            query_kind,
-            QueryKind::Executable(
-                ExecutionStyle::Firewall | ExecutionStyle::Projection
-            )
-        )
+pub struct DirtyTask<C: Config> {
+    to: QueryID,
+    from: Option<QueryID>,
+
+    write_tx: Arc<Mutex<WriteTransaction<C>>>,
+    work_tracker: Arc<WorkTracker>,
+}
+
+/// Distributed dirty propagation worker pool.
+pub struct DirtyWorker<C: Config> {
+    shards: Arc<[CachePadded<Sender<Message<C>>>]>,
+    mask: usize,
+}
+
+impl<C: Config> DirtyWorker<C> {
+    pub fn new(
+        database: &Arc<Database<C>>,
+        stats: &Arc<Statistic>,
+        dirtied_queries: &Arc<DashSet<QueryID, C::BuildHasher>>,
+    ) -> Self {
+        let parallelism = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(8)
+            .next_power_of_two();
+
+        let mask = parallelism - 1;
+        let mut shards = Vec::with_capacity(parallelism);
+        let mut receivers = Vec::with_capacity(parallelism);
+
+        // create worker tasks
+        for _ in 0..parallelism {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            shards.push(CachePadded::new(tx));
+            receivers.push(rx);
+        }
+
+        let shards: Arc<[_]> = Arc::from(shards);
+
+        // spawn worker tasks
+        for receiver in receivers {
+            let database = database.clone();
+            let stats = stats.clone();
+            let dirtied_queries = dirtied_queries.clone();
+            let shards = shards.clone();
+
+            tokio::spawn(async move {
+                Self::worker_loop(
+                    &database,
+                    &stats,
+                    &dirtied_queries,
+                    &shards,
+                    mask,
+                    receiver,
+                )
+                .await;
+            });
+        }
+
+        Self { shards, mask }
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    pub async fn submit_task(&self, dirty_task: DirtyTask<C>) {
+        let shard_idx =
+            dirty_task.to.compact_hash_128().low() as usize & self.mask;
+
+        // submit to the appropriate shard
+        self.shards[shard_idx]
+            .send(Message::DirtyTask(dirty_task))
+            .await
+            .unwrap();
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    async fn submit_task_from(
+        shards: &[CachePadded<Sender<Message<C>>>],
+        mask: usize,
+        dirty_task: DirtyTask<C>,
+    ) {
+        let shard_idx = dirty_task.to.compact_hash_128().low() as usize & mask;
+
+        // submit to the appropriate shard
+        shards[shard_idx].send(Message::DirtyTask(dirty_task)).await.unwrap();
+    }
+
+    async fn worker_loop(
+        database: &Database<C>,
+        statistic: &Statistic,
+        dirtied_queries: &DashSet<QueryID, C::BuildHasher>,
+        shards: &[CachePadded<Sender<Message<C>>>],
+        mask: usize,
+        mut receiver: Receiver<Message<C>>,
+    ) {
+        while let Some(task) = receiver.recv().await {
+            let task = match task {
+                Message::DirtyTask(task) => task,
+                Message::Shutdown => break,
+            };
+
+            // insert into the dirtied set to prevent duplicate work
+            if !dirtied_queries.insert(task.to) {
+                task.work_tracker.done();
+                continue;
+            }
+
+            // request to mark the edge as dirty
+            if let Some(from) = task.from {
+                statistic.add_dirtied_edge_count();
+                database
+                    .mark_dirty_forward_edge(
+                        from,
+                        task.to,
+                        &mut *task.write_tx.lock().await,
+                    )
+                    .await;
+            }
+
+            let backward_edges = unsafe {
+                database.get_backward_edges_unchecked(&task.to).await
+            };
+
+            // if this firewall or projection node, then we stop
+            let query_kind = database.get_query_kind(&task.to).await;
+
+            // don't propagate further
+            if matches!(
+                query_kind,
+                QueryKind::Executable(
+                    ExecutionStyle::Firewall | ExecutionStyle::Projection
+                )
+            ) {
+                task.work_tracker.done();
+                continue;
+            }
+
+            // propagate to callers
+            for caller in backward_edges {
+                let work_tracker = task.work_tracker.clone();
+                let write_tx = task.write_tx.clone();
+
+                work_tracker.new_task();
+
+                Self::submit_task_from(shards, mask, DirtyTask {
+                    to: caller,
+                    from: Some(task.to),
+                    write_tx: write_tx.clone(),
+                    work_tracker: work_tracker.clone(),
+                })
+                .await;
+            }
+
+            // done with this task
+            task.work_tracker.done();
+        }
+    }
+}
+
+impl<C: Config> Drop for DirtyWorker<C> {
+    fn drop(&mut self) {
+        for shard in self.shards.iter() {
+            let _ = shard.blocking_send(Message::Shutdown);
+        }
+    }
+}
+
+impl<C: Config> Engine<C> {
     pub(super) async fn dirty_propagate_from_batch(
         self: &Arc<Self>,
         query_id: impl IntoIterator<Item = QueryID>,
         trasnaction: WriteTransaction<C>,
     ) -> WriteTransaction<C> {
-        // NOTE: we spawn a join handle here because dirty propagation can't be
-        // CANCELLED. If it could be cancelled, then we might leave the
-        // computation graph in an inconsistent state.
-        let bound = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(8)
-            * 8;
+        let work_tracker = Arc::new(WorkTracker {
+            active_task_count: AtomicUsize::new(0),
+            notify: Arc::new(Notify::new()),
+        });
+        let write_tx = Arc::new(Mutex::new(trasnaction));
+        let notified = work_tracker.notify.clone().notified_owned();
 
-        let tx = Arc::new(Mutex::new(trasnaction));
-        let engine = self.clone();
-        let semaphore = Arc::new(Semaphore::new(bound));
+        for query_id in query_id {
+            let work_tracker = work_tracker.clone();
+            let write_tx = write_tx.clone();
 
-        let mut join_set = JoinSet::new();
+            work_tracker.new_task();
 
-        for qid in query_id {
-            match semaphore.clone().try_acquire_owned() {
-                // can spawn a new task
-                Ok(permit) => {
-                    let engine = engine.clone();
-                    let semaphore = semaphore.clone();
-                    let tx = tx.clone();
-
-                    join_set.spawn(async move {
-                        let _permit = permit;
-
-                        engine
-                            .dirty_propagate_async(&qid, &semaphore, &tx)
-                            .await;
-                    });
-                }
-                // has to run in current task
-                Err(_) => {
-                    engine.dirty_propagate_async(&qid, &semaphore, &tx).await;
-                }
-            }
+            self.computation_graph
+                .dirty_worker
+                .submit_task(DirtyTask {
+                    to: query_id,
+                    from: None,
+                    write_tx: write_tx.clone(),
+                    work_tracker: work_tracker.clone(),
+                })
+                .await;
         }
 
-        while let Some(res) = join_set.join_next().await {
-            res.expect("Task panicked during dirty propagation");
-        }
+        // wait for all tasks to complete
+        notified.await;
 
-        Arc::try_unwrap(tx)
+        Arc::try_unwrap(write_tx)
             .unwrap_or_else(|_| {
-                panic!("the transaction is still held elsewhere")
+                panic!("should be unique, notified system is broken")
             })
             .into_inner()
-    }
-
-    pub(super) fn insert_dirty_query(&self, query_id: &QueryID) -> bool {
-        self.computation_graph.dirtied_queries.insert(*query_id)
     }
 
     pub(super) fn clear_dirtied_queries(&self) {
