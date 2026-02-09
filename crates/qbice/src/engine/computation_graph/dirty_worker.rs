@@ -1,19 +1,25 @@
-use std::sync::{Arc, Weak};
-
-use crossbeam::utils::CachePadded;
-use dashmap::DashSet;
-use tokio::sync::{
-    Mutex,
-    mpsc::{UnboundedReceiver, UnboundedSender},
+use std::{
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
 };
+
+use crossbeam::{
+    deque::{Injector, Stealer, Worker},
+    utils::Backoff,
+};
+use dashmap::DashSet;
+use tokio::sync::{Mutex, Notify};
 
 use crate::{
     Engine, ExecutionStyle,
     config::{Config, WriteTransaction},
     engine::computation_graph::{
         QueryKind,
-        database::Database,
-        dirty_worker::task::{Batch, DirtyTask},
+        database::{Database, Edge},
+        dirty_worker::task::{Batch, DirtyTask, StrippedBuffer},
         statistic::Statistic,
     },
     query::QueryID,
@@ -21,15 +27,16 @@ use crate::{
 
 mod task;
 
-pub enum Message<C: Config> {
-    DirtyTask(DirtyTask<C>),
-    Shutdown,
-}
-
-/// Distributed dirty propagation worker pool.
+/// Work-stealing dirty propagation worker pool.
+///
+/// Uses a global [`Injector`] queue paired with per-worker local
+/// deques. Workers batch-steal from the global queue to amortize
+/// synchronization overhead, and can steal from sibling workers' local
+/// deques when both the local deque and global queue are empty.
 pub struct DirtyWorker<C: Config> {
-    shards: Arc<[CachePadded<UnboundedSender<Message<C>>>]>,
-    mask: usize,
+    injector: Arc<Injector<DirtyTask<C>>>,
+    notify: Arc<Notify>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl<C: Config> DirtyWorker<C> {
@@ -38,125 +45,245 @@ impl<C: Config> DirtyWorker<C> {
         stats: &Arc<Statistic>,
         dirtied_queries: &Arc<DashSet<QueryID, C::BuildHasher>>,
     ) -> Self {
-        let parallelism = std::thread::available_parallelism()
+        let parallelism = thread::available_parallelism()
             .map(std::num::NonZero::get)
-            .unwrap_or(8)
-            .next_power_of_two();
+            .unwrap_or(8);
 
-        let mask = parallelism - 1;
-        let mut shards = Vec::with_capacity(parallelism);
-        let mut receivers = Vec::with_capacity(parallelism);
+        let injector = Arc::new(Injector::new());
+        let notify = Arc::new(Notify::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
 
-        // create worker tasks
+        // Create per-worker local deques and their stealers.
+        let mut workers = Vec::with_capacity(parallelism);
+        let mut stealers = Vec::with_capacity(parallelism);
+
         for _ in 0..parallelism {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            shards.push(CachePadded::new(tx));
-            receivers.push(rx);
+            let w = Worker::new_fifo();
+            stealers.push(w.stealer());
+            workers.push(w);
         }
 
-        let shards: Arc<[_]> = Arc::from(shards);
+        let stealers: Arc<[Stealer<DirtyTask<C>>]> = Arc::from(stealers);
 
-        // spawn worker tasks
-        for receiver in receivers {
+        // Spawn worker tasks.
+        for worker in workers {
+            let injector = injector.clone();
+            let stealers = stealers.clone();
+            let notify = notify.clone();
+            let shutdown = shutdown.clone();
             let database = Arc::downgrade(database);
             let stats = Arc::downgrade(stats);
             let dirtied_queries = Arc::downgrade(dirtied_queries);
-            let shards = shards.clone();
 
             tokio::spawn(async move {
                 Self::worker_loop(
+                    worker,
+                    &injector,
+                    &stealers,
+                    &notify,
+                    &shutdown,
                     &database,
                     &stats,
                     &dirtied_queries,
-                    &shards,
-                    mask,
-                    receiver,
                 )
                 .await;
             });
         }
 
-        Self { shards, mask }
+        Self { injector, notify, shutdown }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
+    /// Submit a dirty-propagation task to the global injector queue.
     pub fn submit_task(&self, dirty_task: DirtyTask<C>) {
-        let shard_idx = dirty_task.determine_shard(self.mask);
-
-        // submit to the appropriate shard
-        self.shards[shard_idx].send(Message::DirtyTask(dirty_task)).unwrap();
+        self.injector.push(dirty_task);
+        self.notify.notify_one();
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    fn submit_task_from(
-        shards: &[CachePadded<UnboundedSender<Message<C>>>],
-        mask: usize,
-        dirty_task: DirtyTask<C>,
-    ) {
-        let shard_idx = dirty_task.determine_shard(mask);
-
-        // submit to the appropriate shard
-        shards[shard_idx].send(Message::DirtyTask(dirty_task)).unwrap();
+    /// Attempt to find a task using the three-tier strategy:
+    /// 1. Pop from the thread-local deque (zero contention).
+    /// 2. Batch-steal from the global [`Injector`].
+    /// 3. Steal from a sibling worker's deque.
+    fn find_task(
+        local: &Worker<DirtyTask<C>>,
+        injector: &Injector<DirtyTask<C>>,
+        stealers: &[Stealer<DirtyTask<C>>],
+    ) -> Option<DirtyTask<C>> {
+        // Pop a task from the local queue, if not empty.
+        local.pop().or_else(|| {
+            // Otherwise, we need to look for a task elsewhere.
+            std::iter::repeat_with(|| {
+                // Try stealing a batch of tasks from the global queue.
+                injector
+                    .steal_batch_and_pop(local)
+                    // Or try stealing a task from one of the other threads.
+                    .or_else(|| {
+                        stealers
+                            .iter()
+                            .map(crossbeam::deque::Stealer::steal)
+                            .collect()
+                    })
+            })
+            // Loop while no task was stolen and any steal operation needs to be
+            // retried.
+            .find(|s| !s.is_retry())
+            // Extract the stolen task, if there is one.
+            .and_then(crossbeam::deque::Steal::success)
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn worker_loop(
+        local: Worker<DirtyTask<C>>,
+        injector: &Injector<DirtyTask<C>>,
+        stealers: &[Stealer<DirtyTask<C>>],
+        notify: &Notify,
+        shutdown: &AtomicBool,
         database: &Weak<Database<C>>,
         statistic: &Weak<Statistic>,
         dirtied_queries: &Weak<DashSet<QueryID, C::BuildHasher>>,
-        shards: &[CachePadded<UnboundedSender<Message<C>>>],
-        mask: usize,
-        mut receiver: UnboundedReceiver<Message<C>>,
     ) {
-        while let Some(task) = receiver.recv().await {
-            let task = match task {
-                Message::DirtyTask(task) => task,
-                Message::Shutdown => break,
+        let backoff = Backoff::new();
+        loop {
+            // Drain all available work before parking.
+            let mut count = 0;
+            while let Some(task) = Self::find_task(&local, injector, stealers) {
+                Self::process_task(
+                    task,
+                    injector,
+                    notify,
+                    database,
+                    statistic,
+                    dirtied_queries,
+                )
+                .await;
+
+                // work was found, reset backoff
+                backoff.reset();
+
+                // every 32 tasks, yield to allow other tasks to run
+                count += 1;
+                if count >= 32 {
+                    count = 0;
+                    tokio::task::yield_now().await;
+                }
+            }
+
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
+
+            // Prepare to park – register *before* the final emptiness
+            // check so that a concurrent push + notify is never lost.
+            let notified = if backoff.is_completed() {
+                Some(notify.notified())
+            } else {
+                None
             };
 
-            let dirtied_queries = dirtied_queries.upgrade().unwrap();
-            let statistic = statistic.upgrade().unwrap();
-            let database = database.upgrade().unwrap();
+            // Double-check: work may have arrived between the while-
+            // loop exit and the enable() call above.
+            if let Some(task) = Self::find_task(&local, injector, stealers) {
+                Self::process_task(
+                    task,
+                    injector,
+                    notify,
+                    database,
+                    statistic,
+                    dirtied_queries,
+                )
+                .await;
 
-            if !dirtied_queries.insert(*task.query_id()) {
+                // work was found, reset backoff
                 continue;
             }
 
-            for caller in unsafe {
-                database.get_backward_edges_unchecked(task.query_id()).await
-            } {
-                database
-                    .mark_dirty_forward_edge(
-                        caller,
-                        *task.query_id(),
-                        &mut *task.write_tx_lock().await,
-                    )
-                    .await;
-                statistic.add_dirtied_edge_count();
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
 
-                let query_kind = database.get_query_kind(&caller).await;
+            match notified {
+                Some(notified) => {
+                    // Backoff is complete, park until notified.
+                    notified.await;
+                    backoff.reset();
+                }
+                None => {
+                    // Backoff is not complete, spin-wait.
+                    backoff.snooze();
+                }
+            }
+        }
+    }
 
-                if matches!(
-                    query_kind,
-                    QueryKind::Executable(
-                        ExecutionStyle::Projection | ExecutionStyle::Firewall
-                    )
-                ) {
-                    // dont continue propagation through firewall or projection
-                    // nodes
-                    continue;
+    async fn process_task(
+        task: DirtyTask<C>,
+        injector: &Injector<DirtyTask<C>>,
+        notify: &Notify,
+        database: &Weak<Database<C>>,
+        statistic: &Weak<Statistic>,
+        dirtied_queries: &Weak<DashSet<QueryID, C::BuildHasher>>,
+    ) {
+        let dirtied_queries = dirtied_queries.upgrade().unwrap();
+        let statistic = statistic.upgrade().unwrap();
+        let database = database.upgrade().unwrap();
+
+        if !dirtied_queries.insert(*task.query_id()) {
+            return;
+        }
+
+        let query_id = *task.query_id();
+
+        for caller in
+            unsafe { database.get_backward_edges_unchecked(&query_id).await }
+        {
+            {
+                // opportunisitically try to use the write transaction
+                if let Some(mut write_tx) = task.try_load_write_tx() {
+                    database
+                        .mark_dirty_forward_edge(
+                            caller,
+                            *task.query_id(),
+                            &mut *write_tx,
+                        )
+                        .await;
+
+                    // maintenance the remaining buffer edges
+                    for edge in task.drain_limited() {
+                        database
+                            .mark_dirty_forward_edge_from(edge, &mut *write_tx)
+                            .await;
+                    }
+                } else {
+                    // couldn't get the write transaction, push to the buffer
+                    task.push_to_buffer(Edge::new(caller, *task.query_id()));
                 }
 
-                Self::submit_task_from(shards, mask, task.propagate_to(caller));
+                statistic.add_dirtied_edge_count();
             }
+
+            let query_kind = database.get_query_kind(&caller).await;
+
+            if matches!(
+                query_kind,
+                QueryKind::Executable(
+                    ExecutionStyle::Projection | ExecutionStyle::Firewall
+                )
+            ) {
+                // don't continue propagation through firewall or
+                // projection nodes
+                continue;
+            }
+
+            injector.push(task.propagate_to(caller));
+            notify.notify_one();
         }
     }
 }
 
 impl<C: Config> Drop for DirtyWorker<C> {
     fn drop(&mut self) {
-        for shard in self.shards.iter() {
-            let _ = shard.send(Message::Shutdown);
-        }
+        self.shutdown.store(true, Ordering::Release);
+        self.notify.notify_waiters();
     }
 }
 
@@ -167,8 +294,9 @@ impl<C: Config> Engine<C> {
         trasnaction: WriteTransaction<C>,
     ) -> WriteTransaction<C> {
         let write_tx = Arc::new(Mutex::new(trasnaction));
+        let stripped_buffer = Arc::new(StrippedBuffer::new());
 
-        let batch = Batch::new(write_tx.clone());
+        let batch = Batch::new(write_tx.clone(), stripped_buffer.clone());
         let notified = batch.notified_owned();
 
         for query_id in query_id {
@@ -182,11 +310,20 @@ impl<C: Config> Engine<C> {
         // wait for all tasks to complete
         notified.await;
 
-        Arc::try_unwrap(write_tx)
+        let mut write_tx = Arc::try_unwrap(write_tx)
             .unwrap_or_else(|_| {
                 panic!("should be unique, notified system is broken")
             })
-            .into_inner()
+            .into_inner();
+
+        for remaining_edge in stripped_buffer.drain_all() {
+            self.computation_graph
+                .database
+                .mark_dirty_forward_edge_from(remaining_edge, &mut write_tx)
+                .await;
+        }
+
+        write_tx
     }
 
     pub(super) fn clear_dirtied_queries(&self) {

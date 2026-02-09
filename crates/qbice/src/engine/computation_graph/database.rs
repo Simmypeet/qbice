@@ -128,6 +128,10 @@ pub struct Edge {
     to: QueryID,
 }
 
+impl Edge {
+    pub const fn new(from: QueryID, to: QueryID) -> Self { Self { from, to } }
+}
+
 impl WideColumn for DirtySetColumn {
     type Key = Edge;
     type Discriminant = ();
@@ -1090,6 +1094,14 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 }
 
 impl<C: Config> Database<C> {
+    pub(super) async fn mark_dirty_forward_edge_from(
+        &self,
+        edge: Edge,
+        tx: &mut WriteTransaction<C>,
+    ) {
+        self.dirty_edge_set.insert(edge, Unit, tx).await;
+    }
+
     pub(super) async fn mark_dirty_forward_edge(
         &self,
         from: QueryID,
