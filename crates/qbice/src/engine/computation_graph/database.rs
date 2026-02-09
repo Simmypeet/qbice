@@ -592,6 +592,7 @@ impl<C: Config> Drop for Database<C> {
         unsafe {
             // These are the heavy data structures that take time to drop.
             let sync = ManuallyDrop::take(&mut self.sync);
+            let last_verified = ManuallyDrop::take(&mut self.last_verified);
             let forward_edge_order =
                 ManuallyDrop::take(&mut self.forward_edge_order);
             let forward_edge_observation =
@@ -608,6 +609,7 @@ impl<C: Config> Drop for Database<C> {
 
             rayon::scope(|scope| {
                 scope.spawn(|_| drop(sync));
+                scope.spawn(|_| drop(last_verified));
                 scope.spawn(|_| drop(forward_edge_order));
                 scope.spawn(|_| drop(forward_edge_observation));
                 scope.spawn(|_| drop(query_kind));
