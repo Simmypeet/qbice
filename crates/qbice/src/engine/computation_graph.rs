@@ -18,7 +18,7 @@ use crate::{
         caller::CallerKind,
         computing::Computing,
         database::{ActiveComputationGuard, Database},
-        dirty_propagation::DirtyWorker,
+        dirty_worker::DirtyWorker,
         fast_path::FastPathResult,
         query_lock_manager::QueryLockManager,
         statistic::Statistic,
@@ -31,7 +31,7 @@ mod backward_projection;
 mod caller;
 mod computing;
 mod database;
-mod dirty_propagation;
+mod dirty_worker;
 mod fast_path;
 mod input_session;
 mod query_lock_manager;
@@ -75,7 +75,7 @@ impl QueryKind {
 }
 
 pub struct ComputationGraph<C: Config> {
-    // NOTE: we drop the dirty worker first as it holds Arc references to
+    // NOTE: we drop the dirty worker first as it holds Weak references to
     // `database`, `statistic`, and `dirtied_queries`.
     dirty_worker: DirtyWorker<C>,
 
