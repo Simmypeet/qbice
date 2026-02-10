@@ -20,6 +20,11 @@ pub struct QueryCaller {
     query_id: QueryID,
     computing: Option<Arc<QueryComputing>>,
     reason: CallerReason,
+
+    /// Pedantic repair forces the repair process to eagerly recursively invoke
+    /// `repair` on its callees, instead of checking the dirtiness of the
+    /// callee and only invoking `repair` when the callee is dirty.
+    pedantic_repair: bool,
 }
 
 impl QueryCaller {
@@ -28,7 +33,21 @@ impl QueryCaller {
         reason: CallerReason,
         computing: Arc<QueryComputing>,
     ) -> Self {
-        Self { query_id, computing: Some(computing), reason }
+        Self {
+            query_id,
+            computing: Some(computing),
+            reason,
+            pedantic_repair: false,
+        }
+    }
+
+    pub const fn new_with_pedantic_repair(
+        query_id: QueryID,
+        reason: CallerReason,
+        computing: Arc<QueryComputing>,
+        pedantic_repair: bool,
+    ) -> Self {
+        Self { query_id, computing: Some(computing), reason, pedantic_repair }
     }
 
     pub const fn new_external_input(
@@ -39,8 +58,11 @@ impl QueryCaller {
             query_id,
             computing: None,
             reason: CallerReason::RequireValue(Some(wait_group)),
+            pedantic_repair: false,
         }
     }
+
+    pub const fn pedantic_repair(&self) -> bool { self.pedantic_repair }
 
     #[must_use]
     pub const fn computing(&self) -> &Arc<QueryComputing> {

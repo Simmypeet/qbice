@@ -40,7 +40,10 @@ pub enum CalleeCheckDecision {
     NoNeed,
 
     /// The edge was seen dirty, but result stays the same after repair.
-    Cleaned { repair_transitive_firewall_callees: bool },
+    Cleaned {
+        repair_transitive_firewall_callees: bool,
+        add_to_clean_list: bool,
+    },
 }
 
 pub enum ChunkedCalleeCheckDecision {
@@ -276,6 +279,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn check_callee(
         engine: &Arc<Engine<C>>,
         query_id: &QueryID,
@@ -284,9 +288,13 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         current_timestamp: Timestamp,
         active_computation_guard: Option<&ActiveComputationGuard>,
         query_computing: &Arc<QueryComputing>,
+        pedantic_repair: bool,
     ) -> CalleeCheckDecision {
         // skip if not dirty
-        if !engine.is_edge_dirty(*query_id, *callee).await {
+        // however, we can't skip if pedantic_repair is true
+        let edge_is_dirty = engine.is_edge_dirty(*query_id, *callee).await;
+
+        if !edge_is_dirty && !pedantic_repair {
             return CalleeCheckDecision::NoNeed;
         }
 
@@ -356,7 +364,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 }
             }
 
-            CalleeCheckDecision::Cleaned { repair_transitive_firewall_callees }
+            CalleeCheckDecision::Cleaned {
+                repair_transitive_firewall_callees,
+                add_to_clean_list: edge_is_dirty,
+            }
         }
     }
 
@@ -369,6 +380,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         current_timestamp: Timestamp,
         active_computation_guard: Option<&ActiveComputationGuard>,
         computing_lock_guard: &Arc<QueryComputing>,
+        pedantic_repair: bool,
         cancelled: Arc<AtomicBool>,
     ) -> ChunkedCalleeCheckDecision {
         let mut cleaned_edges = Vec::new();
@@ -389,6 +401,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 current_timestamp,
                 active_computation_guard,
                 computing_lock_guard,
+                pedantic_repair,
             )
             .await;
 
@@ -406,8 +419,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
                 CalleeCheckDecision::Cleaned {
                     repair_transitive_firewall_callees: repair_tfc_needed,
+                    add_to_clean_list,
                 } => {
-                    cleaned_edges.push(*callee);
+                    if add_to_clean_list {
+                        cleaned_edges.push(*callee);
+                    }
 
                     if repair_tfc_needed {
                         repair_transitive_firewall_callees = true;
@@ -446,6 +462,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                         caller_information.timestamp(),
                         caller_information.active_computation_guard(),
                         computing_lock_guard.query_computing(),
+                        caller_information.get_query_caller().is_some_and(
+                            super::caller::QueryCaller::pedantic_repair,
+                        ),
                     )
                     .await;
 
@@ -459,8 +478,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                         CalleeCheckDecision::Cleaned {
                             repair_transitive_firewall_callees:
                                 repair_tfc_needed,
+                            add_to_clean_list,
                         } => {
-                            cleaned_edges.push(*callee);
+                            if add_to_clean_list {
+                                cleaned_edges.push(*callee);
+                            }
 
                             if repair_tfc_needed {
                                 repair_transitive_firewall_callees = true;
@@ -494,6 +516,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                             caller_information.clone_active_computation_guard();
                         let computing_lock_guard =
                             computing_lock_guard.query_computing().clone();
+                        let pedantic_repair =
+                            caller_information.get_query_caller().is_some_and(
+                                super::caller::QueryCaller::pedantic_repair,
+                            );
 
                         chunk_handles.push(tokio::spawn(async move {
                             Self::check_callee_chunked(
@@ -504,6 +530,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                                 timestamp,
                                 active_computation_guard.as_ref(),
                                 &computing_lock_guard,
+                                pedantic_repair,
                                 cancelled,
                             )
                             .await

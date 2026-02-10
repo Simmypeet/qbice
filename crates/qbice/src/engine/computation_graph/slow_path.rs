@@ -66,14 +66,22 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     ) {
         let wait_group = WaitGroup::new();
 
+        let pedantic_repair = match caller_information.kind() {
+            CallerKind::Query(query_caller) => query_caller.pedantic_repair(),
+            CallerKind::BackwardProjectionPropagation => true,
+
+            _ => false,
+        };
+
         let tracked_engine = TrackedEngine {
             engine: self.engine().clone(),
             cache: ThreadLocal::new(),
             caller: CallerInformation::new(
-                CallerKind::Query(QueryCaller::new(
+                CallerKind::Query(QueryCaller::new_with_pedantic_repair(
                     *self.query_id(),
                     CallerReason::RequireValue(Some(wait_group)),
                     lock_guard.query_computing().clone(),
+                    pedantic_repair,
                 )),
                 caller_information.timestamp(),
                 caller_information.clone_active_computation_guard(),

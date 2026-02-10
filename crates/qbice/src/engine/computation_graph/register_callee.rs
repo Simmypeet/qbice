@@ -58,7 +58,7 @@ impl<C: Config> Engine<C> {
                 );
 
                 // Invariant Check: projection query can only requires firewall
-                // queries.
+                // queries or projection queries.
                 if computing.query_kind().is_projection() {
                     // get the kind of query about to be registerd by looking
                     // up from the executor registry
@@ -69,8 +69,13 @@ impl<C: Config> Engine<C> {
                     let exec_style = entry.obtain_execution_style();
 
                     assert!(
-                        matches!(exec_style, ExecutionStyle::Firewall),
-                        "Projection query can only depend on firewall queries"
+                        matches!(
+                            exec_style,
+                            ExecutionStyle::Firewall
+                                | ExecutionStyle::Projection
+                        ),
+                        "Projection query can only depend on firewall or \
+                         projection queries"
                     );
                 }
 
