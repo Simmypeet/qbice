@@ -217,9 +217,12 @@ impl Impl {
                     cf
                 } else {
                     // proceed to create new column family
-                    self.db
+                    let Ok(()) = self
+                        .db
                         .create_cf(&cf_name, &Self::get_cf_options(kind))
-                        .expect("failed to create column family");
+                    else {
+                        panic!("failed to create column family");
+                    };
 
                     vacant_entry.insert(cf_name.clone());
                     self.db

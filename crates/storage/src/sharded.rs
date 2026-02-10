@@ -55,7 +55,6 @@ impl<T> Sharded<T> {
         self.shards[shard_index].read_recursive()
     }
 
-    #[allow(unused)]
     pub fn upgradable_read_shard(
         &self,
         shard_index: usize,

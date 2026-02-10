@@ -1,10 +1,10 @@
 use std::{
     self,
-    collections::HashMap,
     sync::{Arc, atomic::AtomicBool},
 };
 
-use dashmap::{DashMap, DashSet};
+use dashmap::{DashMap, DashSet, Entry};
+use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use qbice_stable_hash::Compact128;
 use qbice_storage::intern::Interned;
@@ -103,16 +103,20 @@ pub enum Mode {
 
 #[derive(Debug, Default)]
 pub struct ComputingForwardEdges {
-    pub callee_queries: scc::HashMap<QueryID, Option<Observation>>,
+    pub callee_queries: DashMap<QueryID, Option<Observation>, FxBuildHasher>,
     pub callee_order: RwLock<CalleeOrder>,
 }
 
 impl QueryComputing {
     pub fn register_calee(&self, callee: &QueryID) {
-        match self.callee_info.callee_queries.entry_sync(*callee) {
-            scc::hash_map::Entry::Occupied(_) => {}
+        if self.callee_info.callee_queries.contains_key(callee) {
+            return;
+        }
 
-            scc::hash_map::Entry::Vacant(vacant_entry) => {
+        match self.callee_info.callee_queries.entry(*callee) {
+            Entry::Occupied(_) => {}
+
+            Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert_entry(None);
 
                 self.callee_info.callee_order.write().push(*callee);
@@ -129,7 +133,7 @@ impl QueryComputing {
     }
 
     pub fn abort_callee(&self, callee: &QueryID) {
-        assert!(self.callee_info.callee_queries.remove_sync(callee).is_some());
+        assert!(self.callee_info.callee_queries.remove(callee).is_some());
 
         let mut callee_order = self.callee_info.callee_order.write();
 
@@ -153,7 +157,7 @@ impl QueryComputing {
         let mut callee_observation = self
             .callee_info
             .callee_queries
-            .get_sync(callee_target_id)
+            .get_mut(callee_target_id)
             .expect("callee should have been registered");
 
         *callee_observation = Some(Observation {
@@ -394,7 +398,7 @@ impl<C: Config> Engine<C> {
         computing: &QueryComputing,
         target: &QueryID,
     ) -> bool {
-        if computing.callee_info.callee_queries.contains_sync(target) {
+        if computing.callee_info.callee_queries.contains_key(target) {
             computing
                 .is_in_scc
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -405,17 +409,16 @@ impl<C: Config> Engine<C> {
         let mut found = false;
 
         // OPTIMIZE: this can be parallelized
-        computing.callee_info.callee_queries.iter_sync(|dep, _| {
+        for dep in computing.callee_info.callee_queries.iter().map(|x| *x.key())
+        {
             let Some(state) =
-                self.computation_graph.computing.try_get_query_computing(dep)
+                self.computation_graph.computing.try_get_query_computing(&dep)
             else {
-                return true;
+                continue;
             };
 
             found |= self.check_cyclic_internal(&state, target);
-
-            true
-        });
+        }
 
         if found {
             computing
@@ -487,7 +490,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         let entry = Arc::new(QueryComputing {
             callee_info: ComputingForwardEdges {
-                callee_queries: scc::HashMap::default(),
+                callee_queries: DashMap::with_hasher_and_shard_amount(
+                    FxBuildHasher::default(),
+                    default_shard_amount(),
+                ),
                 callee_order: RwLock::new(CalleeOrder::default()),
             },
 
@@ -637,23 +643,15 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                         .write()
                         .order,
                 ),
-                {
-                    let mut forward_edges = HashMap::default();
-
-                    lock_guard
-                        .this_computing
-                        .callee_info
-                        .callee_queries
-                        .iter_sync(|k, v| {
-                            if let Some(observation) = v {
-                                forward_edges.insert(*k, *observation);
-                            }
-
-                            true
-                        });
-
-                    forward_edges
-                },
+                lock_guard
+                    .this_computing
+                    .callee_info
+                    .callee_queries
+                    .iter()
+                    .filter_map(|entry| {
+                        entry.value().map(|v| (*entry.key(), v))
+                    })
+                    .collect(),
                 self.engine().create_tfc_from_iter(
                     lock_guard.this_computing.tfc.iter().map(|x| *x.key()),
                 ),
