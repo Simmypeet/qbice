@@ -71,6 +71,19 @@ pub struct DbBacked<Db> {
     configuration: Configuration,
 }
 
+impl<Db> DbBacked<Db> {
+    /// Creates a new database-backed storage engine.
+    ///
+    /// # Parameters
+    ///
+    /// - `backing_db`: The initialized key-value database backend.
+    /// - `configuration`: The configuration for the storage engine.
+    #[must_use]
+    pub const fn new(backing_db: Db, configuration: Configuration) -> Self {
+        Self { backing_db, configuration }
+    }
+}
+
 impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     type WriteTransaction = write_behind::WriteBatch<Db>;
 
@@ -129,7 +142,7 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Builder)]
 pub struct DbBackedFactory<F> {
     /// The configuration for the storage engine.
-    pub coniguration: Configuration,
+    pub configuration: Configuration,
 
     /// The database factory for creating the backing database.
     pub db_factory: F,
@@ -146,6 +159,6 @@ impl<F: KvDatabaseFactory> StorageEngineFactory for DbBackedFactory<F> {
     ) -> Result<Self::StorageEngine, Self::Error> {
         let db = self.db_factory.open(serialization_plugin)?;
 
-        Ok(DbBacked { backing_db: db, configuration: self.coniguration })
+        Ok(DbBacked { backing_db: db, configuration: self.configuration })
     }
 }

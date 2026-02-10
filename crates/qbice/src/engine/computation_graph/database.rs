@@ -1,29 +1,3 @@
-//! A module for persisting the computation graph state.
-//!
-//! # Atomic Units
-//!
-//! All the updates to the computation graph are done in atomic units called
-//! `WriteBuffer`s.
-//!
-//! # Cancellation and Timestamps
-//!
-//! The current policy is that when a new session starts (when updating inputs),
-//! the global timestamp is incremented, the computation graph goes to a new
-//! generation. Any in-progress computations from prior generations are
-//! cancelled.
-//!
-//! We achieve this by associating all running computations with its timestamp.
-//! When that particular computation tries to read-from/write-to the computation
-//! graph, it checks whether its timestamp matches the current timestamp of
-//! the computation graph. If not, it aborts the computation early.
-//!
-//! The abort can happen in two ways:
-//!
-//! - Make the computation stuck in the `Pending` state forever. This requires
-//!   user cooperation to drop the computation eventually.
-//! - Panic the computation. This is a more aggressive approach, but it ensures
-//!   that resources are freed up quickly.
-
 use std::{
     collections::HashMap,
     hash::{BuildHasher, Hash},

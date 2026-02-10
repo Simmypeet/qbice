@@ -334,7 +334,7 @@ pub async fn create_test_engine(tempdir: &TempDir) -> Engine<TestingConfig> {
     Engine::<TestingConfig>::new_with(
         Plugin::default(),
         DbBackedFactory::builder()
-            .coniguration(Configuration::builder().cache_capacity(8).build())
+            .configuration(Configuration::builder().cache_capacity(8).build())
             .db_factory(RocksDB::factory(tempdir.path()))
             .build(),
         SeededStableHasherBuilder::<Sip128Hasher>::new(0),

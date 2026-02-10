@@ -535,7 +535,7 @@ impl<C: Config> Engine<C> {
                 continue;
             };
 
-            snapshot.continuation(query.query, caller, guard).await;
+            snapshot.process_query(query.query, caller, guard).await;
 
             status = QueryStatus::Repaired;
 

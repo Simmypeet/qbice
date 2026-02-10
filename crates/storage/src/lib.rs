@@ -6,8 +6,8 @@
 //!
 //! - **Key-Value Database Abstraction** ([`kv_database`]): A trait-based
 //!   abstraction layer supporting multiple storage backends (e.g., `RocksDB`,
-//!   LMDB, in-memory). Features include wide columns for multi-value storage
-//!   and key-of-set mode for efficient set operations.
+//!   `Fjall`). Features include wide columns for multi-value storage and
+//!   key-of-set mode for efficient set operations.
 //!
 //! - **Storage Engine** ([`storage_engine`]): A unified interface for creating
 //!   storage components including single maps, dynamic maps, and key-of-set
@@ -58,6 +58,7 @@
 //!     storage_engine::{StorageEngine, in_memory::InMemoryStorageEngine},
 //! };
 //! use qbice_stable_type_id::Identifiable;
+//! use qbice_serialize::{Encode, Decode};
 //!
 //! // Define a wide column
 //! #[derive(Identifiable)]
@@ -79,15 +80,18 @@
 //!     fn discriminant() -> u8 { 0 }
 //! }
 //!
+//! # async fn example() {
 //! // Create a storage engine and maps
 //! let engine = InMemoryStorageEngine;
 //! let user_map = engine.new_single_map::<UserDataColumn, UserName>();
 //!
 //! // Retrieve values (automatically fetched from DB on miss)
+//! let user_id = 12345;
 //! let name = user_map.get(&user_id).await;
 //! if let Some(name) = name {
 //!     println!("User: {}", name.0);
 //! }
+//! # }
 //! ```
 //!
 //! # Design Considerations

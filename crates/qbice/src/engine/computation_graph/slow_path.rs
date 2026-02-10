@@ -1,5 +1,6 @@
 use crossbeam::sync::WaitGroup;
 use thread_local::ThreadLocal;
+use tracing::instrument;
 
 use crate::{
     Query, TrackedEngine,
@@ -195,7 +196,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 }
 
 impl<C: Config, Q: Query> Snapshot<C, Q> {
-    pub async fn continuation(
+    #[instrument(skip(self, caller_information, lock_guard), level = "info")]
+    pub async fn process_query(
         self,
         query: &Q,
         caller_information: &CallerInformation,

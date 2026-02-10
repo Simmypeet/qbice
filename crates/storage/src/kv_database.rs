@@ -69,7 +69,7 @@ pub trait SerializationBuffer {
 /// # Usage Pattern
 ///
 /// ```ignore
-/// let batch = db.write_transaction();
+/// let batch = db.write_batch();
 ///
 /// // Accumulate operations
 /// batch.put::<MyColumn, MyValue>(&key1, &value1);
@@ -149,7 +149,7 @@ pub trait KvDatabaseFactory {
 /// advanced storage patterns.
 ///
 /// This trait provides a backend-agnostic abstraction over various key-value
-/// storage implementations (e.g., `RocksDB`, LMDB, in-memory stores), enabling
+/// storage implementations (e.g., `RocksDB`, `Fjall`), enabling
 /// portable code that can work with different storage engines.
 ///
 /// # Thread Safety and Concurrency
