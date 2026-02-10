@@ -1163,6 +1163,7 @@ impl<C: Config> Executor<AsymmetricFinalConsumer, C>
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
 async fn asymmetric_diamond_projection_pattern() {
     let tempdir = tempdir().unwrap();
     let mut engine = create_test_engine(&tempdir).await;
