@@ -79,6 +79,7 @@ use crate::{
 pub struct InputSession<C: Config> {
     engine: Arc<Engine<C>>,
     dirty_batch: Arc<RwLock<VecDeque<QueryID>>>,
+    comitted: bool,
 
     #[allow(clippy::type_complexity)]
     transaction:
@@ -89,6 +90,10 @@ impl<C: Config> Drop for InputSession<C> {
     // NOTE: the commit needs to always happen, even if the user forgets to call
     // `commit()`. Thus, we perform the commit in the `Drop` impl.
     fn drop(&mut self) {
+        if self.comitted {
+            return;
+        }
+
         let transaction = self.transaction.clone();
         let dirty_batch = self.dirty_batch.clone();
         let engine = self.engine.clone();
@@ -110,14 +115,19 @@ impl<C: Config> Drop for InputSession<C> {
 impl<C: Config> InputSession<C> {
     /// Commits the input session, performing dirty propagation and submitting
     /// the write buffer.
-    pub async fn commit(self) {
+    pub async fn commit(mut self) {
         let engine = self.engine.clone();
-        let dirty_batch = std::mem::take(&mut *self.dirty_batch.write().await);
-        let (transaction, guard) =
-            self.transaction.write().await.take().unwrap();
 
         async move {
+            self.comitted = true;
+
+            let dirty_batch =
+                std::mem::take(&mut *self.dirty_batch.write().await);
+            let (transaction, guard) =
+                self.transaction.write().await.take().unwrap();
+
             let _guard = guard;
+
             Self::commit_internal(engine, dirty_batch, transaction).await;
         }
         .guarded()
@@ -211,6 +221,7 @@ impl<C: Config> Engine<C> {
         InputSession {
             dirty_batch: Arc::new(RwLock::new(VecDeque::new())),
             engine: self.clone(),
+            comitted: false,
             transaction: Arc::new(RwLock::new(Some((
                 write_buffer_with_lock,
                 active_input_session_guard,
