@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Weak},
     thread,
 };
 
@@ -11,6 +8,7 @@ use crossbeam::{
     utils::Backoff,
 };
 use dashmap::DashSet;
+use parking_lot::RwLock;
 use tokio::sync::{Mutex, Notify};
 
 use crate::{
@@ -36,7 +34,7 @@ mod task;
 pub struct DirtyWorker<C: Config> {
     injector: Arc<Injector<DirtyTask<C>>>,
     notify: Arc<Notify>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<RwLock<bool>>,
 }
 
 impl<C: Config> DirtyWorker<C> {
@@ -51,7 +49,7 @@ impl<C: Config> DirtyWorker<C> {
 
         let injector = Arc::new(Injector::new());
         let notify = Arc::new(Notify::new());
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(RwLock::new(false));
 
         // Create per-worker local deques and their stealers.
         let mut workers = Vec::with_capacity(parallelism);
@@ -131,13 +129,13 @@ impl<C: Config> DirtyWorker<C> {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::await_holding_lock)]
     async fn worker_loop(
         local: Worker<DirtyTask<C>>,
         injector: &Injector<DirtyTask<C>>,
         stealers: &[Stealer<DirtyTask<C>>],
         notify: &Notify,
-        shutdown: &AtomicBool,
+        shutdown: &RwLock<bool>,
         database: &Weak<Database<C>>,
         statistic: &Weak<Statistic>,
         dirtied_queries: &Weak<DashSet<QueryID, C::BuildHasher>>,
@@ -168,17 +166,26 @@ impl<C: Config> DirtyWorker<C> {
                 }
             }
 
-            if shutdown.load(Ordering::Acquire) {
+            let shutdown_guard = shutdown.read();
+
+            if *shutdown_guard {
                 break;
             }
 
-            // Prepare to park – register *before* the final emptiness
-            // check so that a concurrent push + notify is never lost.
-            let notified = if backoff.is_completed() {
+            // IMPORTANT: has to hold the lock until we have acquired
+            // notified
+            let mut notified = std::pin::pin!(if backoff.is_completed() {
                 Some(notify.notified())
             } else {
                 None
-            };
+            });
+
+            // add to the waiting list first
+            if let Some(notified) = notified.as_mut().as_pin_mut() {
+                notified.enable();
+            }
+
+            drop(shutdown_guard);
 
             // Double-check: work may have arrived between the while-
             // loop exit and the enable() call above.
@@ -197,11 +204,7 @@ impl<C: Config> DirtyWorker<C> {
                 continue;
             }
 
-            if shutdown.load(Ordering::Acquire) {
-                break;
-            }
-
-            match notified {
+            match notified.as_pin_mut() {
                 Some(notified) => {
                     // Backoff is complete, park until notified.
                     notified.await;
@@ -282,7 +285,7 @@ impl<C: Config> DirtyWorker<C> {
 
 impl<C: Config> Drop for DirtyWorker<C> {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        *self.shutdown.write() = true;
         self.notify.notify_waiters();
     }
 }
