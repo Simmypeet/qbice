@@ -215,7 +215,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         None
     }
 
-    async fn repair_transitive_firewall_callees(
+    pub(super) async fn repair_transitive_firewall_callees(
         &mut self,
         caller_information: &CallerInformation,
     ) {

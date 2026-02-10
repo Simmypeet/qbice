@@ -281,6 +281,21 @@ impl<C: Config> TrackedEngine<C> {
         result.unwrap_or_else(|_| CyclicPanicPayload::unwind())
     }
 
+    /// Repairs all transitive firewall callees of the given query.
+    pub async fn repair_transitive_firewall_callees<Q: Query>(
+        &self,
+        query: &Q,
+    ) {
+        let query_with_id = self.engine.new_query_with_id(query);
+
+        self.engine
+            .repair_transitive_firewall_callees_for(
+                &query_with_id,
+                &self.caller,
+            )
+            .await;
+    }
+
     /// Interns a value, returning a reference-counted handle to the shared
     /// allocation.
     ///
@@ -451,6 +466,17 @@ impl<V> QueryResult<V> {
 }
 
 impl<C: Config> Engine<C> {
+    async fn repair_transitive_firewall_callees_for<Q: Query>(
+        self: &Arc<Self>,
+        query: &QueryWithID<'_, Q>,
+        caller: &CallerInformation,
+    ) {
+        let mut snapshot =
+            self.get_read_snapshot::<Q>(query.id.compact_hash_128()).await;
+
+        snapshot.repair_transitive_firewall_callees(caller).await;
+    }
+
     async fn query_for<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
