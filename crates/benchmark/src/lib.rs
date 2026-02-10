@@ -7,7 +7,9 @@ use qbice::{
     Engine, Identifiable, config,
     serialize::Plugin,
     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
-    storage::kv_database::in_memory::{InMemory, InMemoryFactory},
+    storage::storage_engine::in_memory::{
+        InMemoryStorageEngine, InMemoryStorageEngineFactory,
+    },
 };
 
 #[derive(
@@ -25,7 +27,7 @@ use qbice::{
 pub struct Config;
 
 impl config::Config for Config {
-    type StorageEngine = InMemory<BuildHasherDefault<FxHasher>>;
+    type StorageEngine = InMemoryStorageEngine;
 
     type BuildStableHasher = SeededStableHasherBuilder<Sip128Hasher>;
 
@@ -36,7 +38,7 @@ impl config::Config for Config {
 pub async fn create_test_engine() -> Engine<Config> {
     Engine::<Config>::new_with(
         Plugin::default(),
-        InMemoryFactory::new(),
+        InMemoryStorageEngineFactory,
         SeededStableHasherBuilder::<Sip128Hasher>::new(0),
     )
     .await

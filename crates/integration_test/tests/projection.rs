@@ -1560,3 +1560,316 @@ async fn projection_with_two_firewalls() {
     assert_eq!(proj_ex.0.load(Ordering::SeqCst), 4); // unchanged
     assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 4); // unchanged
 }
+
+// ============================================================================
+// Test: Chained Projections
+// ============================================================================
+//
+// Graph structure:
+//   Variable(0) -> FirewallA (produces value * 3)
+//                      |
+//                      v
+//               ProjectionInner (extracts and adds 10)
+//                      |
+//                      v
+//               ProjectionOuter (multiplies by 2)
+//                      |
+//                      v
+//               ProjectionConsumer (divides by 5)
+//
+// This tests that a chain of projections correctly filters changes and
+// that dirty propagation works properly through multiple projection layers.
+
+/// A firewall query that triples the input value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct ChainedFirewallA;
+
+impl Query for ChainedFirewallA {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct ChainedFirewallAExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<ChainedFirewallA, C> for ChainedFirewallAExecutor {
+    async fn execute(
+        &self,
+        _query: &ChainedFirewallA,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&Variable(0)).await;
+        val * 3
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Firewall
+    }
+}
+
+/// First projection in the chain - adds 10 to the firewall result.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct ChainedProjectionInner;
+
+impl Query for ChainedProjectionInner {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct ChainedProjectionInnerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<ChainedProjectionInner, C>
+    for ChainedProjectionInnerExecutor
+{
+    async fn execute(
+        &self,
+        _query: &ChainedProjectionInner,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let firewall_result = engine.query(&ChainedFirewallA).await;
+        firewall_result + 10
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Second projection in the chain - multiplies the inner projection result by
+/// 2.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct ChainedProjectionOuter;
+
+impl Query for ChainedProjectionOuter {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct ChainedProjectionOuterExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<ChainedProjectionOuter, C>
+    for ChainedProjectionOuterExecutor
+{
+    async fn execute(
+        &self,
+        _query: &ChainedProjectionOuter,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let inner_result = engine.query(&ChainedProjectionInner).await;
+        inner_result * 2
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Final consumer in the chain - divides the outer projection result by 5.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct ChainedProjectionConsumer;
+
+impl Query for ChainedProjectionConsumer {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct ChainedProjectionConsumerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<ChainedProjectionConsumer, C>
+    for ChainedProjectionConsumerExecutor
+{
+    async fn execute(
+        &self,
+        _query: &ChainedProjectionConsumer,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let outer_result = engine.query(&ChainedProjectionOuter).await;
+        outer_result / 5
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chained_projections() {
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir).await;
+
+    let firewall_ex = Arc::new(ChainedFirewallAExecutor::default());
+    let inner_proj_ex = Arc::new(ChainedProjectionInnerExecutor::default());
+    let outer_proj_ex = Arc::new(ChainedProjectionOuterExecutor::default());
+    let consumer_ex = Arc::new(ChainedProjectionConsumerExecutor::default());
+
+    engine.register_executor(firewall_ex.clone());
+    engine.register_executor(inner_proj_ex.clone());
+    engine.register_executor(outer_proj_ex.clone());
+    engine.register_executor(consumer_ex.clone());
+
+    let engine = Arc::new(engine);
+
+    // =========================================================================
+    // Test Case 1: Initial query through the chain
+    // Variable(0)=5 -> FirewallA=15 -> ProjectionInner=25 -> ProjectionOuter=50
+    // -> Consumer=10
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5_i64).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&ChainedProjectionConsumer).await;
+        // 5 * 3 = 15, 15 + 10 = 25, 25 * 2 = 50, 50 / 5 = 10
+        assert_eq!(result, 10);
+    }
+
+    // Verify initial execution counts - each executor should run once
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(inner_proj_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(outer_proj_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
+
+    // =========================================================================
+    // Test Case 2: Change Variable(0) - should propagate through entire chain
+    // Variable(0)=10 -> FirewallA=30 -> ProjectionInner=40 ->
+    // ProjectionOuter=80 -> Consumer=16
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await;
+    }
+
+    // Should have 1 dirtied edge: FirewallA -> Variable(0)
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    drop(tracked);
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&ChainedProjectionConsumer).await;
+        // 10 * 3 = 30, 30 + 10 = 40, 40 * 2 = 80, 80 / 5 = 16
+        assert_eq!(result, 16);
+    }
+
+    // All executors should have run once more due to the change propagating
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 2); // +1
+    assert_eq!(inner_proj_ex.0.load(Ordering::SeqCst), 2); // +1 (backward prop)
+    assert_eq!(outer_proj_ex.0.load(Ordering::SeqCst), 2); // +1 (backward prop)
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // +1
+
+    // Should have 4 dirtied edges now:
+    // - Original 1 from previous assertion
+    // - ProjectionInner -> FirewallA
+    // - ProjectionOuter -> ProjectionInner
+    // - Consumer -> ProjectionOuter
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 4);
+    drop(tracked);
+
+    // =========================================================================
+    // Test Case 3: Change Variable(0) to same value - no recomputation should
+    // occur
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await; // Same value
+    }
+
+    // 0 dirtied edges since value didn't change
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 0);
+    drop(tracked);
+
+    // Re-query - everything should be cached
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&ChainedProjectionConsumer).await;
+        assert_eq!(result, 16); // Same as before
+    }
+
+    // No executors should have run additional times
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    assert_eq!(inner_proj_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    assert_eq!(outer_proj_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged
+
+    // =========================================================================
+    // Test Case 4: Query intermediate projections independently
+    // =========================================================================
+    {
+        let tracked = engine.clone().tracked().await;
+
+        let firewall_result = tracked.query(&ChainedFirewallA).await;
+        assert_eq!(firewall_result, 30); // 10 * 3
+
+        let inner_result = tracked.query(&ChainedProjectionInner).await;
+        assert_eq!(inner_result, 40); // 30 + 10
+
+        let outer_result = tracked.query(&ChainedProjectionOuter).await;
+        assert_eq!(outer_result, 80); // 40 * 2
+    }
+
+    // No additional executions should occur since everything is cached
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    assert_eq!(inner_proj_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    assert_eq!(outer_proj_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged
+}

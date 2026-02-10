@@ -245,6 +245,7 @@ async fn refresh_re_executes_external_input() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
 
     assert_eq!(file_executor.get_call_count(), 2);
@@ -287,6 +288,7 @@ async fn refresh_only_dirties_if_result_changed() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
 
     // FileRead was re-executed
@@ -333,6 +335,7 @@ async fn refresh_propagates_when_result_changes() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
 
     // FileRead was re-executed
@@ -378,6 +381,7 @@ async fn refresh_multiple_queries_of_same_type() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
 
     // All 3 should be re-executed
@@ -423,6 +427,7 @@ async fn refresh_different_query_types_independent() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
 
     // Only FileRead should be re-executed
@@ -433,6 +438,7 @@ async fn refresh_different_query_types_independent() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<NetworkRequest>().await;
+        input_session.commit().await;
     }
 
     // Now NetworkRequest should be re-executed
@@ -454,6 +460,7 @@ async fn refresh_with_no_previous_queries() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
 
     // Should be a no-op
@@ -523,6 +530,7 @@ async fn refresh_multiple_times() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
     assert_eq!(file_executor.get_call_count(), 2);
 
@@ -531,6 +539,7 @@ async fn refresh_multiple_times() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
     assert_eq!(file_executor.get_call_count(), 3);
 
@@ -539,6 +548,7 @@ async fn refresh_multiple_times() {
     {
         let mut input_session = engine.input_session().await;
         input_session.refresh::<FileRead>().await;
+        input_session.commit().await;
     }
     assert_eq!(file_executor.get_call_count(), 4);
 
@@ -568,6 +578,7 @@ async fn refresh_in_same_session_as_other_inputs() {
         input_session.set_input(Variable(0), 42).await;
         input_session.refresh::<FileRead>().await;
         input_session.set_input(Variable(1), 100).await;
+        input_session.commit().await;
     }
 
     // Both should work

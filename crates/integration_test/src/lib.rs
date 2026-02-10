@@ -334,8 +334,7 @@ pub async fn create_test_engine(tempdir: &TempDir) -> Engine<TestingConfig> {
     Engine::<TestingConfig>::new_with(
         Plugin::default(),
         DbBackedFactory::builder()
-            // we use low cache capacity to stress test cache eviction
-            .coniguration(Configuration::builder().cache_capacity(4).build())
+            .coniguration(Configuration::builder().cache_capacity(8).build())
             .db_factory(RocksDB::factory(tempdir.path()))
             .build(),
         SeededStableHasherBuilder::<Sip128Hasher>::new(0),

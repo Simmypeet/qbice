@@ -439,6 +439,7 @@ async fn conditional_cyclic_dependency() {
     {
         let mut input_session = engine.input_session().await;
         input_session.set_input(CycleControlVariable, 5).await;
+        input_session.commit().await;
     }
 
     let tracked_engine = engine.clone().tracked().await;
@@ -462,6 +463,7 @@ async fn conditional_cyclic_dependency() {
         let mut input_session = engine.input_session().await;
 
         input_session.set_input(CycleControlVariable, 1).await;
+        input_session.commit().await;
     }
 
     executor_a.reset_call_count();
@@ -469,7 +471,8 @@ async fn conditional_cyclic_dependency() {
 
     let tracked_engine = engine.clone().tracked().await;
 
-    // Query A - this should trigger cycle detection and return default values
+    // Query A - this should trigger cycle detection and return default
+    // values
     let result_a_cyclic = tracked_engine.query(&ConditionalCyclicQueryA).await;
     let result_b_cyclic = tracked_engine.query(&ConditionalCyclicQueryB).await;
 
@@ -483,11 +486,12 @@ async fn conditional_cyclic_dependency() {
 
     drop(tracked_engine);
 
-    // Phase 3: Change control value back to break the cycle (control_value !=
-    // 1)
+    // Phase 3: Change control value back to break the cycle (control_value
+    // != 1)
     {
         let mut input_session = engine.input_session().await;
         input_session.set_input(CycleControlVariable, 3).await;
+        input_session.commit().await;
     }
 
     executor_a.reset_call_count();
@@ -495,7 +499,8 @@ async fn conditional_cyclic_dependency() {
 
     let tracked_engine = engine.clone().tracked().await;
 
-    // Query both A and B - they should recompute and return normal values again
+    // Query both A and B - they should recompute and return normal values
+    // again
     let result_a_normal = tracked_engine.query(&ConditionalCyclicQueryA).await;
     let result_b_normal = tracked_engine.query(&ConditionalCyclicQueryB).await;
 
@@ -515,6 +520,7 @@ async fn conditional_cyclic_dependency() {
     {
         let mut input_session = engine.input_session().await;
         input_session.set_input(CycleControlVariable, 1).await;
+        input_session.commit().await;
     }
 
     executor_a.reset_call_count();
@@ -555,6 +561,7 @@ async fn conditional_cyclic_with_dependent_query() {
     {
         let mut input_session = engine.input_session().await;
         input_session.set_input(CycleControlVariable, 2).await;
+        input_session.commit().await;
     }
 
     let tracked_engine = engine.clone().tracked().await;
@@ -576,6 +583,7 @@ async fn conditional_cyclic_with_dependent_query() {
     {
         let mut input_session = engine.input_session().await;
         input_session.set_input(CycleControlVariable, 1).await;
+        input_session.commit().await;
     }
 
     let tracked_engine = engine.clone().tracked().await;
@@ -603,6 +611,7 @@ async fn conditional_cyclic_with_dependent_query() {
     {
         let mut input_session = engine.input_session().await;
         input_session.set_input(CycleControlVariable, 4).await;
+        input_session.commit().await;
     }
 
     let tracked_engine = engine.clone().tracked().await;

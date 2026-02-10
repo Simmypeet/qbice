@@ -9,13 +9,15 @@ license.workspace = true
 publish = false
 
 [dependencies]
-qbice = { path = "../qbice" }
+qbice = { path = "../qbice", features = ["rocksdb"] }
 tempfile.workspace = true
 tokio = { version = "1", features = ["full"] }
 tracing-test.workspace = true
 rayon.workspace = true
 tokio-util.workspace = true
 fxhash.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

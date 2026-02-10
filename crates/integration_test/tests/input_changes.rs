@@ -85,6 +85,7 @@ async fn safe_division_input_changes() {
 
             input_session.set_input(Variable(0), 42).await;
             input_session.set_input(Variable(1), 2).await;
+            input_session.commit().await;
         }
 
         let tracked_engine = engine.clone().tracked().await;
@@ -108,6 +109,7 @@ async fn safe_division_input_changes() {
         {
             let mut input_session = engine.input_session().await;
             input_session.set_input(Variable(1), 0).await;
+            input_session.commit().await;
         }
 
         let tracked_engine = engine.clone().tracked().await;
@@ -133,6 +135,7 @@ async fn safe_division_input_changes() {
         {
             let mut input_session = engine.input_session().await;
             input_session.set_input(Variable(1), 2).await;
+            input_session.commit().await;
         }
 
         let tracked_engine = engine.tracked().await;
