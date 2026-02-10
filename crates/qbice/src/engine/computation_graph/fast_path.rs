@@ -38,9 +38,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         // check if the query was called with repairing firewall and
         // has pending backward projection to do
-        if matches!(caller.kind(), CallerKind::RepairFirewall {
-            invoke_backward_projection: true
-        }) && self
+        if matches!(
+            caller.kind(),
+            CallerKind::RepairFirewall { invoke_backward_projection: true }
+                | CallerKind::BackwardProjectionPropagation
+        ) && self
             .pending_backward_projection()
             .await
             .is_some_and(|x| x.0 == caller.timestamp())

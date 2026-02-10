@@ -170,7 +170,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                     // needs to invoke projection queries in the backward
                     // direction and propagate dirtiness as
                     // needed.
-                    old_kind.is_firewall() && updated,
+                    (old_kind.is_firewall() || old_kind.is_projection())
+                        && updated,
                 )
             } else {
                 (self.engine().new_write_transaction(), None, false)
