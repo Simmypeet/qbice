@@ -644,7 +644,6 @@ impl<C: Config> Drop for Database<C> {
                 scope.spawn(|_| drop(backward_edges));
                 scope.spawn(|_| drop(external_input_queries));
             });
-            println!("Dropped computation graph database");
         }
     }
 }
