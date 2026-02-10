@@ -1873,3 +1873,331 @@ async fn chained_projections() {
     assert_eq!(outer_proj_ex.0.load(Ordering::SeqCst), 2); // unchanged
     assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged
 }
+
+// ============================================================================
+// Test: Chained Projections with Unchanged Intermediate Result
+// ============================================================================
+//
+// Graph structure:
+//   Variable(0) -> IdentityFirewall (passes value through)
+//                      |
+//                      v
+//               AbsoluteValueProjection (takes absolute value) [PROJECTION]
+//                      |
+//                      v
+//               DoubleProjection (doubles the value) [PROJECTION]
+//                      |
+//                      v
+//               AbsChainConsumer (adds 100)
+//
+// This tests that when an intermediate projection's output doesn't change
+// (e.g., |-5| = |5| = 5), the dirty propagation stops early and downstream
+// projections and consumers are NOT recomputed.
+
+/// A firewall query that passes the input value through unchanged.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct IdentityFirewall;
+
+impl Query for IdentityFirewall {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct IdentityFirewallExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<IdentityFirewall, C> for IdentityFirewallExecutor {
+    async fn execute(
+        &self,
+        _query: &IdentityFirewall,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        engine.query(&Variable(0)).await
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Firewall
+    }
+}
+
+/// Projection that computes absolute value - key for testing unchanged output.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct AbsoluteValueProjection;
+
+impl Query for AbsoluteValueProjection {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct AbsoluteValueProjectionExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<AbsoluteValueProjection, C>
+    for AbsoluteValueProjectionExecutor
+{
+    async fn execute(
+        &self,
+        _query: &AbsoluteValueProjection,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&IdentityFirewall).await;
+        val.abs()
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Second projection in chain - doubles the absolute value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DoubleProjection;
+
+impl Query for DoubleProjection {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DoubleProjectionExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DoubleProjection, C> for DoubleProjectionExecutor {
+    async fn execute(
+        &self,
+        _query: &DoubleProjection,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let abs_val = engine.query(&AbsoluteValueProjection).await;
+        abs_val * 2
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Consumer that adds 100 to the doubled absolute value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct AbsChainConsumer;
+
+impl Query for AbsChainConsumer {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct AbsChainConsumerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<AbsChainConsumer, C> for AbsChainConsumerExecutor {
+    async fn execute(
+        &self,
+        _query: &AbsChainConsumer,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let doubled = engine.query(&DoubleProjection).await;
+        doubled + 100
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chained_projections_unchanged_intermediate() {
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir).await;
+
+    let firewall_ex = Arc::new(IdentityFirewallExecutor::default());
+    let abs_proj_ex = Arc::new(AbsoluteValueProjectionExecutor::default());
+    let double_proj_ex = Arc::new(DoubleProjectionExecutor::default());
+    let consumer_ex = Arc::new(AbsChainConsumerExecutor::default());
+
+    engine.register_executor(firewall_ex.clone());
+    engine.register_executor(abs_proj_ex.clone());
+    engine.register_executor(double_proj_ex.clone());
+    engine.register_executor(consumer_ex.clone());
+
+    let engine = Arc::new(engine);
+
+    // =========================================================================
+    // Test Case 1: Initial query with negative value
+    // Variable(0)=-5 -> Firewall=-5 -> Abs=5 -> Double=10 -> Consumer=110
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -5_i64).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AbsChainConsumer).await;
+        // |-5| = 5, 5 * 2 = 10, 10 + 100 = 110
+        assert_eq!(result, 110);
+    }
+
+    // Verify initial execution counts - each executor should run once
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(abs_proj_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(double_proj_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
+
+    // =========================================================================
+    // Test Case 2: Change Variable(0) from -5 to 5
+    // The firewall output changes (-5 -> 5), but the absolute value stays the
+    // same (5), so DoubleProjection and Consumer should NOT be recomputed
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5_i64).await;
+    }
+
+    // Should have 1 dirtied edge: IdentityFirewall -> Variable(0)
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    drop(tracked);
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AbsChainConsumer).await;
+        // |5| = 5, 5 * 2 = 10, 10 + 100 = 110 (same result)
+        assert_eq!(result, 110);
+
+        // Should have 2 dirtied edges now:
+        // - Original 1 from previous assertion
+        // - AbsoluteValueProjection -> IdentityFirewall
+        assert_eq!(tracked.get_dirtied_edges_count(), 2);
+    }
+
+    // Firewall should recompute (input changed)
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 2); // +1
+    // AbsoluteValue projection should recompute (its input changed)
+    assert_eq!(abs_proj_ex.0.load(Ordering::SeqCst), 2); // +1
+    // DoubleProjection should NOT recompute - AbsoluteValue output didn't
+    // change
+    assert_eq!(double_proj_ex.0.load(Ordering::SeqCst), 1); // unchanged!
+    // Consumer should NOT recompute - DoubleProjection output didn't change
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1); // unchanged!
+
+    // =========================================================================
+    // Test Case 3: Change Variable(0) to a different absolute value
+    // Variable(0)=10 -> Firewall=10 -> Abs=10 -> Double=20 -> Consumer=120
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AbsChainConsumer).await;
+        // |10| = 10, 10 * 2 = 20, 20 + 100 = 120
+        assert_eq!(result, 120);
+    }
+
+    // All should recompute since the absolute value changed (5 -> 10)
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 3); // +1
+    assert_eq!(abs_proj_ex.0.load(Ordering::SeqCst), 3); // +1
+    assert_eq!(double_proj_ex.0.load(Ordering::SeqCst), 2); // +1
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // +1
+
+    // =========================================================================
+    // Test Case 4: Change Variable(0) from 10 to -10
+    // The firewall output changes (10 -> -10), but |10| = |-10| = 10
+    // DoubleProjection and Consumer should NOT be recomputed
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -10_i64).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AbsChainConsumer).await;
+        // |-10| = 10, 10 * 2 = 20, 20 + 100 = 120 (same result)
+        assert_eq!(result, 120);
+    }
+
+    // Firewall and AbsoluteValue should recompute
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 4); // +1
+    assert_eq!(abs_proj_ex.0.load(Ordering::SeqCst), 4); // +1
+    // DoubleProjection should NOT recompute - AbsoluteValue output didn't
+    // change
+    assert_eq!(double_proj_ex.0.load(Ordering::SeqCst), 2); // unchanged!
+    // Consumer should NOT recompute - DoubleProjection output didn't change
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged!
+
+    // =========================================================================
+    // Test Case 5: Verify intermediate queries work correctly
+    // =========================================================================
+    {
+        let tracked = engine.clone().tracked().await;
+
+        let firewall_result = tracked.query(&IdentityFirewall).await;
+        assert_eq!(firewall_result, -10);
+
+        let abs_result = tracked.query(&AbsoluteValueProjection).await;
+        assert_eq!(abs_result, 10);
+
+        let double_result = tracked.query(&DoubleProjection).await;
+        assert_eq!(double_result, 20);
+    }
+
+    // No additional executions should occur since everything is cached
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 4); // unchanged
+    assert_eq!(abs_proj_ex.0.load(Ordering::SeqCst), 4); // unchanged
+    assert_eq!(double_proj_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged
+}
