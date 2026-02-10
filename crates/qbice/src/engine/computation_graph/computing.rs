@@ -490,10 +490,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         let entry = Arc::new(QueryComputing {
             callee_info: ComputingForwardEdges {
-                callee_queries: DashMap::with_hasher_and_shard_amount(
-                    FxBuildHasher::default(),
-                    default_shard_amount(),
-                ),
+                callee_queries: DashMap::default(),
                 callee_order: RwLock::new(CalleeOrder::default()),
             },
 
