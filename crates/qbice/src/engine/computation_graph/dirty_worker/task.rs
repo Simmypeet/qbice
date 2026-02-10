@@ -1,5 +1,6 @@
 use std::{
     hash::BuildHasher,
+    mem::ManuallyDrop,
     sync::{Arc, atomic::AtomicUsize},
 };
 
@@ -89,7 +90,9 @@ impl WorkTracker {
 pub struct DirtyTask<C: Config> {
     query_id: QueryID,
 
-    write_tx: Arc<Mutex<WriteTransaction<C>>>,
+    // ManuallyDrop ensures we can drop write_tx before calling done()
+    // to avoid race condition where waiter wakes before Arc is released
+    write_tx: ManuallyDrop<Arc<Mutex<WriteTransaction<C>>>>,
     work_tracker: Arc<WorkTracker>,
     stripped_buffer: Arc<StrippedBuffer>,
 }
@@ -102,7 +105,7 @@ impl<C: Config> DirtyTask<C> {
 
         Self {
             query_id,
-            write_tx: self.write_tx.clone(),
+            write_tx: ManuallyDrop::new((*self.write_tx).clone()),
             work_tracker: self.work_tracker.clone(),
             stripped_buffer: self.stripped_buffer.clone(),
         }
@@ -126,7 +129,9 @@ impl<C: Config> DirtyTask<C> {
 pub struct Batch<C: Config> {
     work_traker: Arc<WorkTracker>,
     stripped_buffer: Arc<StrippedBuffer>,
-    write_tx: Arc<Mutex<WriteTransaction<C>>>,
+    // ManuallyDrop ensures we can drop write_tx before calling done()
+    // to avoid race condition where waiter wakes before Arc is released
+    write_tx: ManuallyDrop<Arc<Mutex<WriteTransaction<C>>>>,
 }
 
 impl<C: Config> Batch<C> {
@@ -141,7 +146,7 @@ impl<C: Config> Batch<C> {
                 notify: Arc::new(Notify::new()),
             }),
             stripped_buffer,
-            write_tx,
+            write_tx: ManuallyDrop::new(write_tx),
         }
     }
 
@@ -154,7 +159,7 @@ impl<C: Config> Batch<C> {
 
         DirtyTask {
             query_id,
-            write_tx: self.write_tx.clone(),
+            write_tx: ManuallyDrop::new((*self.write_tx).clone()),
             stripped_buffer: self.stripped_buffer.clone(),
             work_tracker: self.work_traker.clone(),
         }
@@ -162,11 +167,25 @@ impl<C: Config> Batch<C> {
 }
 
 impl<C: Config> Drop for Batch<C> {
-    fn drop(&mut self) { self.work_traker.done(); }
+    fn drop(&mut self) {
+        // SAFETY: Drop write_tx before calling done() to ensure the Arc
+        // is released before any waiters are notified. This prevents the
+        // race where a waiter wakes up and tries Arc::try_unwrap while
+        // we still hold a reference.
+        unsafe { ManuallyDrop::drop(&mut self.write_tx) };
+        self.work_traker.done();
+    }
 }
 
 impl<C: Config> Drop for DirtyTask<C> {
-    fn drop(&mut self) { self.work_tracker.done(); }
+    fn drop(&mut self) {
+        // SAFETY: Drop write_tx before calling done() to ensure the Arc
+        // is released before any waiters are notified. This prevents the
+        // race where a waiter wakes up and tries Arc::try_unwrap while
+        // we still hold a reference.
+        unsafe { ManuallyDrop::drop(&mut self.write_tx) };
+        self.work_tracker.done();
+    }
 }
 
 impl<C: Config> Clone for DirtyTask<C> {
@@ -175,7 +194,7 @@ impl<C: Config> Clone for DirtyTask<C> {
 
         Self {
             query_id: self.query_id,
-            write_tx: self.write_tx.clone(),
+            write_tx: ManuallyDrop::new((*self.write_tx).clone()),
             work_tracker: self.work_tracker.clone(),
             stripped_buffer: self.stripped_buffer.clone(),
         }

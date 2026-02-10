@@ -280,6 +280,8 @@ impl<C: Config> DirtyWorker<C> {
             injector.push(task.propagate_to(caller));
             notify.notify_one();
         }
+
+        drop(task);
     }
 }
 
