@@ -81,6 +81,13 @@ impl CallerInformation {
         self.active_computation_guard.clone()
     }
 
+    #[must_use]
+    pub const fn active_computation_guard(
+        &self,
+    ) -> Option<&ActiveComputationGuard> {
+        self.active_computation_guard.as_ref()
+    }
+
     pub const fn get_wait_group(&mut self) -> Option<WaitGroup> {
         match &mut self.kind {
             CallerKind::RepairFirewall { .. }

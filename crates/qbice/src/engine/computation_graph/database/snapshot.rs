@@ -8,8 +8,8 @@ use crate::{
     engine::computation_graph::{
         QueryKind,
         database::{
-            Edge, ForwardEdgeObservation, ForwardEdgeOrder, LastVerified,
-            NodeInfo, PendingBackwardProjection, QueryResult,
+            ForwardEdgeObservation, ForwardEdgeOrder, LastVerified, NodeInfo,
+            PendingBackwardProjection, QueryResult,
         },
         query_lock_manager::QueryLock,
     },
@@ -238,16 +238,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         let node_info = self.node_info().await;
         node_info.map(|x| x.fingerprint)
-    }
-
-    pub async fn is_edge_dirty(&mut self, callee: QueryID) -> bool {
-        self.engine
-            .computation_graph
-            .database
-            .dirty_edge_set
-            .get(&Edge { from: self.query_id, to: callee })
-            .await
-            .is_some()
     }
 
     pub async fn upgrade_to_exclusive(&mut self) {

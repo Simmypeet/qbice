@@ -34,6 +34,7 @@ use std::{
 };
 
 use dashmap::DashSet;
+use enum_as_inner::EnumAsInner;
 use ouroboros::self_referencing;
 use parking_lot::RwLock;
 use qbice_serialize::{Decode, Encode};
@@ -416,11 +417,30 @@ implements_wide_column_value_new_type!(
     QueryNodeDiscriminant::LastVerified
 );
 
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Encode, Decode, EnumAsInner,
+)]
+pub enum NodeDependency {
+    Single(QueryID),
+    Unordered(Vec<QueryID>),
+}
+
 implements_wide_column_value_new_type!(
     ForwardEdgeOrder,
-    Arc<[QueryID]>,
+    Arc<[NodeDependency]>,
     QueryNodeDiscriminant::ForwardEdgeOrder
 );
+
+impl ForwardEdgeOrder {
+    pub fn iter_all_callees(&self) -> impl Iterator<Item = QueryID> + '_ {
+        self.0.iter().flat_map(|dep| match dep {
+            NodeDependency::Single(qid) => Either::Left(std::iter::once(*qid)),
+            NodeDependency::Unordered(vec) => {
+                Either::Right(vec.clone().into_iter())
+            }
+        })
+    }
+}
 
 #[derive(Clone)]
 pub struct ForwardEdgeObservation<C: Config>(
@@ -624,6 +644,7 @@ impl<C: Config> Drop for Database<C> {
                 scope.spawn(|_| drop(backward_edges));
                 scope.spawn(|_| drop(external_input_queries));
             });
+            println!("Dropped computation graph database");
         }
     }
 }
@@ -819,7 +840,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         query_value: Q::Value,
         query_value_fingerprint: Option<Compact128>,
         query_kind: QueryKind,
-        forward_edge_order: Arc<[QueryID]>,
+        forward_edge_order: Arc<[NodeDependency]>,
         forward_edge_observations: HashMap<
             QueryID,
             Observation,
@@ -828,7 +849,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         tfc_achetype: Interned<TransitiveFirewallCallees>,
         has_pending_backward_projection: bool,
         current_timestamp: Timestamp,
-        existing_forward_edges: Option<&[QueryID]>,
+        existing_forward_edges: Option<&[NodeDependency]>,
         mut tx: WriteTransaction<C>,
     ) {
         self.upgrade_to_exclusive().await;
@@ -854,13 +875,27 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         {
             // remove prior backward edges
             if let Some(forward_edges) = existing_forward_edges {
-                for edge in forward_edges {
-                    self.engine()
-                        .computation_graph
-                        .database
-                        .backward_edges
-                        .remove(edge, self.query_id(), &mut tx)
-                        .await;
+                for dep in forward_edges {
+                    match dep {
+                        NodeDependency::Single(edge) => {
+                            self.engine()
+                                .computation_graph
+                                .database
+                                .backward_edges
+                                .remove(edge, self.query_id(), &mut tx)
+                                .await;
+                        }
+                        NodeDependency::Unordered(unordered) => {
+                            for edge in unordered {
+                                self.engine()
+                                    .computation_graph
+                                    .database
+                                    .backward_edges
+                                    .remove(edge, self.query_id(), &mut tx)
+                                    .await;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -904,12 +939,26 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 .await;
 
             for edge in forward_edge_order.0.iter() {
-                self.engine()
-                    .computation_graph
-                    .database
-                    .backward_edges
-                    .insert(*edge, *self.query_id(), &mut tx)
-                    .await;
+                match edge {
+                    NodeDependency::Single(query_id) => {
+                        self.engine()
+                            .computation_graph
+                            .database
+                            .backward_edges
+                            .insert(*query_id, *self.query_id(), &mut tx)
+                            .await;
+                    }
+                    NodeDependency::Unordered(query_ids) => {
+                        for edge in query_ids {
+                            self.engine()
+                                .computation_graph
+                                .database
+                                .backward_edges
+                                .insert(*edge, *self.query_id(), &mut tx)
+                                .await;
+                        }
+                    }
+                }
             }
 
             self.engine()
@@ -1004,12 +1053,26 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         {
             if let Some(forward_edges) = existing_forward_edges {
                 for edge in forward_edges.0.iter() {
-                    self.engine()
-                        .computation_graph
-                        .database
-                        .backward_edges
-                        .remove(edge, &query_id, tx)
-                        .await;
+                    match edge {
+                        NodeDependency::Single(edge) => {
+                            self.engine()
+                                .computation_graph
+                                .database
+                                .backward_edges
+                                .remove(edge, &query_id, tx)
+                                .await;
+                        }
+                        NodeDependency::Unordered(query_ids) => {
+                            for edge in query_ids {
+                                self.engine()
+                                    .computation_graph
+                                    .database
+                                    .backward_edges
+                                    .remove(edge, &query_id, tx)
+                                    .await;
+                            }
+                        }
+                    }
                 }
             }
 

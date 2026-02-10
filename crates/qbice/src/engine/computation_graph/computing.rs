@@ -1,21 +1,24 @@
 use std::{
     self,
+    collections::HashMap,
     sync::{Arc, atomic::AtomicBool},
 };
 
-use dashmap::{DashMap, DashSet, Entry};
+use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock;
 use qbice_stable_hash::Compact128;
 use qbice_storage::intern::Interned;
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
-    Engine, ExecutionStyle, Query,
+    Engine, ExecutionStyle, Query, TrackedEngine,
     config::{Config, WriteTransaction},
     engine::{
         computation_graph::{
             CallerInformation, QueryKind,
-            database::{NodeInfo, Observation, Snapshot, Timestamp},
+            database::{
+                NodeDependency, NodeInfo, Observation, Snapshot, Timestamp,
+            },
             slow_path::SlowPath,
             tfc_achetype::TransitiveFirewallCallees,
         },
@@ -27,32 +30,110 @@ use crate::{
 };
 
 #[derive(Debug, Default)]
+pub struct CalleeOrder {
+    pub order: Vec<NodeDependency>,
+    pub mode: Mode,
+}
+
+impl CalleeOrder {
+    pub fn push(&mut self, query_id: QueryID) {
+        match self.mode {
+            Mode::Single => {
+                self.order.push(NodeDependency::Single(query_id));
+            }
+
+            Mode::Unordered => {
+                self.order
+                    .last_mut()
+                    .unwrap()
+                    .as_unordered_mut()
+                    .unwrap()
+                    .push(query_id);
+            }
+        }
+    }
+
+    pub fn start_unordered_group(&mut self) {
+        assert!(
+            self.mode == Mode::Single,
+            "Cannot start unordered callee group when already in unordered \
+             mode"
+        );
+        self.mode = Mode::Unordered;
+        self.order.push(NodeDependency::Unordered(Vec::new()));
+    }
+
+    pub fn end_unordered_group(&mut self) {
+        assert!(
+            self.mode == Mode::Unordered,
+            "Cannot end unordered callee group when not in unordered mode"
+        );
+        self.mode = Mode::Single;
+    }
+
+    pub fn abort_callee(&mut self, callee: &QueryID) {
+        for (i, dep) in self.order.iter_mut().enumerate() {
+            match dep {
+                NodeDependency::Single(qid) => {
+                    if qid == callee {
+                        self.order.remove(i);
+                        return;
+                    }
+                }
+
+                NodeDependency::Unordered(qids) => {
+                    if let Some(pos) = qids.iter().position(|x| x == callee) {
+                        qids.swap_remove(pos);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Mode {
+    #[default]
+    Single,
+
+    Unordered,
+}
+
+#[derive(Debug, Default)]
 pub struct ComputingForwardEdges {
-    pub callee_queries: DashMap<QueryID, Option<Observation>>,
-    pub callee_order: RwLock<Vec<QueryID>>,
+    pub callee_queries: scc::HashMap<QueryID, Option<Observation>>,
+    pub callee_order: RwLock<CalleeOrder>,
 }
 
 impl QueryComputing {
     pub fn register_calee(&self, callee: &QueryID) {
-        match self.callee_info.callee_queries.entry(*callee) {
-            Entry::Occupied(_) => {}
+        match self.callee_info.callee_queries.entry_sync(*callee) {
+            scc::hash_map::Entry::Occupied(_) => {}
 
-            Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(None);
+            scc::hash_map::Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert_entry(None);
 
-                // if haven't inserted, add to dependency order
                 self.callee_info.callee_order.write().push(*callee);
             }
         }
     }
 
+    pub fn start_unordered_callee_group(&self) {
+        self.callee_info.callee_order.write().start_unordered_group();
+    }
+
+    pub fn end_unordered_callee_group(&self) {
+        self.callee_info.callee_order.write().end_unordered_group();
+    }
+
     pub fn abort_callee(&self, callee: &QueryID) {
-        assert!(self.callee_info.callee_queries.remove(callee).is_some());
+        assert!(self.callee_info.callee_queries.remove_sync(callee).is_some());
+
         let mut callee_order = self.callee_info.callee_order.write();
 
-        if let Some(pos) = callee_order.iter().position(|&id| id == *callee) {
-            callee_order.remove(pos);
-        }
+        callee_order.abort_callee(callee);
     }
 
     pub fn mark_scc(&self) {
@@ -72,7 +153,7 @@ impl QueryComputing {
         let mut callee_observation = self
             .callee_info
             .callee_queries
-            .get_mut(callee_target_id)
+            .get_sync(callee_target_id)
             .expect("callee should have been registered");
 
         *callee_observation = Some(Observation {
@@ -313,7 +394,7 @@ impl<C: Config> Engine<C> {
         computing: &QueryComputing,
         target: &QueryID,
     ) -> bool {
-        if computing.callee_info.callee_queries.contains_key(target) {
+        if computing.callee_info.callee_queries.contains_sync(target) {
             computing
                 .is_in_scc
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -324,16 +405,17 @@ impl<C: Config> Engine<C> {
         let mut found = false;
 
         // OPTIMIZE: this can be parallelized
-        for dep in computing.callee_info.callee_queries.iter().map(|x| *x.key())
-        {
+        computing.callee_info.callee_queries.iter_sync(|dep, _| {
             let Some(state) =
-                self.computation_graph.computing.try_get_query_computing(&dep)
+                self.computation_graph.computing.try_get_query_computing(dep)
             else {
-                continue;
+                return true;
             };
 
             found |= self.check_cyclic_internal(&state, target);
-        }
+
+            true
+        });
 
         if found {
             computing
@@ -405,8 +487,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         let entry = Arc::new(QueryComputing {
             callee_info: ComputingForwardEdges {
-                callee_queries: DashMap::new(),
-                callee_order: RwLock::new(Vec::new()),
+                callee_queries: scc::HashMap::default(),
+                callee_order: RwLock::new(CalleeOrder::default()),
             },
 
             query_kind,
@@ -541,28 +623,37 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         mut lock_guard: ComputingLockGuard<C>,
         has_pending_backward_projection: bool,
         current_timestamp: Timestamp,
-        existing_forward_edges: Option<&[QueryID]>,
+        existing_forward_edges: Option<&[NodeDependency]>,
         continuing_tx: WriteTransaction<C>,
     ) {
         let (query_kind, forward_edge_order, forward_edges, tfc_archetype) = {
             (
                 lock_guard.this_computing.query_kind,
                 std::mem::take(
-                    &mut *lock_guard
+                    &mut lock_guard
                         .this_computing
                         .callee_info
                         .callee_order
-                        .write(),
+                        .write()
+                        .order,
                 ),
-                lock_guard
-                    .this_computing
-                    .callee_info
-                    .callee_queries
-                    .iter()
-                    // in case of cyclic dependencies, some callees may have
-                    // been aborted
-                    .filter_map(|x| x.value().map(|v| (*x.key(), v)))
-                    .collect(),
+                {
+                    let mut forward_edges = HashMap::default();
+
+                    lock_guard
+                        .this_computing
+                        .callee_info
+                        .callee_queries
+                        .iter_sync(|k, v| {
+                            if let Some(observation) = v {
+                                forward_edges.insert(*k, *observation);
+                            }
+
+                            true
+                        });
+
+                    forward_edges
+                },
                 self.engine().create_tfc_from_iter(
                     lock_guard.this_computing.tfc.iter().map(|x| *x.key()),
                 ),
@@ -585,5 +676,83 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         .await;
 
         lock_guard.done();
+    }
+}
+
+impl<C: Config> TrackedEngine<C> {
+    /// Starts recording the dependency in an "unordered mode".
+    ///
+    /// ## Safety
+    ///
+    /// This method is purely for performance optimization. This allows the
+    /// engine to concurrently repair the callees during the query repair phase.
+    ///
+    /// Normally, the engine needs to repair the callees in the order they were
+    /// registered to ensure that the casual dependencies are respected (e.g.,
+    /// if query `A` says `true`, don't call query `B`).
+    ///
+    /// However, in some scenarios, those casual dependencies are not necessary,
+    /// and the engine can safely repair those queries in any order. For
+    /// example, a query that aggregates the results of multiple independent
+    /// queries can safely repair those independent queries in any order.
+    ///
+    /// ## Caution
+    ///
+    /// This should be used sparingly and only when you are certain that there
+    /// are no causal dependencies between the queries being called.
+    ///
+    /// For example, let's say we have a query ("Divide") that divides two
+    /// numbers, and it calls two other input queries ("Numerator" and
+    /// "Denominator"). This query panics if the denominator is zero.
+    ///
+    /// From that, we build an another query ("SafeDivide") that calls "Divide"
+    /// but returns `None` if the denominator is zero. In order for "SafeDivide"
+    /// to work it checks the value of "Denominator" first, and if it's zero, it
+    /// does not call "Divide" because it would panic.
+    ///
+    /// The above scenario is an example of a causal dependency: the value of
+    /// "SafeDivide" depends on the value of "Denominator" to decide whether it
+    /// can call "Divide" safely or not. By default, the engine would repair
+    /// "Denominator" first, and then "Divide" if "Denominator" result does not
+    /// differ.
+    ///
+    /// ## Panics
+    ///
+    /// This method will panic if called outside the context of an `Executor`
+    /// computing a query or it's already in unordered mode.
+    pub unsafe fn start_unordered_callee_group(&self) {
+        self.caller
+            .get_query_caller()
+            .unwrap_or_else(|| {
+                panic!(
+                    "This method is only available in the context of \
+                     `Executor` computing the query"
+                )
+            })
+            .computing()
+            .start_unordered_callee_group();
+    }
+
+    /// Ends recording the dependency in an "unordered mode".
+    ///
+    /// ## Safety
+    ///
+    /// See [`Self::start_unordered_callee_group`] for details.
+    ///
+    /// ## Panics
+    ///
+    /// This method will panic if called outside the context of an `Executor`
+    /// computing a query or it's not in unordered mode.
+    pub unsafe fn end_unordered_callee_group(&self) {
+        self.caller
+            .get_query_caller()
+            .unwrap_or_else(|| {
+                panic!(
+                    "This method is only available in the context of \
+                     `Executor` computing the query"
+                )
+            })
+            .computing()
+            .end_unordered_callee_group();
     }
 }

@@ -263,15 +263,15 @@ impl<C: Config> Engine<C> {
             });
 
             // Get forward dependencies (callees) from computed state
-            for edge in forward_edge.0.iter() {
+            for edge in forward_edge.iter_all_callees() {
                 edges.push(EdgeInfo {
                     source: current_id,
-                    target: *edge,
-                    is_dirty: Some(self.is_edge_dirty(current_id, *edge).await),
+                    target: edge,
+                    is_dirty: Some(self.is_edge_dirty(current_id, edge).await),
                 });
 
-                if !visited.contains(edge) {
-                    queue.push_back(*edge);
+                if !visited.contains(&edge) {
+                    queue.push_back(edge);
                 }
             }
         }

@@ -36,6 +36,8 @@ ouroboros.workspace = true
 tracing.workspace = true
 moka.workspace = true
 quick_cache.workspace = true
+enum-as-inner.workspace = true
+scc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
