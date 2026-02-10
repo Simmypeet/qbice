@@ -713,6 +713,684 @@ async fn diamond_projection_pattern() {
 }
 
 // ============================================================================
+// Test: Diamond Pattern with All Projections
+// ============================================================================
+//
+// Graph structure:
+//              SimpleFirewall
+//              /           \
+//             v             v
+//     ProjectionLevel1(0)  ProjectionLevel1(1)
+//        (Projection)        (Projection)
+//              \           /
+//               v         v
+//        DiamondCombinerProjection (PROJECTION)
+//                   |
+//                   v
+//           DiamondFinalConsumer
+//
+// Tests a more complex projection chain where the combiner itself is a
+// projection, forming a multi-level projection chain. When an unrelated
+// variable changes, all projections should recompute but produce same
+// outputs, stopping propagation at the combiner.
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DiamondCombinerProjection;
+
+impl Query for DiamondCombinerProjection {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DiamondCombinerProjectionExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DiamondCombinerProjection, C>
+    for DiamondCombinerProjectionExecutor
+{
+    async fn execute(
+        &self,
+        _query: &DiamondCombinerProjection,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let p0 = engine.query(&ProjectionLevel1(0)).await;
+        let p1 = engine.query(&ProjectionLevel1(1)).await;
+
+        p0 + p1
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DiamondFinalConsumer;
+
+impl Query for DiamondFinalConsumer {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DiamondFinalConsumerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DiamondFinalConsumer, C>
+    for DiamondFinalConsumerExecutor
+{
+    async fn execute(
+        &self,
+        _query: &DiamondFinalConsumer,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let combined = engine.query(&DiamondCombinerProjection).await;
+        combined * 100
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diamond_all_projections_pattern() {
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir).await;
+
+    let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
+    let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
+    let combiner_proj_ex =
+        Arc::new(DiamondCombinerProjectionExecutor::default());
+    let consumer_ex = Arc::new(DiamondFinalConsumerExecutor::default());
+
+    engine.register_executor(firewall_ex.clone());
+    engine.register_executor(proj1_ex.clone());
+    engine.register_executor(combiner_proj_ex.clone());
+    engine.register_executor(consumer_ex.clone());
+
+    let engine = Arc::new(engine);
+
+    // Initialize variables
+    {
+        let mut input_session = engine.input_session().await;
+        for i in 0..100 {
+            input_session.set_input(Variable(i), i.cast_signed() + 1).await;
+        }
+    }
+
+    // =========================================================================
+    // Test Case 1: Initial query through the diamond
+    // Variable(0)=1 -> proj1(0)=2, Variable(1)=2 -> proj1(1)=4
+    // CombinerProjection=6, FinalConsumer=600
+    // =========================================================================
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&DiamondFinalConsumer).await;
+        assert_eq!(result, 600);
+    }
+
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 2); // proj1(0) and proj1(1)
+    assert_eq!(combiner_proj_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
+
+    // =========================================================================
+    // Test Case 2: Change Variable(2) - neither projection depends on this
+    // Firewall and level-1 projections recompute, but outputs unchanged
+    // CombinerProjection should recompute (backward prop) but output unchanged
+    // FinalConsumer should NOT recompute
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(2), 100).await;
+    }
+
+    // Only 1 dirtied edge: Firewall -> Variable(2)
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    drop(tracked);
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&DiamondFinalConsumer).await;
+        // Same result since proj1(0) and proj1(1) didn't change
+        assert_eq!(result, 600);
+    }
+
+    // Firewall recomputed
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 2); // +1
+    // Both level-1 projections invoked via backward prop
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 4); // +2
+    // CombinerProjection NOT invoked - level-1 projections outputs unchanged!
+    assert_eq!(combiner_proj_ex.0.load(Ordering::SeqCst), 1); // unchanged!
+    // FinalConsumer NOT recomputed - CombinerProjection not invoked
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1); // unchanged!
+
+    // =========================================================================
+    // Test Case 3: Change Variable(0) which affects proj1(0)
+    // Variable(0)=50 -> proj1(0)=100, proj1(1)=4, Combiner=104, Consumer=10400
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 50).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&DiamondFinalConsumer).await;
+        assert_eq!(result, 10400);
+    }
+
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 3); // +1
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 6); // +2
+    assert_eq!(combiner_proj_ex.0.load(Ordering::SeqCst), 2); // +1 (proj1(0) changed)
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // +1 (combiner changed)
+
+    // =========================================================================
+    // Test Case 4: Change both Variable(0) and Variable(1) but preserve sum
+    // Variable(0)=52 -> proj1(0)=104, Variable(1)=0 -> proj1(1)=0
+    // Combiner=104 (same!), Consumer should NOT recompute
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 52).await;
+        input_session.set_input(Variable(1), 0).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&DiamondFinalConsumer).await;
+        // 52*2 + 0*2 = 104, 104 * 100 = 10400 (same!)
+        assert_eq!(result, 10400);
+    }
+
+    // Firewall recomputed
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 4); // +1
+    // Both level-1 projections recomputed (their inputs changed)
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 8); // +2
+    // CombinerProjection recomputed (proj1(0) changed: 100->104, proj1(1)
+    // changed: 4->0)
+    assert_eq!(combiner_proj_ex.0.load(Ordering::SeqCst), 3); // +1
+    // FinalConsumer NOT recomputed - CombinerProjection output unchanged (104)!
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged!
+
+    // =========================================================================
+    // Test Case 5: Query intermediate projections independently
+    // =========================================================================
+    {
+        let tracked = engine.clone().tracked().await;
+
+        let p0 = tracked.query(&ProjectionLevel1(0)).await;
+        assert_eq!(p0, 104); // 52 * 2
+
+        let p1 = tracked.query(&ProjectionLevel1(1)).await;
+        assert_eq!(p1, 0); // 0 * 2
+
+        let combiner = tracked.query(&DiamondCombinerProjection).await;
+        assert_eq!(combiner, 104); // 104 + 0
+    }
+
+    // No additional executions - everything cached
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 4); // unchanged
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 8); // unchanged
+    assert_eq!(combiner_proj_ex.0.load(Ordering::SeqCst), 3); // unchanged
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged
+}
+
+// ============================================================================
+// Test: Asymmetric Diamond Pattern with Uneven Projection Heights
+// ============================================================================
+//
+// Graph structure:
+//              SimpleFirewall
+//              /           \
+//             v             \
+//     ProjectionLevel1(0)    \
+//        (Projection)         \
+//             |                \
+//             v                 \
+//     DeepProjectionL2          \
+//        (Projection)            \
+//             |                   \
+//             v                    v
+//     DeepProjectionL3      ProjectionLevel1(1)
+//        (Projection)         (Projection)
+//              \                  /
+//               \                /
+//                v              v
+//           AsymmetricCombinerProjection (PROJECTION)
+//                       |
+//                       v
+//              AsymmetricFinalConsumer
+//
+// Left branch: Firewall -> L1 -> L2 -> L3 (3 levels of projections)
+// Right branch: Firewall -> L1 (1 level of projection)
+//
+// This tests that dirty propagation correctly handles asymmetric projection
+// chains where one branch is deeper than the other.
+
+/// Second level projection in the deep branch - adds 100.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DeepProjectionL2;
+
+impl Query for DeepProjectionL2 {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DeepProjectionL2Executor(pub AtomicUsize);
+
+impl<C: Config> Executor<DeepProjectionL2, C> for DeepProjectionL2Executor {
+    async fn execute(
+        &self,
+        _query: &DeepProjectionL2,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&ProjectionLevel1(0)).await;
+        val + 100
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Third level projection in the deep branch - squares the value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DeepProjectionL3;
+
+impl Query for DeepProjectionL3 {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DeepProjectionL3Executor(pub AtomicUsize);
+
+impl<C: Config> Executor<DeepProjectionL3, C> for DeepProjectionL3Executor {
+    async fn execute(
+        &self,
+        _query: &DeepProjectionL3,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&DeepProjectionL2).await;
+        // Take absolute value to enable unchanged output tests
+        val.abs()
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Asymmetric combiner - combines deep branch (L3) with shallow branch (L1).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct AsymmetricCombinerProjection;
+
+impl Query for AsymmetricCombinerProjection {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct AsymmetricCombinerProjectionExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<AsymmetricCombinerProjection, C>
+    for AsymmetricCombinerProjectionExecutor
+{
+    async fn execute(
+        &self,
+        _query: &AsymmetricCombinerProjection,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        // Deep branch (3 levels)
+        let deep = engine.query(&DeepProjectionL3).await;
+        // Shallow branch (1 level)
+        let shallow = engine.query(&ProjectionLevel1(1)).await;
+
+        deep + shallow
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Final consumer for the asymmetric pattern.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct AsymmetricFinalConsumer;
+
+impl Query for AsymmetricFinalConsumer {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct AsymmetricFinalConsumerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<AsymmetricFinalConsumer, C>
+    for AsymmetricFinalConsumerExecutor
+{
+    async fn execute(
+        &self,
+        _query: &AsymmetricFinalConsumer,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let combined = engine.query(&AsymmetricCombinerProjection).await;
+        combined * 10
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asymmetric_diamond_projection_pattern() {
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir).await;
+
+    let firewall_ex = Arc::new(SimpleFirewallExecutor::default());
+    let proj1_ex = Arc::new(ProjectionLevel1Executor::default());
+    let l2_ex = Arc::new(DeepProjectionL2Executor::default());
+    let l3_ex = Arc::new(DeepProjectionL3Executor::default());
+    let combiner_ex = Arc::new(AsymmetricCombinerProjectionExecutor::default());
+    let consumer_ex = Arc::new(AsymmetricFinalConsumerExecutor::default());
+
+    engine.register_executor(firewall_ex.clone());
+    engine.register_executor(proj1_ex.clone());
+    engine.register_executor(l2_ex.clone());
+    engine.register_executor(l3_ex.clone());
+    engine.register_executor(combiner_ex.clone());
+    engine.register_executor(consumer_ex.clone());
+
+    let engine = Arc::new(engine);
+
+    // Initialize variables
+    {
+        let mut input_session = engine.input_session().await;
+        for i in 0..100 {
+            input_session.set_input(Variable(i), i.cast_signed() + 1).await;
+        }
+    }
+
+    // =========================================================================
+    // Test Case 1: Initial query through the asymmetric diamond
+    // Variable(0)=1 -> L1(0)=2 -> L2=102 -> L3=102 (abs)
+    // Variable(1)=2 -> L1(1)=4
+    // Combiner=102+4=106, Consumer=1060
+    // =========================================================================
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AsymmetricFinalConsumer).await;
+        assert_eq!(result, 1060);
+    }
+
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 2); // L1(0) and L1(1)
+    assert_eq!(l2_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(l3_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
+
+    // =========================================================================
+    // Test Case 2: Change unrelated Variable(2)
+    // Firewall recomputes, L1(0) and L1(1) recompute via backward prop
+    // Outputs unchanged -> L2, L3, Combiner, Consumer NOT invoked
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(2), 100).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AsymmetricFinalConsumer).await;
+        assert_eq!(result, 1060); // Same
+    }
+
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 2); // +1
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 4); // +2 (backward prop)
+    // Deep branch NOT invoked - L1(0) output unchanged
+    assert_eq!(l2_ex.0.load(Ordering::SeqCst), 1); // unchanged
+    assert_eq!(l3_ex.0.load(Ordering::SeqCst), 1); // unchanged
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 1); // unchanged
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1); // unchanged
+
+    // =========================================================================
+    // Test Case 3: Change Variable(0) - affects deep branch only
+    // Variable(0)=5 -> L1(0)=10 -> L2=110 -> L3=110
+    // Variable(1)=2 -> L1(1)=4 (unchanged)
+    // Combiner=110+4=114, Consumer=1140
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AsymmetricFinalConsumer).await;
+        assert_eq!(result, 1140);
+    }
+
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 3); // +1
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 6); // +2 (backward prop)
+    assert_eq!(l2_ex.0.load(Ordering::SeqCst), 2); // +1 (L1(0) changed)
+    assert_eq!(l3_ex.0.load(Ordering::SeqCst), 2); // +1 (L2 changed)
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 2); // +1 (L3 changed)
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // +1 (combiner changed)
+
+    // =========================================================================
+    // Test Case 4: Change Variable(1) - affects shallow branch only
+    // IMPORTANT: Since L1(1) is only queried by Combiner (a projection),
+    // and L3 (combiner's other dependency) output didn't change,
+    // the Combiner won't be invoked via backward prop!
+    //
+    // This is the key asymmetric behavior: changes in the shallow branch
+    // don't automatically propagate because the combiner projection
+    // wasn't re-executed.
+    //
+    // Variable(0)=5 -> L1(0)=10 -> L2=110 -> L3=110 (same)
+    // Variable(1)=10 but L1(1) won't be queried again!
+    // Result stays: Combiner=114, Consumer=1140
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(1), 10).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AsymmetricFinalConsumer).await;
+        // L1(1) is NOT re-queried because Combiner wasn't invoked
+        // (its other dependency L3 didn't change)
+        // The firewall also doesn't recompute because the query path
+        // (through L1(0)) doesn't touch Variable(1)
+        assert_eq!(result, 1140); // SAME as before!
+    }
+
+    // Firewall NOT recomputed - the query path through L3->L2->L1(0) doesn't
+    // trigger recomputation because Variable(0) hasn't changed
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 3); // unchanged!
+    // proj1 unchanged - L1(0) was not re-invoked
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 6); // unchanged!
+    // Deep branch unchanged - nothing triggered recomputation
+    assert_eq!(l2_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    assert_eq!(l3_ex.0.load(Ordering::SeqCst), 2); // unchanged
+    // Combiner NOT invoked - L3 output unchanged!
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 2); // unchanged!
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged!
+
+    // =========================================================================
+    // Test Case 5: Now change Variable(0) so L3 changes - this will trigger
+    // Combiner to re-execute and pick up the NEW L1(1) value
+    // Variable(0)=10 -> L1(0)=20 -> L2=120 -> L3=120
+    // L1(1) will be re-queried now: 10*2=20
+    // Combiner=120+20=140, Consumer=1400
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AsymmetricFinalConsumer).await;
+        assert_eq!(result, 1400);
+    }
+
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 4); // +1
+    // L1(0) invoked via backward prop, L1(1) when Combiner executes
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 8); // +2
+    assert_eq!(l2_ex.0.load(Ordering::SeqCst), 3); // +1 (L1(0) changed)
+    assert_eq!(l3_ex.0.load(Ordering::SeqCst), 3); // +1 (L2 changed)
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 3); // +1 (L3 changed)
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // +1 (combiner changed)
+
+    // =========================================================================
+    // Test Case 6: Change Variable(0) to negative - L3 uses abs() so output
+    // stays same
+    // Current: L1(0)=20 -> L2=120 -> L3=120
+    // Need |L2|=120, so L2=120 or L2=-120
+    // L2 = L1(0)+100, so L1(0)=20 or L1(0)=-220
+    // L1(0) = Variable(0)*2, so Variable(0)=10 or Variable(0)=-110
+    // If Variable(0)=-110: L1(0)=-220 -> L2=-120 -> L3=|-120|=120 (same!)
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -110).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&AsymmetricFinalConsumer).await;
+        // L1(0)=-220 -> L2=-120 -> L3=120 (same as before!)
+        // L1(1)=20 (not re-queried since combiner not invoked)
+        // Combiner NOT invoked because L3 unchanged
+        // Result stays: 140*10=1400
+        assert_eq!(result, 1400);
+    }
+
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 5); // +1
+    // Both L1(0) and L1(1) invoked via backward prop from firewall
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 10); // +2
+    // Deep branch recomputes through L2, but L3 output unchanged
+    assert_eq!(l2_ex.0.load(Ordering::SeqCst), 4); // +1 (L1(0) changed)
+    assert_eq!(l3_ex.0.load(Ordering::SeqCst), 4); // +1 (L2 changed)
+    // Combiner NOT invoked - L3 output unchanged, L1(1) unchanged
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 3); // unchanged!
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // unchanged!
+
+    // =========================================================================
+    // Test Case 7: Query intermediate projections to verify values
+    // =========================================================================
+    {
+        let tracked = engine.clone().tracked().await;
+
+        let l1_0 = tracked.query(&ProjectionLevel1(0)).await;
+        assert_eq!(l1_0, -220); // -110 * 2
+
+        let l1_1 = tracked.query(&ProjectionLevel1(1)).await;
+        assert_eq!(l1_1, 20); // 10 * 2 (from test case 5)
+
+        let l2 = tracked.query(&DeepProjectionL2).await;
+        assert_eq!(l2, -120); // -220 + 100
+
+        let l3 = tracked.query(&DeepProjectionL3).await;
+        assert_eq!(l3, 120); // |-120|
+
+        let combiner = tracked.query(&AsymmetricCombinerProjection).await;
+        assert_eq!(combiner, 140); // 120 + 20
+    }
+
+    // No additional executions - everything cached
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 5); // unchanged
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 10); // unchanged
+    assert_eq!(l2_ex.0.load(Ordering::SeqCst), 4); // unchanged
+    assert_eq!(l3_ex.0.load(Ordering::SeqCst), 4); // unchanged
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 3); // unchanged
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // unchanged
+}
+
+// ============================================================================
 // Test: No-Change Firewall Propagation
 // ============================================================================
 //
