@@ -3,10 +3,7 @@ use std::{
     thread,
 };
 
-use crossbeam::{
-    deque::{Injector, Stealer, Worker},
-    utils::Backoff,
-};
+use crossbeam::deque::{Injector, Stealer, Worker};
 use dashmap::DashSet;
 use parking_lot::RwLock;
 use tokio::sync::{Mutex, Notify};
@@ -141,7 +138,6 @@ impl<C: Config> DirtyWorker<C> {
         statistic: &Weak<Statistic>,
         dirtied_queries: &Weak<DashSet<QueryID, C::BuildHasher>>,
     ) {
-        let backoff = Backoff::new();
         loop {
             // Drain all available work before parking.
             let mut count = 0;
@@ -155,9 +151,6 @@ impl<C: Config> DirtyWorker<C> {
                     dirtied_queries,
                 )
                 .await;
-
-                // work was found, reset backoff
-                backoff.reset();
 
                 // every 32 tasks, yield to allow other tasks to run
                 count += 1;
@@ -175,16 +168,8 @@ impl<C: Config> DirtyWorker<C> {
 
             // IMPORTANT: has to hold the lock until we have acquired
             // notified
-            let mut notified = std::pin::pin!(if backoff.is_completed() {
-                Some(notify.notified())
-            } else {
-                None
-            });
-
-            // add to the waiting list first
-            if let Some(notified) = notified.as_mut().as_pin_mut() {
-                notified.enable();
-            }
+            let mut notified = std::pin::pin!(notify.notified());
+            notified.as_mut().enable();
 
             drop(shutdown_guard);
 
@@ -205,17 +190,7 @@ impl<C: Config> DirtyWorker<C> {
                 continue;
             }
 
-            match notified.as_pin_mut() {
-                Some(notified) => {
-                    // Backoff is complete, park until notified.
-                    notified.await;
-                    backoff.reset();
-                }
-                None => {
-                    // Backoff is not complete, spin-wait.
-                    backoff.snooze();
-                }
-            }
+            notified.await;
         }
     }
 
@@ -236,10 +211,19 @@ impl<C: Config> DirtyWorker<C> {
         }
 
         let query_id = *task.query_id();
+        let mut counter = 0;
+        let mut pushed = false;
 
         for caller in
             unsafe { database.get_backward_edges_unchecked(&query_id).await }
         {
+            counter += 1;
+            // every 16 edges, yield to allow other tasks to run
+            if counter >= 16 {
+                counter = 0;
+                tokio::task::yield_now().await;
+            }
+
             {
                 // opportunisitically try to use the write transaction
                 if let Some(mut write_tx) = task.try_load_write_tx() {
@@ -279,7 +263,11 @@ impl<C: Config> DirtyWorker<C> {
             }
 
             injector.push(task.propagate_to(caller));
-            notify.notify_one();
+
+            if !pushed {
+                notify.notify_one();
+                pushed = true;
+            }
         }
 
         drop(task);
