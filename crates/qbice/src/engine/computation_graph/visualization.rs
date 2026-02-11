@@ -124,6 +124,16 @@ struct NodeInfo {
     pub result: String,
 }
 
+/// The kind of edge in the dependency graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeKind {
+    /// A regular dependency edge from caller to callee.
+    Dependency,
+    /// A transitive firewall callee (TFC) edge.
+    /// These edges represent the transitive closure of firewall dependencies.
+    TransitiveFirewall,
+}
+
 /// Information about an edge in the dependency graph visualization.
 ///
 /// Edges represent dependencies between queries (caller depends on callee).
@@ -138,6 +148,8 @@ struct EdgeInfo {
     /// - `Some(false)`: The edge is clean
     /// - `None`: Dirty status unknown
     pub is_dirty: Option<bool>,
+    /// The kind of edge (regular dependency vs transitive firewall).
+    pub kind: EdgeKind,
 }
 
 /// A snapshot of the dependency graph for visualization.
@@ -222,8 +234,12 @@ impl<C: Config> Engine<C> {
             }
 
             // Get the query meta
-            let (Some(kind), Some(forward_edge)) =
-                self.get_node_snapshot_for_graph(&current_id).await
+            let (Some(kind), Some(forward_edge), transitive_firewall_callees) =
+                self.get_node_snapshot_for_graph(
+                    &current_id,
+                    root_id == current_id,
+                )
+                .await
             else {
                 continue;
             };
@@ -268,11 +284,27 @@ impl<C: Config> Engine<C> {
                     source: current_id,
                     target: edge,
                     is_dirty: Some(self.is_edge_dirty(current_id, edge).await),
+                    kind: EdgeKind::Dependency,
                 });
 
                 if !visited.contains(&edge) {
                     queue.push_back(edge);
                 }
+            }
+
+            // Get transitive firewall callees (TFC) edges
+            // SAFETY: We're in a tracing context with the CallerInformation
+            // guard
+            for tfc in transitive_firewall_callees
+                .iter()
+                .flat_map(|x| x.iter().copied())
+            {
+                edges.push(EdgeInfo {
+                    source: current_id,
+                    target: tfc,
+                    is_dirty: None, // TFC edges don't have dirty status
+                    kind: EdgeKind::TransitiveFirewall,
+                });
             }
         }
 
@@ -448,8 +480,13 @@ fn generate_edges_json(edges: &[EdgeInfo]) -> String {
         let source_str = query_id_to_string(&edge.source);
         let target_str = query_id_to_string(&edge.target);
 
-        // Determine edge class based on dirty status
-        let edge_class = match edge.is_dirty {
+        // Determine edge classes based on kind and dirty status
+        let kind_class = match edge.kind {
+            EdgeKind::Dependency => "dependency",
+            EdgeKind::TransitiveFirewall => "tfc",
+        };
+
+        let dirty_class = match edge.is_dirty {
             Some(true) => "dirty",
             Some(false) => "clean",
             None => "unknown",
@@ -457,7 +494,7 @@ fn generate_edges_json(edges: &[EdgeInfo]) -> String {
 
         write!(
             &mut result,
-            r"{{ data: {{ source: '{source_str}', target: '{target_str}' }}, classes: '{edge_class}' }}"
+            r"{{ data: {{ source: '{source_str}', target: '{target_str}' }}, classes: '{kind_class} {dirty_class}' }}"
         )
         .unwrap();
     }
@@ -558,6 +595,7 @@ fn generate_html(snapshot: &GraphSnapshot) -> String {
         .legend-clean {{ background: #4ecdc4; }}
         .legend-dirty {{ background: #e94560; background: repeating-linear-gradient(90deg, #e94560, #e94560 5px, transparent 5px, transparent 10px); height: 3px; }}
         .legend-unknown {{ background: repeating-linear-gradient(90deg, #888, #888 3px, transparent 3px, transparent 6px); height: 3px; }}
+        .legend-tfc {{ background: #ff9f43; height: 3px; border-style: none; }}
         .layout-buttons {{ display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 15px; }}
     </style>
 </head>
@@ -611,10 +649,12 @@ fn generate_html(snapshot: &GraphSnapshot) -> String {
                 <h2>Legend</h2>
                 <div class="legend-item"><div class="legend-color legend-input"></div><span>Input Query</span></div>
                 <div class="legend-item"><div class="legend-color legend-computed"></div><span>Computed Query</span></div>
-                <h3 style="margin-top: 15px; font-size: 0.9rem; color: #e94560;">Edges</h3>
+                <h3 style="margin-top: 15px; font-size: 0.9rem; color: #e94560;">Dependency Edges</h3>
                 <div class="legend-item"><div class="legend-line legend-clean"></div><span>Clean (validated)</span></div>
                 <div class="legend-item"><div class="legend-line legend-dirty"></div><span>Dirty (needs revalidation)</span></div>
                 <div class="legend-item"><div class="legend-line legend-unknown"></div><span>Unknown</span></div>
+                <h3 style="margin-top: 15px; font-size: 0.9rem; color: #ff9f43;">Transitive Firewall Edges</h3>
+                <div class="legend-item"><div class="legend-line legend-tfc"></div><span>TFC (Transitive Firewall Callee)</span></div>
             </div>
         </div>
     </div>
@@ -640,6 +680,7 @@ fn generate_html(snapshot: &GraphSnapshot) -> String {
                 {{ selector: 'edge.clean', style: {{ 'line-color': '#4ecdc4', 'target-arrow-color': '#4ecdc4' }} }},
                 {{ selector: 'edge.dirty', style: {{ 'line-color': '#e94560', 'target-arrow-color': '#e94560', 'line-style': 'dashed' }} }},
                 {{ selector: 'edge.unknown', style: {{ 'line-color': '#888', 'target-arrow-color': '#888', 'line-style': 'dotted' }} }},
+                {{ selector: 'edge.tfc', style: {{ 'line-color': '#ff9f43', 'target-arrow-color': '#ff9f43', 'width': 1.5, 'opacity': 0.6, 'curve-style': 'unbundled-bezier', 'control-point-distances': [40], 'control-point-weights': [0.5] }} }},
                 {{ selector: 'node:selected', style: {{ 'border-width': 4, 'border-color': '#ff6b6b' }} }},
                 {{ selector: 'node.highlighted', style: {{ 'background-color': '#ffd93d', 'border-color': '#ffec8b' }} }},
                 {{ selector: 'node.dependency', style: {{ 'background-color': '#ff6b6b', 'border-color': '#ff8c8c' }} }},

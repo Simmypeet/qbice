@@ -472,8 +472,13 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         caller: &CallerInformation,
     ) {
-        let snapshot =
+        let mut snapshot =
             self.get_read_snapshot::<Q>(query.id.compact_hash_128()).await;
+
+        // can't repair if haven't computed before
+        if snapshot.last_verified().await.is_none() {
+            return;
+        }
 
         snapshot.repair_transitive_firewall_callees(caller).await;
     }

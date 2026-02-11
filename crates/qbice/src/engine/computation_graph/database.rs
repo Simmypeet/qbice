@@ -688,7 +688,12 @@ impl<C: Config> Engine<C> {
     pub(crate) async fn get_node_snapshot_for_graph(
         &self,
         query_id: &QueryID,
-    ) -> (Option<QueryKind>, Option<ForwardEdgeOrder>) {
+        include_tfc: bool,
+    ) -> (
+        Option<QueryKind>,
+        Option<ForwardEdgeOrder>,
+        Option<Interned<TransitiveFirewallCallees>>,
+    ) {
         let node_info =
             self.computation_graph.database.query_kind.get(query_id).await;
         let forward_edge_order = self
@@ -698,7 +703,21 @@ impl<C: Config> Engine<C> {
             .get(query_id)
             .await;
 
-        (node_info, forward_edge_order)
+        let transitive_firewall_callees = if include_tfc
+            || node_info.is_some_and(|x| {
+                x == QueryKind::Executable(ExecutionStyle::Firewall)
+            }) {
+            self.computation_graph
+                .database
+                .node_info
+                .get(query_id)
+                .await
+                .map(|x| x.transitive_firewall_callees)
+        } else {
+            None
+        };
+
+        (node_info, forward_edge_order, transitive_firewall_callees)
     }
 }
 
@@ -718,12 +737,14 @@ impl<C: Config> Engine<C> {
                 .database
                 .query_store
                 .get::<QueryInput<Q>>(&query_id)
-                .await,
+                .await
+                .map(|x| x.0),
             self.computation_graph
                 .database
                 .query_store
                 .get::<QueryResult<Q>>(&query_id)
-                .await,
+                .await
+                .map(|x| x.0),
         ) else {
             return None;
         };
