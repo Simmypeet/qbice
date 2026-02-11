@@ -7,6 +7,7 @@ use std::{
 use fxhash::FxHashSet;
 use qbice_stable_hash::Compact128;
 use tokio::task::JoinSet;
+use tracing::instrument;
 
 use super::database::{ForwardEdgeObservation, NodeDependency};
 use crate::{
@@ -56,6 +57,12 @@ pub enum ChunkedCalleeCheckDecision {
 }
 
 impl<C: Config, Q: Query> Snapshot<C, Q> {
+    #[instrument(
+        skip(self, caller_information, lock_guard),
+        level = "info",
+        name = "repair_query",
+        target = "qbice"
+    )]
     pub(super) async fn repair_query(
         self,
         query: &Q,
@@ -256,7 +263,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                             &CallerInformation::new(
                                 CallerKind::RepairFirewall {
                                     // if current query is projection, then
-                                    // repairing the firewalls should not invoke
+                                    // repairing the firewalls should not
+                                    // invoke
                                     // backward projection, since it will
                                     // immediately request this query again,
                                     // causing

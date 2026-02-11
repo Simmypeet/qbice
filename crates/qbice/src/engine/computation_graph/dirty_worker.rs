@@ -10,6 +10,7 @@ use crossbeam::{
 use dashmap::DashSet;
 use parking_lot::RwLock;
 use tokio::sync::{Mutex, Notify};
+use tracing::instrument;
 
 use crate::{
     Engine, ExecutionStyle,
@@ -293,6 +294,12 @@ impl<C: Config> Drop for DirtyWorker<C> {
 }
 
 impl<C: Config> Engine<C> {
+    #[instrument(
+        skip(self, query_id, trasnaction),
+        level = "info",
+        name = "dirty_propagation",
+        target = "qbice"
+    )]
     pub(super) async fn dirty_propagate_from_batch(
         self: &Arc<Self>,
         query_id: impl IntoIterator<Item = QueryID>,

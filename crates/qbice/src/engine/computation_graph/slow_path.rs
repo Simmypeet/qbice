@@ -58,6 +58,12 @@ impl<C: Config> Drop for GuardedTrackedEngine<C> {
 
 impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[allow(clippy::too_many_lines)]
+    #[instrument(
+        skip(self, execute_query_for, caller_information, lock_guard),
+        level = "info",
+        name = "execute_query",
+        target = "qbice"
+    )]
     pub(super) async fn execute_query(
         mut self,
         query: &Q,
@@ -196,7 +202,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 }
 
 impl<C: Config, Q: Query> Snapshot<C, Q> {
-    #[instrument(skip(self, caller_information, lock_guard), level = "info")]
+    #[instrument(
+        skip(self, caller_information, lock_guard),
+        level = "info",
+        target = "qbice"
+    )]
     pub async fn process_query(
         self,
         query: &Q,

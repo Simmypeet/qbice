@@ -1,6 +1,7 @@
 use std::thread::available_parallelism;
 
 use tokio::task::JoinSet;
+use tracing::instrument;
 
 use crate::{
     Query,
@@ -12,6 +13,13 @@ use crate::{
 };
 
 impl<C: Config, Q: Query> Snapshot<C, Q> {
+    #[instrument(
+        skip(self, caller_information, backward_projection_lock_guard),
+        level = "info",
+        fields(
+            type = std::any::type_name::<Q>(),
+        )
+    )]
     pub(super) async fn invoke_backward_projections(
         self,
         caller_information: &CallerInformation,
