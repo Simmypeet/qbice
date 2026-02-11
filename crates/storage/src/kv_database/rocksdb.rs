@@ -14,8 +14,8 @@ use qbice_serialize::{
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 use rust_rocksdb::{
     BlockBasedOptions, BoundColumnFamily, ColumnFamilyDescriptor,
-    DBCompactionStyle, DBWithThreadMode, DataBlockIndexType, IteratorMode,
-    MultiThreaded, Options, SliceTransform,
+    DBCompactionStyle, DBCompressionType, DBWithThreadMode, DataBlockIndexType,
+    IteratorMode, MultiThreaded, Options, SliceTransform,
 };
 
 use crate::{
@@ -55,7 +55,6 @@ enum ColumnKind {
 #[derive(Debug, Clone)]
 pub struct RocksDB(Arc<Impl>);
 
-#[derive(Debug)]
 struct Impl {
     /// The underlying `RocksDB` instance.
     db: DBWithThreadMode<MultiThreaded>,
@@ -67,6 +66,16 @@ struct Impl {
     ///
     /// This is used to avoid repeated lookups for the same column family.
     column_families: DashMap<StableTypeID, String>,
+}
+
+impl std::fmt::Debug for Impl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Impl")
+            .field("db", &"<DBWithThreadMode>")
+            .field("plugin", &self.plugin)
+            .field("column_families", &self.column_families)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Factory for creating [`RocksDB`] instances.
@@ -94,6 +103,10 @@ fn configure_rocksdb_for_small_kv_high_writes() -> Options {
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
     opts.set_atomic_flush(true);
+    opts.set_compression_type(DBCompressionType::Lz4);
+
+    // Shared Memtable Budget (e.g., 512MB total for all CFs)
+    opts.set_db_write_buffer_size(512 * 1024 * 1024);
 
     opts
 }
@@ -329,9 +342,28 @@ impl Impl {
         }
     }
 
+    fn apply_optimized_opts(opts: &mut Options) {
+        // 1. Switch to LZ4 (Faster decompression)
+        opts.set_compression_type(DBCompressionType::Lz4);
+
+        // 2. Disable compression for L0 and L1 to save CPU on hot data Levels
+        //    2+ use LZ4.
+        opts.set_compression_per_level(&[
+            DBCompressionType::None, // L0
+            DBCompressionType::None, // L1
+            DBCompressionType::Lz4,  // L2
+            DBCompressionType::Lz4,  // L3
+            DBCompressionType::Lz4,  // L4
+            DBCompressionType::Lz4,  // L5
+            DBCompressionType::Lz4,  // L6
+        ]);
+    }
+
     fn get_point_lookup_options() -> Options {
         let mut opts = Options::default();
         opts.set_compaction_style(DBCompactionStyle::Level);
+
+        Self::apply_optimized_opts(&mut opts);
 
         // Low latency block settings
         let mut table_opts = BlockBasedOptions::default();
@@ -355,6 +387,8 @@ impl Impl {
     fn get_key_of_set_options() -> Options {
         let mut opts = Options::default();
         opts.set_compaction_style(DBCompactionStyle::Level);
+
+        Self::apply_optimized_opts(&mut opts);
 
         let mut table_opts = BlockBasedOptions::default();
 
