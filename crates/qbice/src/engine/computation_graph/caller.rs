@@ -112,7 +112,7 @@ impl CallerInformation {
 
     pub const fn get_wait_group(&mut self) -> Option<WaitGroup> {
         match &mut self.kind {
-            CallerKind::RepairFirewall
+            CallerKind::RepairFirewall { .. }
             | CallerKind::BackwardProjectionPropagation
             | CallerKind::Tracing
             | CallerKind::User => None,
@@ -126,7 +126,7 @@ impl CallerInformation {
 
     pub const fn get_query_caller(&self) -> Option<&QueryCaller> {
         match &self.kind {
-            CallerKind::RepairFirewall
+            CallerKind::RepairFirewall { .. }
             | CallerKind::BackwardProjectionPropagation
             | CallerKind::Tracing
             | CallerKind::User => None,
@@ -137,7 +137,7 @@ impl CallerInformation {
 
     pub const fn get_caller(&self) -> Option<&QueryID> {
         match &self.kind {
-            CallerKind::RepairFirewall
+            CallerKind::RepairFirewall { .. }
             | CallerKind::BackwardProjectionPropagation
             | CallerKind::Tracing
             | CallerKind::User => None,
@@ -148,7 +148,7 @@ impl CallerInformation {
 
     pub const fn require_value(&self) -> bool {
         match &self.kind {
-            CallerKind::RepairFirewall
+            CallerKind::RepairFirewall { .. }
             | CallerKind::BackwardProjectionPropagation
             | CallerKind::Tracing => false,
 
@@ -184,5 +184,7 @@ pub enum CallerKind {
     /// ```
     BackwardProjectionPropagation,
 
-    RepairFirewall,
+    RepairFirewall {
+        invoke_backward_projection: bool,
+    },
 }

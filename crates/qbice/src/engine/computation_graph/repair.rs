@@ -109,7 +109,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         // decision by propagating dirtiness.
         if matches!(
             caller_information.kind(),
-            CallerKind::User | CallerKind::RepairFirewall
+            CallerKind::User | CallerKind::RepairFirewall { .. }
         ) {
             self.repair_transitive_firewall_callees(caller_information).await;
         }
@@ -227,6 +227,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         caller_information: &CallerInformation,
     ) {
         let node_info = self.node_info().await.unwrap();
+        let is_current_query_projection =
+            self.query_kind().await.unwrap().is_projection();
 
         let tfcs = node_info.transitive_firewall_callees();
         let tfcs = tfcs.iter().copied().collect::<Vec<_>>();
@@ -259,7 +261,17 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                             &engine,
                             &tfc.compact_hash_128(),
                             &CallerInformation::new(
-                                CallerKind::RepairFirewall,
+                                CallerKind::RepairFirewall {
+                                    // if current query is projection, then
+                                    // repairing the firewalls should not
+                                    // invoke
+                                    // backward projection, since it will
+                                    // immediately request this query again,
+                                    // causing
+                                    // deadlock.
+                                    invoke_backward_projection:
+                                        !is_current_query_projection,
+                                },
                                 timestamp,
                                 active_computation_guard.clone(),
                             ),
