@@ -3084,24 +3084,12 @@ impl<C: Config> Executor<DiamondProjectionC, C> for DiamondProjectionCExecutor {
         _query: &DiamondProjectionC,
         engine: &TrackedEngine<C>,
     ) -> i64 {
-        let count = self.0.fetch_add(1, Ordering::SeqCst);
-        println!("[DiamondProjectionC] START execution #{}", count + 1);
+        self.0.fetch_add(1, Ordering::SeqCst);
 
-        println!("[DiamondProjectionC] querying DiamondProjectionA...");
         let proj_a = engine.query(&DiamondProjectionA).await;
-        println!("[DiamondProjectionC] got DiamondProjectionA={}", proj_a);
-
-        println!("[DiamondProjectionC] querying DiamondFirewallB...");
         let firewall_b = engine.query(&DiamondFirewallB).await;
-        println!("[DiamondProjectionC] got DiamondFirewallB={}", firewall_b);
 
-        let result = proj_a + firewall_b;
-        println!(
-            "[DiamondProjectionC] END execution #{}, result={}",
-            count + 1,
-            result
-        );
-        result
+        proj_a + firewall_b
     }
 
     fn execution_style() -> qbice::ExecutionStyle {
@@ -3157,182 +3145,587 @@ impl<C: Config> Executor<DiamondMixedConsumer, C>
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::similar_names)]
 async fn diamond_mixed_projection_firewall() {
-    // Wrap entire test in a timeout to detect deadlocks
-    let test_future = async {
-        let tempdir = tempdir().unwrap();
-        let mut engine = create_test_engine(&tempdir).await;
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir).await;
 
-        let top_firewall_ex = Arc::new(DiamondTopFirewallExecutor::default());
-        let proj_a_ex = Arc::new(DiamondProjectionAExecutor::default());
-        let firewall_b_ex = Arc::new(DiamondFirewallBExecutor::default());
-        let proj_c_ex = Arc::new(DiamondProjectionCExecutor::default());
-        let consumer_ex = Arc::new(DiamondMixedConsumerExecutor::default());
+    let top_firewall_ex = Arc::new(DiamondTopFirewallExecutor::default());
+    let proj_a_ex = Arc::new(DiamondProjectionAExecutor::default());
+    let firewall_b_ex = Arc::new(DiamondFirewallBExecutor::default());
+    let proj_c_ex = Arc::new(DiamondProjectionCExecutor::default());
+    let consumer_ex = Arc::new(DiamondMixedConsumerExecutor::default());
 
-        engine.register_executor(top_firewall_ex.clone());
-        engine.register_executor(proj_a_ex.clone());
-        engine.register_executor(firewall_b_ex.clone());
-        engine.register_executor(proj_c_ex.clone());
-        engine.register_executor(consumer_ex.clone());
+    engine.register_executor(top_firewall_ex.clone());
+    engine.register_executor(proj_a_ex.clone());
+    engine.register_executor(firewall_b_ex.clone());
+    engine.register_executor(proj_c_ex.clone());
+    engine.register_executor(consumer_ex.clone());
 
-        let engine = Arc::new(engine);
+    let engine = Arc::new(engine);
 
-        // =========================================================================
-        // Test Case 1: Initial query
-        // Variable(0)=5 -> TopFirewall=10 -> ProjectionA=20, FirewallB=30
-        // -> ProjectionC=50 -> Consumer=250
-        // =========================================================================
-        println!("=== Test Case 1: Initial query ===");
-        {
-            let mut input_session = engine.input_session().await;
-            input_session.set_input(Variable(0), 5_i64).await;
-        }
-        println!("Input set, now querying...");
+    // =========================================================================
+    // Test Case 1: Initial query
+    // Variable(0)=5 -> TopFirewall=10 -> ProjectionA=20, FirewallB=30
+    // -> ProjectionC=50 -> Consumer=250
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5_i64).await;
+    }
 
-        {
-            let tracked = engine.clone().tracked().await;
-            println!(
-                "Got tracked engine, now querying DiamondMixedConsumer..."
-            );
-            let result = tracked.query(&DiamondMixedConsumer).await;
-            // TopFirewall: 5*2=10
-            // ProjectionA: 10+10=20
-            // FirewallB: 10*3=30
-            // ProjectionC: 20+30=50
-            // Consumer: 50*5=250
-            assert_eq!(result, 250);
-            println!("Initial query result: {}", result);
-        }
-
-        // Verify initial execution counts - each executor should run once
-        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 1);
-        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 1);
-        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 1);
-        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 1);
-        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
-
-        // =========================================================================
-        // Test Case 2: Change Variable(0) - all should recompute
-        // Variable(0)=10 -> TopFirewall=20 -> ProjectionA=30, FirewallB=60
-        // -> ProjectionC=90 -> Consumer=450
-        // =========================================================================
-        {
-            let mut input_session = engine.input_session().await;
-            input_session.set_input(Variable(0), 10_i64).await;
-        }
-
-        // Should have 1 dirtied edge: TopFirewall -> Variable(0)
+    {
         let tracked = engine.clone().tracked().await;
-        assert_eq!(tracked.get_dirtied_edges_count(), 1);
-        drop(tracked);
+        println!("Got tracked engine, now querying DiamondMixedConsumer...");
+        let result = tracked.query(&DiamondMixedConsumer).await;
+        // TopFirewall: 5*2=10
+        // ProjectionA: 10+10=20
+        // FirewallB: 10*3=30
+        // ProjectionC: 20+30=50
+        // Consumer: 50*5=250
+        assert_eq!(result, 250);
+    }
 
-        {
-            let tracked = engine.clone().tracked().await;
-            let result = tracked.query(&DiamondMixedConsumer).await;
-            // TopFirewall: 10*2=20
-            // ProjectionA: 20+10=30
-            // FirewallB: 20*3=60
-            // ProjectionC: 30+60=90
-            // Consumer: 90*5=450
-            assert_eq!(result, 450);
-            println!("Second query result: {}", result);
-        }
+    // Verify initial execution counts - each executor should run once
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
 
-        // All executors should have run once more:
-        // - TopFirewall recomputes (input changed)
-        // - ProjectionA recomputes (TopFirewall changed, backward propagation)
-        // - FirewallB recomputes (TopFirewall changed)
-        // - ProjectionC recomputes (both ProjectionA and FirewallB changed)
-        // - Consumer recomputes (ProjectionC changed)
-        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+    // =========================================================================
+    // Test Case 2: Change Variable(0) - all should recompute
+    // Variable(0)=10 -> TopFirewall=20 -> ProjectionA=30, FirewallB=60
+    // -> ProjectionC=90 -> Consumer=450
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await;
+    }
 
-        // =========================================================================
-        // Test Case 3: Query same value - no recomputation
-        // =========================================================================
-        {
-            let mut input_session = engine.input_session().await;
-            input_session.set_input(Variable(0), 10_i64).await;
-        }
+    // Should have 1 dirtied edge: TopFirewall -> Variable(0)
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    drop(tracked);
 
-        // 0 dirtied edges since value didn't change
+    {
         let tracked = engine.clone().tracked().await;
-        assert_eq!(tracked.get_dirtied_edges_count(), 0);
-        drop(tracked);
+        let result = tracked.query(&DiamondMixedConsumer).await;
+        // TopFirewall: 10*2=20
+        // ProjectionA: 20+10=30
+        // FirewallB: 20*3=60
+        // ProjectionC: 30+60=90
+        // Consumer: 90*5=450
+        assert_eq!(result, 450);
+    }
 
-        {
-            let tracked = engine.clone().tracked().await;
-            let result = tracked.query(&DiamondMixedConsumer).await;
-            assert_eq!(result, 450);
-        }
+    // All executors should have run once more:
+    // - TopFirewall recomputes (input changed)
+    // - ProjectionA recomputes (TopFirewall changed, backward propagation)
+    // - FirewallB recomputes (TopFirewall changed)
+    // - ProjectionC recomputes (both ProjectionA and FirewallB changed)
+    // - Consumer recomputes (ProjectionC changed)
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
 
-        // No additional executions
-        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+    // =========================================================================
+    // Test Case 3: Query same value - no recomputation
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await;
+    }
 
-        // =========================================================================
-        // Test Case 4: Query intermediate queries independently
-        // =========================================================================
-        {
-            let tracked = engine.clone().tracked().await;
+    // 0 dirtied edges since value didn't change
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 0);
+    drop(tracked);
 
-            let top_result = tracked.query(&DiamondTopFirewall).await;
-            assert_eq!(top_result, 20);
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&DiamondMixedConsumer).await;
+        assert_eq!(result, 450);
+    }
 
-            let proj_a_result = tracked.query(&DiamondProjectionA).await;
-            assert_eq!(proj_a_result, 30);
+    // No additional executions
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
 
-            let firewall_b_result = tracked.query(&DiamondFirewallB).await;
-            assert_eq!(firewall_b_result, 60);
+    // =========================================================================
+    // Test Case 4: Query intermediate queries independently
+    // =========================================================================
+    {
+        let tracked = engine.clone().tracked().await;
 
-            let proj_c_result = tracked.query(&DiamondProjectionC).await;
-            assert_eq!(proj_c_result, 90);
-        }
+        let top_result = tracked.query(&DiamondTopFirewall).await;
+        assert_eq!(top_result, 20);
 
-        // No additional executions should occur since everything is cached
-        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
-        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+        let proj_a_result = tracked.query(&DiamondProjectionA).await;
+        assert_eq!(proj_a_result, 30);
 
-        // =========================================================================
-        // Test Case 5: Test unchanged output propagation
-        // Change Variable(0) to -10 (TopFirewall produces 20*-1=-20)
-        // This changes outputs throughout the chain
-        // =========================================================================
-        {
-            let mut input_session = engine.input_session().await;
-            input_session.set_input(Variable(0), -10_i64).await;
-        }
+        let firewall_b_result = tracked.query(&DiamondFirewallB).await;
+        assert_eq!(firewall_b_result, 60);
 
-        {
-            let tracked = engine.clone().tracked().await;
-            let result = tracked.query(&DiamondMixedConsumer).await;
-            // TopFirewall: -10*2=-20
-            // ProjectionA: -20+10=-10
-            // FirewallB: -20*3=-60
-            // ProjectionC: -10+(-60)=-70
-            // Consumer: -70*5=-350
-            assert_eq!(result, -350);
-        }
+        let proj_c_result = tracked.query(&DiamondProjectionC).await;
+        assert_eq!(proj_c_result, 90);
+    }
 
-        // All should recompute since values changed
-        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 3);
-        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 3);
-        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 3);
-        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 3);
-        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3);
-    };
+    // No additional executions should occur since everything is cached
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
 
-    // 10 second timeout to detect deadlocks
-    tokio::time::timeout(std::time::Duration::from_secs(10), test_future)
-        .await
-        .expect("Test timed out after 10 seconds - likely a deadlock!");
+    // =========================================================================
+    // Test Case 5: Test unchanged output propagation
+    // Change Variable(0) to -10 (TopFirewall produces 20*-1=-20)
+    // This changes outputs throughout the chain
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -10_i64).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&DiamondMixedConsumer).await;
+        // TopFirewall: -10*2=-20
+        // ProjectionA: -20+10=-10
+        // FirewallB: -20*3=-60
+        // ProjectionC: -10+(-60)=-70
+        // Consumer: -70*5=-350
+        assert_eq!(result, -350);
+    }
+
+    // All should recompute since values changed
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 3);
+    assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 3);
+    assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 3);
+    assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 3);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3);
+}
+
+// ============================================================================
+// Test: Diamond Pattern with Firewall-Projection-Firewall Sandwich
+// ============================================================================
+//
+// Graph structure:
+//              Variable(0)
+//                  |
+//                  v
+//         FirewallTop (doubles value)
+//              /       \
+//             v         v
+//    LeftProjection  RightProjection
+//    (adds 10)       (triples value)
+//             \       /
+//              v     v
+//         FirewallCombiner (sums both)
+//                  |
+//                  v
+//         SandwichConsumer
+//
+// This tests a diamond pattern where:
+// - Top is a Firewall
+// - Both middle branches are Projections
+// - Bottom combiner is also a Firewall
+//
+// This is an interesting pattern to test how dirty propagation works when
+// projections are sandwiched between two firewalls.
+
+/// Top firewall that doubles the variable value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct SandwichFirewallTop;
+
+impl Query for SandwichFirewallTop {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct SandwichFirewallTopExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<SandwichFirewallTop, C>
+    for SandwichFirewallTopExecutor
+{
+    async fn execute(
+        &self,
+        _query: &SandwichFirewallTop,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&Variable(0)).await;
+
+        // doubles
+        val * 2
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Firewall
+    }
+}
+
+/// Left branch projection - adds 10 to the top firewall result.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct SandwichLeftProjection;
+
+impl Query for SandwichLeftProjection {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct SandwichLeftProjectionExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<SandwichLeftProjection, C>
+    for SandwichLeftProjectionExecutor
+{
+    async fn execute(
+        &self,
+        _query: &SandwichLeftProjection,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&SandwichFirewallTop).await;
+
+        // adds 10
+        val + 10
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Right branch projection - triples the top firewall result.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct SandwichRightProjection;
+
+impl Query for SandwichRightProjection {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct SandwichRightProjectionExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<SandwichRightProjection, C>
+    for SandwichRightProjectionExecutor
+{
+    async fn execute(
+        &self,
+        _query: &SandwichRightProjection,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let val = engine.query(&SandwichFirewallTop).await;
+
+        // triples
+        val * 3
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Bottom firewall combiner - sums both projections.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct SandwichFirewallCombiner;
+
+impl Query for SandwichFirewallCombiner {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct SandwichFirewallCombinerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<SandwichFirewallCombiner, C>
+    for SandwichFirewallCombinerExecutor
+{
+    async fn execute(
+        &self,
+        _query: &SandwichFirewallCombiner,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let left = engine.query(&SandwichLeftProjection).await;
+        let right = engine.query(&SandwichRightProjection).await;
+
+        left + right
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Firewall
+    }
+}
+
+/// Final consumer that multiplies the combined result by 5.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct SandwichConsumer;
+
+impl Query for SandwichConsumer {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct SandwichConsumerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<SandwichConsumer, C> for SandwichConsumerExecutor {
+    async fn execute(
+        &self,
+        _query: &SandwichConsumer,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst);
+
+        let _ = engine.query(&SandwichFirewallTop).await;
+        let combined = engine.query(&SandwichFirewallCombiner).await;
+
+        combined * 5
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::similar_names)]
+async fn diamond_firewall_projection_firewall_sandwich() {
+    let tempdir = tempdir().unwrap();
+    let mut engine = create_test_engine(&tempdir).await;
+
+    let top_firewall_ex = Arc::new(SandwichFirewallTopExecutor::default());
+    let left_proj_ex = Arc::new(SandwichLeftProjectionExecutor::default());
+    let right_proj_ex = Arc::new(SandwichRightProjectionExecutor::default());
+    let combiner_ex = Arc::new(SandwichFirewallCombinerExecutor::default());
+    let consumer_ex = Arc::new(SandwichConsumerExecutor::default());
+
+    engine.register_executor(top_firewall_ex.clone());
+    engine.register_executor(left_proj_ex.clone());
+    engine.register_executor(right_proj_ex.clone());
+    engine.register_executor(combiner_ex.clone());
+    engine.register_executor(consumer_ex.clone());
+
+    let engine = Arc::new(engine);
+
+    // =========================================================================
+    // Test Case 1: Initial query
+    // Variable(0)=5 -> TopFirewall=10
+    // -> LeftProjection=20, RightProjection=30
+    // -> FirewallCombiner=50 -> Consumer=250
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 5_i64).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        println!("Got tracked engine, now querying SandwichConsumer...");
+        let result = tracked.query(&SandwichConsumer).await;
+        // TopFirewall: 5*2=10
+        // LeftProjection: 10+10=20
+        // RightProjection: 10*3=30
+        // FirewallCombiner: 20+30=50
+        // Consumer: 50*5=250
+        assert_eq!(result, 250);
+    }
+
+    // Verify initial execution counts - each executor should run once
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(left_proj_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(right_proj_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 1);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
+
+    // =========================================================================
+    // Test Case 2: Change Variable(0) - all should recompute
+    // Variable(0)=10 -> TopFirewall=20
+    // -> LeftProjection=30, RightProjection=60
+    // -> FirewallCombiner=90 -> Consumer=450
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await;
+    }
+
+    // Should have 1 dirtied edge: TopFirewall -> Variable(0)
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    drop(tracked);
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&SandwichConsumer).await;
+        // TopFirewall: 10*2=20
+        // LeftProjection: 20+10=30
+        // RightProjection: 20*3=60
+        // FirewallCombiner: 30+60=90
+        // Consumer: 90*5=450
+        assert_eq!(result, 450);
+    }
+
+    // All executors should have run once more:
+    // - TopFirewall recomputes (input changed)
+    // - LeftProjection recomputes (TopFirewall changed, backward propagation)
+    // - RightProjection recomputes (TopFirewall changed, backward propagation)
+    // - FirewallCombiner recomputes (projections changed)
+    // - Consumer recomputes (FirewallCombiner changed)
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(left_proj_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(right_proj_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+
+    // =========================================================================
+    // Test Case 3: Query same value - no recomputation
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), 10_i64).await;
+    }
+
+    // 0 dirtied edges since value didn't change
+    let tracked = engine.clone().tracked().await;
+    assert_eq!(tracked.get_dirtied_edges_count(), 0);
+    drop(tracked);
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&SandwichConsumer).await;
+        assert_eq!(result, 450);
+    }
+
+    // No additional executions
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(left_proj_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(right_proj_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+
+    // =========================================================================
+    // Test Case 4: Query intermediate queries independently
+    // =========================================================================
+    {
+        let tracked = engine.clone().tracked().await;
+
+        let top_result = tracked.query(&SandwichFirewallTop).await;
+        assert_eq!(top_result, 20);
+
+        let left_proj_result = tracked.query(&SandwichLeftProjection).await;
+        assert_eq!(left_proj_result, 30);
+
+        let right_proj_result = tracked.query(&SandwichRightProjection).await;
+        assert_eq!(right_proj_result, 60);
+
+        let combiner_result = tracked.query(&SandwichFirewallCombiner).await;
+        assert_eq!(combiner_result, 90);
+    }
+
+    // No additional executions should occur since everything is cached
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(left_proj_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(right_proj_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 2);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+
+    // =========================================================================
+    // Test Case 5: Test with negative value
+    // Variable(0)=-5 -> TopFirewall=-10
+    // -> LeftProjection=0, RightProjection=-30
+    // -> FirewallCombiner=-30 -> Consumer=-150
+    // =========================================================================
+    {
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable(0), -5_i64).await;
+    }
+
+    {
+        let tracked = engine.clone().tracked().await;
+        let result = tracked.query(&SandwichConsumer).await;
+        // TopFirewall: -5*2=-10
+        // LeftProjection: -10+10=0
+        // RightProjection: -10*3=-30
+        // FirewallCombiner: 0+(-30)=-30
+        // Consumer: -30*5=-150
+        assert_eq!(result, -150);
+    }
+
+    // All should recompute since values changed
+    assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 3);
+    assert_eq!(left_proj_ex.0.load(Ordering::SeqCst), 3);
+    assert_eq!(right_proj_ex.0.load(Ordering::SeqCst), 3);
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 3);
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3);
 }
