@@ -421,8 +421,9 @@ async fn multiple_projections_single_firewall() {
     // recomputation but should hit cache if unchanged
     assert_eq!(collect_doubled_ex.0.load(Ordering::SeqCst), 2); // +1 for firewall
 
-    // DoubleSquare(1) was the original caller (queried above)
-    assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 4); // +1
+    // DoubleSquare(1) was the original caller (queried above) with 2 projection
+    // queries re-executed due to backward propagation from firewall
+    assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 6); // +1 +2 for backward prop
 
     // in total there should be 5 dirtied edges now:
     // - Original 2 from previous assertion
@@ -439,9 +440,8 @@ async fn multiple_projections_single_firewall() {
         assert_eq!(v0, Some(200));
     }
 
-    // The firewall was recomputed since Variable(0) changed, the
-    // DoubleSquare(0) depends on it, so +1 recomputation
-    assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 5);
+    // it should have no-recomputation since the backward prop already did it
+    assert_eq!(double_square_ex.0.load(Ordering::SeqCst), 6);
 }
 
 // ============================================================================
@@ -2879,4 +2879,460 @@ async fn chained_projections_unchanged_intermediate() {
     assert_eq!(abs_proj_ex.0.load(Ordering::SeqCst), 4); // unchanged
     assert_eq!(double_proj_ex.0.load(Ordering::SeqCst), 2); // unchanged
     assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged
+}
+
+// ============================================================================
+// Test: Diamond Pattern with Mixed Projection and Firewall
+// ============================================================================
+//
+// Graph structure:
+//            Variable
+//               |
+//               v
+//           DiamondTopFirewall (doubles value)
+//           /      \
+//          /        \
+//         v          v
+//  DiamondProjectionA   DiamondFirewallB
+//  (adds 10)           (triples value)
+//          \       /
+//           \     /
+//              v
+//        DiamondProjectionC (sums both)
+//             |
+//             v
+//          DiamondMixedConsumer
+//
+// This tests a diamond pattern where one branch has a Projection and the
+// other branch has a Firewall, both depending on the same top-level Firewall.
+// The final ProjectionC depends on both branches.
+
+/// Top firewall that doubles the variable value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DiamondTopFirewall;
+
+impl Query for DiamondTopFirewall {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DiamondTopFirewallExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DiamondTopFirewall, C> for DiamondTopFirewallExecutor {
+    async fn execute(
+        &self,
+        _query: &DiamondTopFirewall,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        let count = self.0.fetch_add(1, Ordering::SeqCst);
+        println!("[DiamondTopFirewall] START execution #{}", count + 1);
+
+        let val = engine.query(&Variable(0)).await;
+        let result = val * 2; // doubles
+        println!(
+            "[DiamondTopFirewall] END execution #{}, val={}, result={}",
+            count + 1,
+            val,
+            result
+        );
+        result
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Firewall
+    }
+}
+
+/// Left branch projection - adds 10 to the top firewall result.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DiamondProjectionA;
+
+impl Query for DiamondProjectionA {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DiamondProjectionAExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DiamondProjectionA, C> for DiamondProjectionAExecutor {
+    async fn execute(
+        &self,
+        _query: &DiamondProjectionA,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        let count = self.0.fetch_add(1, Ordering::SeqCst);
+        println!("[DiamondProjectionA] START execution #{}", count + 1);
+
+        let val = engine.query(&DiamondTopFirewall).await;
+        let result = val + 10; // adds 10
+        println!(
+            "[DiamondProjectionA] END execution #{}, val={}, result={}",
+            count + 1,
+            val,
+            result
+        );
+        result
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Right branch firewall - triples the top firewall result.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DiamondFirewallB;
+
+impl Query for DiamondFirewallB {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DiamondFirewallBExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DiamondFirewallB, C> for DiamondFirewallBExecutor {
+    async fn execute(
+        &self,
+        _query: &DiamondFirewallB,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        let count = self.0.fetch_add(1, Ordering::SeqCst);
+        println!("[DiamondFirewallB] START execution #{}", count + 1);
+
+        let val = engine.query(&DiamondTopFirewall).await;
+        let result = val * 3; // triples
+        println!(
+            "[DiamondFirewallB] END execution #{}, val={}, result={}",
+            count + 1,
+            val,
+            result
+        );
+        result
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Firewall
+    }
+}
+
+/// Bottom projection - combines both branches by summing them.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DiamondProjectionC;
+
+impl Query for DiamondProjectionC {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DiamondProjectionCExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DiamondProjectionC, C> for DiamondProjectionCExecutor {
+    async fn execute(
+        &self,
+        _query: &DiamondProjectionC,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        let count = self.0.fetch_add(1, Ordering::SeqCst);
+        println!("[DiamondProjectionC] START execution #{}", count + 1);
+
+        println!("[DiamondProjectionC] querying DiamondProjectionA...");
+        let proj_a = engine.query(&DiamondProjectionA).await;
+        println!("[DiamondProjectionC] got DiamondProjectionA={}", proj_a);
+
+        println!("[DiamondProjectionC] querying DiamondFirewallB...");
+        let firewall_b = engine.query(&DiamondFirewallB).await;
+        println!("[DiamondProjectionC] got DiamondFirewallB={}", firewall_b);
+
+        let result = proj_a + firewall_b;
+        println!(
+            "[DiamondProjectionC] END execution #{}, result={}",
+            count + 1,
+            result
+        );
+        result
+    }
+
+    fn execution_style() -> qbice::ExecutionStyle {
+        qbice::ExecutionStyle::Projection
+    }
+}
+
+/// Final consumer that multiplies the combined result by 5.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    StableHash,
+    Identifiable,
+    Encode,
+    Decode,
+)]
+pub struct DiamondMixedConsumer;
+
+impl Query for DiamondMixedConsumer {
+    type Value = i64;
+}
+
+#[derive(Debug, Default)]
+pub struct DiamondMixedConsumerExecutor(pub AtomicUsize);
+
+impl<C: Config> Executor<DiamondMixedConsumer, C>
+    for DiamondMixedConsumerExecutor
+{
+    async fn execute(
+        &self,
+        _query: &DiamondMixedConsumer,
+        engine: &TrackedEngine<C>,
+    ) -> i64 {
+        let count = self.0.fetch_add(1, Ordering::SeqCst);
+        println!("[DiamondMixedConsumer] START execution #{}", count + 1);
+
+        let proj_c = engine.query(&DiamondProjectionC).await;
+        let result = proj_c * 5;
+        println!(
+            "[DiamondMixedConsumer] END execution #{}, proj_c={}, result={}",
+            count + 1,
+            proj_c,
+            result
+        );
+        result
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diamond_mixed_projection_firewall() {
+    // Wrap entire test in a timeout to detect deadlocks
+    let test_future = async {
+        let tempdir = tempdir().unwrap();
+        let mut engine = create_test_engine(&tempdir).await;
+
+        let top_firewall_ex = Arc::new(DiamondTopFirewallExecutor::default());
+        let proj_a_ex = Arc::new(DiamondProjectionAExecutor::default());
+        let firewall_b_ex = Arc::new(DiamondFirewallBExecutor::default());
+        let proj_c_ex = Arc::new(DiamondProjectionCExecutor::default());
+        let consumer_ex = Arc::new(DiamondMixedConsumerExecutor::default());
+
+        engine.register_executor(top_firewall_ex.clone());
+        engine.register_executor(proj_a_ex.clone());
+        engine.register_executor(firewall_b_ex.clone());
+        engine.register_executor(proj_c_ex.clone());
+        engine.register_executor(consumer_ex.clone());
+
+        let engine = Arc::new(engine);
+
+        // =========================================================================
+        // Test Case 1: Initial query
+        // Variable(0)=5 -> TopFirewall=10 -> ProjectionA=20, FirewallB=30
+        // -> ProjectionC=50 -> Consumer=250
+        // =========================================================================
+        println!("=== Test Case 1: Initial query ===");
+        {
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(0), 5_i64).await;
+        }
+        println!("Input set, now querying...");
+
+        {
+            let tracked = engine.clone().tracked().await;
+            println!(
+                "Got tracked engine, now querying DiamondMixedConsumer..."
+            );
+            let result = tracked.query(&DiamondMixedConsumer).await;
+            // TopFirewall: 5*2=10
+            // ProjectionA: 10+10=20
+            // FirewallB: 10*3=30
+            // ProjectionC: 20+30=50
+            // Consumer: 50*5=250
+            assert_eq!(result, 250);
+            println!("Initial query result: {}", result);
+        }
+
+        // Verify initial execution counts - each executor should run once
+        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 1);
+        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 1);
+        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 1);
+        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 1);
+        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 1);
+
+        // =========================================================================
+        // Test Case 2: Change Variable(0) - all should recompute
+        // Variable(0)=10 -> TopFirewall=20 -> ProjectionA=30, FirewallB=60
+        // -> ProjectionC=90 -> Consumer=450
+        // =========================================================================
+        {
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(0), 10_i64).await;
+        }
+
+        // Should have 1 dirtied edge: TopFirewall -> Variable(0)
+        let tracked = engine.clone().tracked().await;
+        assert_eq!(tracked.get_dirtied_edges_count(), 1);
+        drop(tracked);
+
+        {
+            let tracked = engine.clone().tracked().await;
+            let result = tracked.query(&DiamondMixedConsumer).await;
+            // TopFirewall: 10*2=20
+            // ProjectionA: 20+10=30
+            // FirewallB: 20*3=60
+            // ProjectionC: 30+60=90
+            // Consumer: 90*5=450
+            assert_eq!(result, 450);
+            println!("Second query result: {}", result);
+        }
+
+        // All executors should have run once more:
+        // - TopFirewall recomputes (input changed)
+        // - ProjectionA recomputes (TopFirewall changed, backward propagation)
+        // - FirewallB recomputes (TopFirewall changed)
+        // - ProjectionC recomputes (both ProjectionA and FirewallB changed)
+        // - Consumer recomputes (ProjectionC changed)
+        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+
+        // =========================================================================
+        // Test Case 3: Query same value - no recomputation
+        // =========================================================================
+        {
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(0), 10_i64).await;
+        }
+
+        // 0 dirtied edges since value didn't change
+        let tracked = engine.clone().tracked().await;
+        assert_eq!(tracked.get_dirtied_edges_count(), 0);
+        drop(tracked);
+
+        {
+            let tracked = engine.clone().tracked().await;
+            let result = tracked.query(&DiamondMixedConsumer).await;
+            assert_eq!(result, 450);
+        }
+
+        // No additional executions
+        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+
+        // =========================================================================
+        // Test Case 4: Query intermediate queries independently
+        // =========================================================================
+        {
+            let tracked = engine.clone().tracked().await;
+
+            let top_result = tracked.query(&DiamondTopFirewall).await;
+            assert_eq!(top_result, 20);
+
+            let proj_a_result = tracked.query(&DiamondProjectionA).await;
+            assert_eq!(proj_a_result, 30);
+
+            let firewall_b_result = tracked.query(&DiamondFirewallB).await;
+            assert_eq!(firewall_b_result, 60);
+
+            let proj_c_result = tracked.query(&DiamondProjectionC).await;
+            assert_eq!(proj_c_result, 90);
+        }
+
+        // No additional executions should occur since everything is cached
+        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 2);
+        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
+
+        // =========================================================================
+        // Test Case 5: Test unchanged output propagation
+        // Change Variable(0) to -10 (TopFirewall produces 20*-1=-20)
+        // This changes outputs throughout the chain
+        // =========================================================================
+        {
+            let mut input_session = engine.input_session().await;
+            input_session.set_input(Variable(0), -10_i64).await;
+        }
+
+        {
+            let tracked = engine.clone().tracked().await;
+            let result = tracked.query(&DiamondMixedConsumer).await;
+            // TopFirewall: -10*2=-20
+            // ProjectionA: -20+10=-10
+            // FirewallB: -20*3=-60
+            // ProjectionC: -10+(-60)=-70
+            // Consumer: -70*5=-350
+            assert_eq!(result, -350);
+        }
+
+        // All should recompute since values changed
+        assert_eq!(top_firewall_ex.0.load(Ordering::SeqCst), 3);
+        assert_eq!(proj_a_ex.0.load(Ordering::SeqCst), 3);
+        assert_eq!(firewall_b_ex.0.load(Ordering::SeqCst), 3);
+        assert_eq!(proj_c_ex.0.load(Ordering::SeqCst), 3);
+        assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3);
+    };
+
+    // 10 second timeout to detect deadlocks
+    tokio::time::timeout(std::time::Duration::from_secs(10), test_future)
+        .await
+        .expect("Test timed out after 10 seconds - likely a deadlock!");
 }
