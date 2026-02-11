@@ -40,7 +40,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         // has pending backward projection to do
         if matches!(
             caller.kind(),
-            CallerKind::RepairFirewall { invoke_backward_projection: true }
+            CallerKind::RepairFirewall
                 | CallerKind::BackwardProjectionPropagation
         ) && self
             .pending_backward_projection()
