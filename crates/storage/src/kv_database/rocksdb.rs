@@ -143,7 +143,17 @@ impl RocksDB {
         // Create column family descriptors for existing families
         let cf_descriptors: Vec<_> = existing_cfs
             .iter()
-            .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+            .map(|name| {
+                let options = if name.contains("wide_column") {
+                    Impl::get_point_lookup_options()
+                } else if name.contains("key_of_set") {
+                    Impl::get_key_of_set_options()
+                } else {
+                    configure_rocksdb_for_small_kv_high_writes()
+                };
+
+                ColumnFamilyDescriptor::new(name, options)
+            })
             .collect();
 
         let db = if cf_descriptors.is_empty() {
