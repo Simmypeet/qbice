@@ -305,11 +305,14 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                     engine,
                     &callee.compact_hash_128(),
                     &CallerInformation::new(
-                        CallerKind::Query(QueryCaller::new(
-                            *query_id,
-                            CallerReason::Repair,
-                            query_computing.clone(),
-                        )),
+                        CallerKind::Query(
+                            QueryCaller::new_with_pedantic_repair(
+                                *query_id,
+                                CallerReason::Repair,
+                                query_computing.clone(),
+                                pedantic_repair,
+                            ),
+                        ),
                         current_timestamp,
                         active_computation_guard.cloned(),
                     ),
