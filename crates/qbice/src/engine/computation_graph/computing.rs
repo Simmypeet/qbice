@@ -468,15 +468,17 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         mut self,
         caller_information: &CallerInformation,
     ) -> Option<(Self, ComputingLockGuard<C>)> {
-        // IMPORTANT: here we move the retrival logic outside the lock guard
-        // to avoid holding the lock across await points
+        // we have to double check if we still really need to compute
 
         let last_verified = self.last_verified().await;
 
         let (mode, query_kind) = if let Some(last_verified) = last_verified {
             let kind = self.query_kind().await.unwrap();
 
-            assert!(last_verified.0 != caller_information.timestamp());
+            if last_verified.0 == caller_information.timestamp() {
+                // no need to repair
+                return None;
+            }
 
             (ComputingMode::Repair, kind)
         } else {
@@ -537,12 +539,22 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     }
 
     pub(super) async fn get_backward_projection_lock_guard(
-        self,
+        mut self,
+        caller_information: &CallerInformation,
     ) -> Option<(Self, BackwardProjectionLockGuard<C>)> {
         let pending_backward_projection =
             PendingBackwardProjection { notify: Arc::new(Notify::new()) };
 
         let engine = self.engine().clone();
+
+        // double check if we really need to get the lock
+        if self
+            .pending_backward_projection()
+            .await
+            .is_none_or(|x| x.0 != caller_information.timestamp())
+        {
+            return None;
+        }
 
         let result = match engine
             .computation_graph
@@ -582,13 +594,13 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         caller_information: &CallerInformation,
     ) -> Option<(Self, WriteGuard<C>)> {
         match slow_path {
-            SlowPath::Computing => self
+            SlowPath::Compute | SlowPath::Repair => self
                 .computing_lock_guard(caller_information)
                 .await
                 .map(|x| (x.0, WriteGuard::ComputingLockGuard(x.1))),
 
             SlowPath::BaackwardProjection => self
-                .get_backward_projection_lock_guard()
+                .get_backward_projection_lock_guard(caller_information)
                 .await
                 .map(|x| (x.0, WriteGuard::BackwardProjectionLockGuard(x.1))),
         }

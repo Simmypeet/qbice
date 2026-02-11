@@ -19,7 +19,15 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SlowPath {
-    Computing,
+    /// No entry found in the database, we need to compute the query and store
+    /// it to the database.
+    Compute,
+
+    /// The query is found but stale due to timestamp check, we need to see
+    /// whether we can repair it or need to recompute it.
+    Repair,
+
+    /// The query has "pending" backward projection to do.
     BaackwardProjection,
 }
 

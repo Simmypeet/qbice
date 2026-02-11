@@ -28,19 +28,19 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         let (Some(node_info), Some(last_verified)) = (node_info, last_verified)
         else {
-            return FastPathResult::ToSlowPath(SlowPath::Computing);
+            return FastPathResult::ToSlowPath(SlowPath::Compute);
         };
 
         // check if the query is up-to-date
         if last_verified.0 != caller.timestamp() {
-            return FastPathResult::ToSlowPath(SlowPath::Computing);
+            return FastPathResult::ToSlowPath(SlowPath::Repair);
         }
 
         // check if the query was called with repairing firewall and
         // has pending backward projection to do
         if matches!(
             caller.kind(),
-            CallerKind::RepairFirewall { invoke_backward_projection: true }
+            CallerKind::RepairFirewall
                 | CallerKind::BackwardProjectionPropagation
         ) && self
             .pending_backward_projection()
@@ -53,7 +53,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         // gets the result
         let query_result = if caller.require_value() {
             let Some(query_result) = self.query_result().await else {
-                return FastPathResult::ToSlowPath(SlowPath::Computing);
+                return FastPathResult::ToSlowPath(SlowPath::Compute);
             };
 
             Some(query_result)

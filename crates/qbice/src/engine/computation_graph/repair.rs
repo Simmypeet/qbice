@@ -103,17 +103,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         }
 
         // continue normal path ...
-
-        // repair transitive firewall callees first before deciding whether to
-        // recompute, since the transitive firewall callees might affect the
-        // decision by propagating dirtiness.
-        if matches!(
-            caller_information.kind(),
-            CallerKind::User | CallerKind::RepairFirewall { .. }
-        ) {
-            self.repair_transitive_firewall_callees(caller_information).await;
-        }
-
         let recompute = self
             .recompute_decision_based_on_forward_edges(
                 caller_information,
@@ -223,12 +212,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     }
 
     pub(super) async fn repair_transitive_firewall_callees(
-        &mut self,
+        mut self,
         caller_information: &CallerInformation,
     ) {
         let node_info = self.node_info().await.unwrap();
-        let is_current_query_projection =
-            self.query_kind().await.unwrap().is_projection();
 
         let tfcs = node_info.transitive_firewall_callees();
         let tfcs = tfcs.iter().copied().collect::<Vec<_>>();
@@ -240,13 +227,19 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             1,
         );
 
+        let engine = self.engine().clone();
+
+        // release the lock before spawning tasks that could potentially
+        // try to acquire the same lock again
+        drop(self);
+
         let mut join_set = JoinSet::new();
 
         // run all repairs in parallel
         let timestamp = caller_information.timestamp();
 
         for tfc_chunk in tfcs.chunks(chunk_size).map(<[_]>::to_vec) {
-            let engine = self.engine().clone();
+            let engine = engine.clone();
             let active_computation_guard =
                 caller_information.clone_active_computation_guard();
 
@@ -261,17 +254,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                             &engine,
                             &tfc.compact_hash_128(),
                             &CallerInformation::new(
-                                CallerKind::RepairFirewall {
-                                    // if current query is projection, then
-                                    // repairing the firewalls should not
-                                    // invoke
-                                    // backward projection, since it will
-                                    // immediately request this query again,
-                                    // causing
-                                    // deadlock.
-                                    invoke_backward_projection:
-                                        !is_current_query_projection,
-                                },
+                                CallerKind::RepairFirewall,
                                 timestamp,
                                 active_computation_guard.clone(),
                             ),

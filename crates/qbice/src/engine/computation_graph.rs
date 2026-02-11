@@ -21,6 +21,7 @@ use crate::{
         dirty_worker::DirtyWorker,
         fast_path::FastPathResult,
         query_lock_manager::QueryLockManager,
+        slow_path::SlowPath,
         statistic::Statistic,
     },
     executor::{CyclicError, CyclicPanicPayload},
@@ -471,7 +472,7 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         caller: &CallerInformation,
     ) {
-        let mut snapshot =
+        let snapshot =
             self.get_read_snapshot::<Q>(query.id.compact_hash_128()).await;
 
         snapshot.repair_transitive_firewall_callees(caller).await;
@@ -524,6 +525,27 @@ impl<C: Config> Engine<C> {
                     break QueryResult { return_value: value, status };
                 }
             };
+
+            // if the caller is responsible for repairing TFC queries, do it
+            // but release the lock first to avoid deadlock when backward
+            // projection is needed.
+            //
+            // we repair the TFC outside the query lock which means there can
+            // be duplicated "requests" to repair the same TFC query, but
+            // the work will "not be duplicated" since to repair a TFC query, we
+            // need to acquire its query lock first.
+            if matches!(
+                caller.kind(),
+                CallerKind::User | CallerKind::RepairFirewall
+            ) && slow_path == SlowPath::Repair
+            {
+                snapshot.repair_transitive_firewall_callees(caller).await;
+
+                // restore the snapshot after repair
+                snapshot = self
+                    .get_read_snapshot::<Q>(query.id.compact_hash_128())
+                    .await;
+            }
 
             // now the `query` state is held in computing state.
             // if `guard` is dropped without defusing, the state will
