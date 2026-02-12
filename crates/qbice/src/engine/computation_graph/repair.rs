@@ -540,17 +540,20 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                             handle.abort();
                         }
 
-                        match handle.await.unwrap() {
-                            ChunkedCalleeCheckDecision::Cancelled
-                            | ChunkedCalleeCheckDecision::Recompute => {
+                        match handle.await {
+                            Ok(
+                                ChunkedCalleeCheckDecision::Cancelled
+                                | ChunkedCalleeCheckDecision::Recompute,
+                            )
+                            | Err(_) => {
                                 found_recompute = true;
                             }
 
-                            ChunkedCalleeCheckDecision::Cleaned {
+                            Ok(ChunkedCalleeCheckDecision::Cleaned {
                                 repair_transitive_firewall_callees:
                                     repair_tfc_needed,
                                 cleaned_edges: mut edges,
-                            } => {
+                            }) => {
                                 // already found one edge that requires
                                 // recompute, skip
                                 if found_recompute {
