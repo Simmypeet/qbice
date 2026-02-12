@@ -18,21 +18,15 @@ qbice_stable_hash = { version = "0.1.5", path = "../stable_hash" }
 moka.workspace = true
 parking_lot.workspace = true
 fxhash.workspace = true
-smallbox.workspace = true
 dashmap.workspace = true
 crossbeam-utils.workspace = true
 crossbeam-channel.workspace = true
-crossbeam-deque.workspace = true
-enum-as-inner.workspace = true
 rust-rocksdb = { workspace = true, optional = true }
 fjall = { workspace = true, optional = true }
 thread_local.workspace = true
 tokio.workspace = true
-rayon.workspace = true
 ouroboros.workspace = true
 bon.workspace = true
-tracing.workspace = true
-crossbeam-skiplist.workspace = true
 crossbeam.workspace = true
 
 [dev-dependencies]

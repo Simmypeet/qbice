@@ -24,7 +24,6 @@ qbice_storage = { version = "0.4.8", path = "../storage" }
 qbice_derive = { version = "0.1.3", path = "../qbice_derive" }
 tokio.workspace = true
 dashmap.workspace = true
-static_assertions.workspace = true
 thiserror.workspace = true
 parking_lot = { workspace = true, features = ["send_guard"] }
 fxhash.workspace = true
@@ -34,8 +33,6 @@ crossbeam.workspace = true
 thread_local.workspace = true
 ouroboros.workspace = true
 tracing.workspace = true
-moka.workspace = true
-quick_cache.workspace = true
 enum-as-inner.workspace = true
 
 [dev-dependencies]

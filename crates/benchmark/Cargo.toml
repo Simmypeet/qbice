@@ -10,7 +10,6 @@ publish = false
 
 [dependencies]
 qbice = { path = "../qbice" }
-tempfile.workspace = true
 criterion.workspace = true
 fxhash.workspace = true
 tokio = { version = "1", features = ["full"] }
