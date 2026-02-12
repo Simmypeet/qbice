@@ -130,52 +130,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         } else {
             let forward_edges = self.forward_edge_order().await.unwrap();
 
-            let expected_parallelism = std::thread::available_parallelism()
-                .map_or_else(|_| 4, |x| x.get() * 4);
-            let chunk_size =
-                std::cmp::max(cleaned_edges.len() / expected_parallelism, 1);
-
-            let mut handles = JoinSet::new();
-
-            for chunk in cleaned_edges.chunks(chunk_size).map(<[_]>::to_vec) {
-                let engine = self.engine().clone();
-                let timestamp = caller_information.timestamp();
-                let query_computing = lock_guard.query_computing().clone();
-                let active_computation_guard =
-                    caller_information.clone_active_computation_guard();
-
-                handles.spawn(async move {
-                    for callee in chunk {
-                        let entry = engine
-                            .executor_registry
-                            .get_executor_entry_by_type_id(
-                                &callee.stable_type_id(),
-                            );
-
-                        let _ = entry
-                            .repair_query_from_query_id(
-                                &engine,
-                                &callee.compact_hash_128(),
-                                &CallerInformation::new(
-                                    CallerKind::Query(QueryCaller::new(
-                                        callee,
-                                        CallerReason::Repair,
-                                        query_computing.clone(),
-                                    )),
-                                    timestamp,
-                                    active_computation_guard.clone(),
-                                ),
-                            )
-                            .await;
-                    }
-                });
-            }
-
-            // join all handles
-            while let Some(handle) = handles.join_next().await {
-                handle.unwrap();
-            }
-
             let mut new_tfcs = FxHashSet::default();
 
             for x in forward_edges.iter_all_callees() {
@@ -184,6 +138,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 if kind.is_firewall() {
                     new_tfcs.insert(x);
                 } else {
+                    // SAFETY: should be safe yo directly access the node info
+                    // since we've just repaired the callee and under the
+                    // current revision it must exist and stable now.
                     let callee_info = unsafe {
                         self.engine().get_node_info_unchecked(&x).await
                     };
