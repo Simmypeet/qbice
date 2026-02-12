@@ -440,11 +440,12 @@ type ObtainSccValueFn = for<'a> fn(buffer: &'a mut dyn Any);
 
 type ObtainExecutionStyleFn = fn() -> ExecutionStyle;
 
-type DebugQueryFn<C> =
-    for<'a> fn(
-        engine: &'a Engine<C>,
-        query_input_hash_128: Compact128,
-    ) -> Pin<Box<dyn Future<Output = Option<QueryDebug>> + 'a>>;
+type DebugQueryFn<C> = for<'a> fn(
+    engine: &'a Engine<C>,
+    query_input_hash_128: Compact128,
+) -> Pin<
+    Box<dyn Future<Output = Option<QueryDebug>> + Send + 'a>,
+>;
 
 fn obtain_scc_value<
     C: Config,

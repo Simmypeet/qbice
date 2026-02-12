@@ -759,8 +759,9 @@ impl<C: Config> Engine<C> {
     pub(crate) fn get_query_debug_future<'s, Q: Query>(
         &'s self,
         query_id: Compact128,
-    ) -> Pin<Box<dyn std::future::Future<Output = Option<QueryDebug>> + 's>>
-    {
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = Option<QueryDebug>> + Send + 's>,
+    > {
         Box::pin(async move { self.get_query_debug::<Q>(query_id).await })
     }
 
