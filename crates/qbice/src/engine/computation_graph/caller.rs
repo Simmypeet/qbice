@@ -28,19 +28,6 @@ pub struct QueryCaller {
 }
 
 impl QueryCaller {
-    pub const fn new(
-        query_id: QueryID,
-        reason: CallerReason,
-        computing: Arc<QueryComputing>,
-    ) -> Self {
-        Self {
-            query_id,
-            computing: Some(computing),
-            reason,
-            pedantic_repair: false,
-        }
-    }
-
     pub const fn new_with_pedantic_repair(
         query_id: QueryID,
         reason: CallerReason,
