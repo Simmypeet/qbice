@@ -2,18 +2,14 @@
 //! write-behind caching layers.
 
 use std::{
-    collections::hash_map,
     hash::{BuildHasher, Hash},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use crossbeam_utils::CachePadded;
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxBuildHasher;
 
-use crate::{
-    sharded::Sharded,
-    tiny_lfu::policy::{Policy, PolicyMessage, WriteMessage},
-};
+use crate::tiny_lfu::policy::{Policy, PolicyMessage, WriteMessage};
 
 mod lru;
 mod policy;
@@ -83,10 +79,10 @@ pub struct TinyLFU<
 }
 
 impl<
-        K: Clone + Eq + Hash + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        L: LifecycleListener<K, V> + Send + Sync + 'static,
-    > std::fmt::Debug for TinyLFU<K, V, L>
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> std::fmt::Debug for TinyLFU<K, V, L>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TinyLFU").finish_non_exhaustive()
@@ -94,22 +90,20 @@ impl<
 }
 
 impl<
-        K: Clone + Eq + Hash + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        L: LifecycleListener<K, V> + Send + Sync + 'static,
-    > TinyLFU<K, V, L>
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> TinyLFU<K, V, L>
 {
     /// Creates a new TinyLFU cache with the specified capacity and shard
     /// count.
     #[must_use]
     pub fn new(
         capacity: usize,
-        shard_count: usize,
         unpin_strategy: UnpinStrategy,
         maintenance_mode: MaintenanceMode,
     ) -> Self {
-        let inner =
-            Arc::new(TinyLFUInner::new(capacity, shard_count, unpin_strategy));
+        let inner = Arc::new(TinyLFUInner::new(capacity, unpin_strategy));
 
         let (sender, join_handle) = match maintenance_mode {
             MaintenanceMode::Piggyback => (None, None),
@@ -128,10 +122,10 @@ impl<
 }
 
 impl<
-        K: Clone + Eq + Hash + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        L: LifecycleListener<K, V> + Send + Sync + 'static,
-    > Drop for TinyLFU<K, V, L>
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> Drop for TinyLFU<K, V, L>
 {
     fn drop(&mut self) {
         // signal the maintenance thread to exit
@@ -144,10 +138,10 @@ impl<
 }
 
 impl<
-        K: Clone + Eq + Hash + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        L: LifecycleListener<K, V> + Send + Sync + 'static,
-    > TinyLFU<K, V, L>
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> TinyLFU<K, V, L>
 {
     fn maintenance_loop(
         inner: Arc<TinyLFUInner<K, V, L>>,
@@ -222,7 +216,7 @@ impl<
 /// write operations, and negative caching is used to remember absent entries
 /// without storing actual values.
 struct TinyLFUInner<K, V, L = DefaultLifecycleListener> {
-    storage: CachePadded<Sharded<FxHashMap<K, V>>>,
+    storage: CachePadded<scc::HashMap<K, V, FxBuildHasher>>,
 
     read_buffer: CachePadded<read_buffer::ReadBuffer<K>>,
     write_buffer: CachePadded<write_buffer::UnboundedBuffer<WriteMessage<K>>>,
@@ -248,20 +242,16 @@ impl<K: Eq + Hash + Clone, V, L: Default> TinyLFUInner<K, V, L> {
     /// Creates a new TinyLFUInner cache with the specified capacity and shard
     /// count.
     #[must_use]
-    pub fn new(
-        capacity: usize,
-        shard_count: usize,
-        unpin_strategy: UnpinStrategy,
-    ) -> Self {
+    pub fn new(capacity: usize, unpin_strategy: UnpinStrategy) -> Self {
         Self {
-            storage: CachePadded::new(Sharded::new(shard_count, |_| {
-                FxHashMap::default()
-            })),
+            storage: CachePadded::new(scc::HashMap::with_hasher(
+                FxBuildHasher::default(),
+            )),
             read_buffer: CachePadded::new(read_buffer::ReadBuffer::new(
                 std::thread::available_parallelism()
-                    .map(std::num::NonZero::get)
+                    .map(|x| x.get() * 4)
                     .unwrap_or(4),
-                64,
+                16,
             )),
             write_buffer: CachePadded::new(write_buffer::UnboundedBuffer::new()),
 
@@ -278,9 +268,9 @@ impl<K: Eq + Hash + Clone, V, L: Default> TinyLFUInner<K, V, L> {
 
 /// Represents an entry in the TinyLFU cache that is currently occupied.
 pub struct OccupiedEntry<'a, 'x, K, V> {
-    entry: hash_map::OccupiedEntry<'a, K, V>,
+    entry: scc::hash_map::OccupiedEntry<'a, K, V, FxBuildHasher>,
 
-    message: &'x mut Option<PolicyMessage<K>>,
+    write_buffer: &'x write_buffer::UnboundedBuffer<WriteMessage<K>>,
 }
 
 impl<K, V> std::fmt::Debug for OccupiedEntry<'_, '_, K, V> {
@@ -302,18 +292,17 @@ impl<K: Clone + std::hash::Hash + Eq, V> OccupiedEntry<'_, '_, K, V> {
     #[must_use]
     pub fn remove(self) -> V {
         let key = self.entry.key().clone();
-        let v = self.entry.remove();
-        *self.message = Some(PolicyMessage::Write(WriteMessage::Removed(key)));
+        self.write_buffer.push(WriteMessage::Removed(key));
 
-        v
+        self.entry.remove()
     }
 }
 
 /// Represents an entry in the TinyLFU cache that is currently vacant.
 pub struct VacantEntry<'a, 'x, K, V> {
-    entry: hash_map::VacantEntry<'a, K, V>,
+    entry: scc::hash_map::VacantEntry<'a, K, V, FxBuildHasher>,
 
-    message: &'x mut Option<PolicyMessage<K>>,
+    write_buffer: &'x write_buffer::UnboundedBuffer<WriteMessage<K>>,
 }
 
 impl<K, V> std::fmt::Debug for VacantEntry<'_, '_, K, V> {
@@ -327,9 +316,8 @@ impl<K: Clone + std::hash::Hash + Eq, V> VacantEntry<'_, '_, K, V> {
     pub fn insert(self, value: V) {
         let key = self.entry.key().clone();
 
-        self.entry.insert(value);
-
-        *self.message = Some(PolicyMessage::Write(WriteMessage::Insert(key)));
+        self.write_buffer.push(WriteMessage::Insert(key));
+        self.entry.insert_entry(value);
     }
 }
 
@@ -348,10 +336,10 @@ impl<K, V> std::fmt::Debug for Entry<'_, '_, K, V> {
 }
 
 impl<
-        K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        L: LifecycleListener<K, V> + Send + Sync + 'static,
-    > TinyLFU<K, V, L>
+    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> TinyLFU<K, V, L>
 {
     /// Retrieves a value from the cache by key.
     #[inline]
@@ -366,14 +354,7 @@ impl<
     /// function.
     #[inline]
     pub fn get_map<T>(&self, key: &K, f: impl Fn(&V) -> T) -> Option<T> {
-        let hash = self.inner.hash(key);
-        let shard =
-            self.inner.storage.read_shard(self.inner.storage.shard_index(hash));
-
-        let entry = shard.get(key).map(f);
-
-        // immediately drop the shard lock to avoid lock contention
-        drop(shard);
+        let entry = self.inner.storage.read_sync(key, |_, v| f(v));
 
         self.try_maintenance(Some(PolicyMessage::ReadHit(key.clone())));
 
@@ -388,30 +369,23 @@ impl<
         key: K,
         f: impl FnOnce(Entry<'_, '_, K, V>) -> T,
     ) -> T {
-        let hash = self.inner.hash(&key);
-        let mut shard = self
-            .inner
-            .storage
-            .write_shard(self.inner.storage.shard_index(hash));
-
-        let mut message = None;
-
-        let t = match shard.entry(key) {
-            hash_map::Entry::Vacant(entry) => {
-                f(Entry::Vacant(VacantEntry { entry, message: &mut message }))
+        let t = match self.inner.storage.entry_sync(key) {
+            scc::hash_map::Entry::Vacant(entry) => {
+                f(Entry::Vacant(VacantEntry {
+                    entry,
+                    write_buffer: &self.inner.write_buffer,
+                }))
             }
 
-            hash_map::Entry::Occupied(occupied_entry) => {
+            scc::hash_map::Entry::Occupied(occupied_entry) => {
                 f(Entry::Occupied(OccupiedEntry {
                     entry: occupied_entry,
-                    message: &mut message,
+                    write_buffer: &self.inner.write_buffer,
                 }))
             }
         };
 
-        drop(shard);
-
-        self.try_maintenance(message);
+        self.try_maintenance(None);
 
         t
     }
@@ -426,10 +400,10 @@ impl<
 }
 
 impl<
-        K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        L: LifecycleListener<K, V> + Send + Sync + 'static,
-    > TinyLFUInner<K, V, L>
+    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    L: LifecycleListener<K, V> + Send + Sync + 'static,
+> TinyLFUInner<K, V, L>
 {
     fn process_policy_message(&self, lock: &mut Policy<K>) {
         while let Some(message) = self.write_buffer.pop() {
@@ -499,24 +473,8 @@ impl<
     fn remove_closure(&self) -> impl Fn(&K) -> bool + '_ {
         // atomically determine if we can remove the key
         |evicted_key| {
-            let shard_index = self.storage.shard_index(self.hash(evicted_key));
-            let shard = self.storage.upgradable_read_shard(shard_index);
-
-            if let Some(value) = shard.get(evicted_key) {
-                // the element still exists, check if it is pinned
-                if self.lifecycle_listener.is_pinned(evicted_key, value) {
-                    return false;
-                }
-            } else {
-                // has already been removed
-                return true;
-            }
-
-            let mut shard =
-                parking_lot::RwLockUpgradableReadGuard::upgrade(shard);
-
-            match shard.entry(evicted_key.clone()) {
-                hash_map::Entry::Occupied(mut occupied_entry) => {
+            match self.storage.entry_sync(evicted_key.clone()) {
+                scc::hash_map::Entry::Occupied(mut occupied_entry) => {
                     let can_remove = {
                         let value = occupied_entry.get_mut();
 
@@ -534,13 +492,12 @@ impl<
                         None
                     };
 
-                    drop(shard);
                     drop(value);
 
                     can_remove
                 }
 
-                hash_map::Entry::Vacant(_) => {
+                scc::hash_map::Entry::Vacant(_) => {
                     // already evicted
                     true
                 }

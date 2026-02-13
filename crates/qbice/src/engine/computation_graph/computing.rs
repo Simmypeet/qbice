@@ -1,13 +1,14 @@
 use std::{
     self,
+    collections::HashMap,
     sync::{Arc, atomic::AtomicBool},
 };
 
-use dashmap::{DashMap, DashSet, Entry};
 use fxhash::FxBuildHasher;
 use parking_lot::RwLock;
 use qbice_stable_hash::Compact128;
 use qbice_storage::intern::Interned;
+use scc::hash_map::Entry;
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
@@ -22,7 +23,6 @@ use crate::{
             slow_path::SlowPath,
             tfc_achetype::TransitiveFirewallCallees,
         },
-        default_shard_amount,
         guard::GuardExt,
     },
     executor::CyclicError,
@@ -103,17 +103,18 @@ pub enum Mode {
 
 #[derive(Debug, Default)]
 pub struct ComputingForwardEdges {
-    pub callee_queries: DashMap<QueryID, Option<Observation>, FxBuildHasher>,
+    pub callee_queries:
+        scc::HashMap<QueryID, Option<Observation>, FxBuildHasher>,
     pub callee_order: RwLock<CalleeOrder>,
 }
 
 impl QueryComputing {
     pub fn register_calee(&self, callee: &QueryID) {
-        if self.callee_info.callee_queries.contains_key(callee) {
+        if self.callee_info.callee_queries.contains_sync(callee) {
             return;
         }
 
-        match self.callee_info.callee_queries.entry(*callee) {
+        match self.callee_info.callee_queries.entry_sync(*callee) {
             Entry::Occupied(_) => {}
 
             Entry::Vacant(vacant_entry) => {
@@ -133,7 +134,7 @@ impl QueryComputing {
     }
 
     pub fn abort_callee(&self, callee: &QueryID) {
-        assert!(self.callee_info.callee_queries.remove(callee).is_some());
+        assert!(self.callee_info.callee_queries.remove_sync(callee).is_some());
 
         let mut callee_order = self.callee_info.callee_order.write();
 
@@ -157,7 +158,7 @@ impl QueryComputing {
         let mut callee_observation = self
             .callee_info
             .callee_queries
-            .get_mut(callee_target_id)
+            .get_sync(callee_target_id)
             .expect("callee should have been registered");
 
         *callee_observation = Some(Observation {
@@ -186,11 +187,11 @@ impl QueryComputing {
                 for q in
                     callee_info.transitive_firewall_callees().iter().copied()
                 {
-                    self.tfc.insert(q);
+                    let _ = self.tfc.insert_sync(q);
                 }
             }
             QueryKind::Executable(ExecutionStyle::Firewall) => {
-                self.tfc.insert(callee_id);
+                let _ = self.tfc.insert_sync(callee_id);
             }
         }
     }
@@ -209,7 +210,7 @@ pub struct QueryComputing {
     notify: Arc<Notify>,
     callee_info: ComputingForwardEdges,
     is_in_scc: Arc<AtomicBool>,
-    tfc: DashSet<QueryID>,
+    tfc: scc::HashSet<QueryID, FxBuildHasher>,
     query_kind: QueryKind,
 }
 
@@ -249,7 +250,7 @@ impl<C: Config> BackwardProjectionLockGuard<C> {
             .computation_graph
             .computing
             .backward_projection_lock
-            .remove(&self.query_id)
+            .remove_sync(&self.query_id)
             .expect(
                 "the pending backward projection lock guard has dropped and \
                  tried to remove existing lock, but no entry found",
@@ -264,21 +265,17 @@ impl<C: Config> Drop for BackwardProjectionLockGuard<C> {
 }
 
 pub struct Computing<C: Config> {
-    computing_lock: DashMap<QueryID, Arc<QueryComputing>, C::BuildHasher>,
+    computing_lock: scc::HashMap<QueryID, Arc<QueryComputing>, C::BuildHasher>,
     backward_projection_lock:
-        DashMap<QueryID, PendingBackwardProjection, C::BuildHasher>,
+        scc::HashMap<QueryID, PendingBackwardProjection, C::BuildHasher>,
 }
 
 impl<C: Config> Computing<C> {
     pub fn new() -> Self {
         Self {
-            computing_lock: DashMap::with_hasher_and_shard_amount(
+            computing_lock: scc::HashMap::with_hasher(C::BuildHasher::default()),
+            backward_projection_lock: scc::HashMap::with_hasher(
                 C::BuildHasher::default(),
-                default_shard_amount(),
-            ),
-            backward_projection_lock: DashMap::with_hasher_and_shard_amount(
-                C::BuildHasher::default(),
-                default_shard_amount(),
             ),
         }
     }
@@ -313,7 +310,7 @@ impl<C: Config> ComputingLockGuard<C> {
             .computation_graph
             .computing
             .computing_lock
-            .remove(&self.query_id)
+            .remove_sync(&self.query_id)
             .expect(
                 "the computing lock guard has dropped and tried to remove \
                  existing computing lock, but no entry found",
@@ -332,21 +329,15 @@ impl<C: Config> Computing<C> {
         &self,
         query_id: &QueryID,
     ) -> Option<Arc<QueryComputing>> {
-        let guard = self.computing_lock.get(query_id)?;
-        Some(guard.clone())
+        self.computing_lock.read_sync(query_id, |_, v| v.clone())
     }
 
     pub fn try_get_notified_computing_lock(
         &self,
         query_id: &QueryID,
     ) -> Option<(OwnedNotified, Arc<QueryComputing>)> {
-        let guard = self.computing_lock.get(query_id)?;
-        let notified = guard.notified_owned();
-        let guard_clone = guard.clone();
-
-        drop(guard);
-
-        Some((notified, guard_clone))
+        self.computing_lock
+            .read_sync(query_id, |_, v| (v.notified_owned(), v.clone()))
     }
 }
 
@@ -398,7 +389,7 @@ impl<C: Config> Engine<C> {
         computing: &QueryComputing,
         target: &QueryID,
     ) -> bool {
-        if computing.callee_info.callee_queries.contains_key(target) {
+        if computing.callee_info.callee_queries.contains_sync(target) {
             computing
                 .is_in_scc
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -409,16 +400,17 @@ impl<C: Config> Engine<C> {
         let mut found = false;
 
         // OPTIMIZE: this can be parallelized
-        for dep in computing.callee_info.callee_queries.iter().map(|x| *x.key())
-        {
+        computing.callee_info.callee_queries.iter_sync(|k, _| {
             let Some(state) =
-                self.computation_graph.computing.try_get_query_computing(&dep)
+                self.computation_graph.computing.try_get_query_computing(k)
             else {
-                continue;
+                return true;
             };
 
             found |= self.check_cyclic_internal(&state, target);
-        }
+
+            true
+        });
 
         if found {
             computing
@@ -447,15 +439,14 @@ impl<C: Config> Engine<C> {
             return Ok(());
         };
 
-        let computing_lock = self
+        let is_in_scc = self
             .computation_graph
             .computing
             .computing_lock
-            .get(called_from)
-            .expect("computing lock should exist for caller")
-            .clone();
+            .read_sync(called_from, |_, v| v.is_in_scc())
+            .expect("computing lock should exist for caller");
 
-        if computing_lock.is_in_scc() {
+        if is_in_scc {
             return Err(CyclicError);
         }
 
@@ -492,14 +483,16 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         let entry = Arc::new(QueryComputing {
             callee_info: ComputingForwardEdges {
-                callee_queries: DashMap::default(),
+                callee_queries: scc::HashMap::with_hasher(
+                    FxBuildHasher::default(),
+                ),
                 callee_order: RwLock::new(CalleeOrder::default()),
             },
 
             query_kind,
             notify: Arc::new(Notify::new()),
             is_in_scc: Arc::new(AtomicBool::new(false)),
-            tfc: DashSet::new(),
+            tfc: scc::HashSet::with_hasher(FxBuildHasher::default()),
         });
 
         let engine = self.engine().clone();
@@ -507,9 +500,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             .computation_graph
             .computing
             .computing_lock
-            .entry(*self.query_id())
+            .entry_sync(*self.query_id())
         {
-            dashmap::Entry::Occupied(entry) => {
+            Entry::Occupied(entry) => {
                 // there's some computing state already try again
                 let notified_owned = entry.get().notified_owned();
 
@@ -522,8 +515,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 return None;
             }
 
-            dashmap::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(entry.clone());
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert_entry(entry.clone());
 
                 Some(ComputingLockGuard {
                     engine: self.engine().clone(),
@@ -560,9 +553,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             .computation_graph
             .computing
             .backward_projection_lock
-            .entry(*self.query_id())
+            .entry_sync(*self.query_id())
         {
-            dashmap::Entry::Occupied(entry) => {
+            Entry::Occupied(entry) => {
                 let notified = entry.get().notified_owned();
 
                 drop(entry);
@@ -574,8 +567,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 return None;
             }
 
-            dashmap::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(pending_backward_projection);
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert_entry(pending_backward_projection);
 
                 Some(BackwardProjectionLockGuard {
                     engine: self.engine().clone(),
@@ -652,17 +645,32 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                         .write()
                         .order,
                 ),
-                lock_guard
-                    .this_computing
-                    .callee_info
-                    .callee_queries
-                    .iter()
-                    .filter_map(|entry| {
-                        entry.value().map(|v| (*entry.key(), v))
-                    })
-                    .collect(),
-                self.engine().create_tfc_from_iter(
-                    lock_guard.this_computing.tfc.iter().map(|x| *x.key()),
+                {
+                    let mut hash_map = HashMap::with_capacity_and_hasher(
+                        lock_guard
+                            .this_computing
+                            .callee_info
+                            .callee_queries
+                            .len(),
+                        C::BuildHasher::default(),
+                    );
+
+                    lock_guard
+                        .this_computing
+                        .callee_info
+                        .callee_queries
+                        .iter_sync(|k, v| {
+                            if let Some(obs) = v {
+                                hash_map.insert(*k, *obs);
+                            }
+
+                            true
+                        });
+
+                    hash_map
+                },
+                self.engine().create_tfc_from_scc_hash_set(
+                    &lock_guard.this_computing.tfc,
                 ),
             )
         };

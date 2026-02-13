@@ -6,6 +6,7 @@ use std::{
 
 use crate::{
     kv_database::{KvDatabase, WideColumn, WideColumnValue},
+    sharded::default_shard_amount,
     single_flight,
     tiny_lfu::{self, LifecycleListener, TinyLFU},
     write_manager::write_behind::{self, Epoch},
@@ -42,15 +43,16 @@ impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static, T>
     WideColumnCache<K, V, T>
 {
     #[allow(clippy::cast_possible_truncation)]
-    pub fn new(capacity: u64, shard_amount: usize) -> Self {
+    pub fn new(capacity: u64) -> Self {
         Self {
             tiny_lfu: TinyLFU::new(
                 capacity as usize,
-                shard_amount,
                 tiny_lfu::UnpinStrategy::Notify,
                 tiny_lfu::MaintenanceMode::Piggyback,
             ),
-            single_flight: single_flight::SingleFlight::new(shard_amount),
+            single_flight: single_flight::SingleFlight::new(
+                default_shard_amount(),
+            ),
             _phantom: std::marker::PhantomData,
         }
     }

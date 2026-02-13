@@ -20,6 +20,7 @@ use parking_lot::RwLock;
 use crate::{
     key_of_set_map::{ConcurrentSet, KeyOfSetMap, OwnedIterator},
     kv_database::{KeyOfSetColumn, KvDatabase},
+    sharded::default_shard_amount,
     single_flight,
     tiny_lfu::{self, LifecycleListener, TinyLFU},
     write_manager::write_behind::{self, Epoch, KeyOfSetCache},
@@ -59,8 +60,8 @@ impl<
     ///
     /// A new `CacheKeyOfSetMap` instance.
     #[must_use]
-    pub fn new(cap: u64, shard_amount: usize, db: Db) -> Self {
-        Self { repr: Arc::new(Repr::new(cap, shard_amount)), db }
+    pub fn new(cap: u64, db: Db) -> Self {
+        Self { repr: Arc::new(Repr::new(cap)), db }
     }
 }
 
@@ -232,21 +233,21 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
     /// Creates a new representation with the specified cache capacity.
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
-    pub fn new(cap: u64, shard_amount: usize) -> Self {
+    pub fn new(cap: u64) -> Self {
         Self {
             staging: TinyLFU::new(
                 2048,
-                shard_amount,
                 tiny_lfu::UnpinStrategy::Notify,
                 tiny_lfu::MaintenanceMode::Piggyback,
             ),
             cache: TinyLFU::new(
                 cap as usize,
-                shard_amount,
                 tiny_lfu::UnpinStrategy::Poll,
                 tiny_lfu::MaintenanceMode::Piggyback,
             ),
-            single_flight: single_flight::SingleFlight::new(shard_amount),
+            single_flight: single_flight::SingleFlight::new(
+                default_shard_amount(),
+            ),
         }
     }
 

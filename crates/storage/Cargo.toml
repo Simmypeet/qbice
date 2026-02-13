@@ -28,6 +28,7 @@ tokio.workspace = true
 ouroboros.workspace = true
 bon.workspace = true
 crossbeam.workspace = true
+scc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

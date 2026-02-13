@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use fxhash::FxHashSet;
+use fxhash::{FxBuildHasher, FxHashSet};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::StableHash;
 use qbice_stable_type_id::Identifiable;
@@ -32,11 +32,16 @@ impl<C: Config> Engine<C> {
         self.interner.intern(tfc)
     }
 
-    pub(super) fn create_tfc_from_iter(
+    pub(super) fn create_tfc_from_scc_hash_set(
         &self,
-        query_ids: impl IntoIterator<Item = QueryID>,
+        query_ids: &scc::HashSet<QueryID, FxBuildHasher>,
     ) -> Interned<TransitiveFirewallCallees> {
-        let set: FxHashSet<QueryID> = query_ids.into_iter().collect();
+        let mut set = FxHashSet::with_capacity_and_hasher(
+            query_ids.len(),
+            FxBuildHasher::default(),
+        );
+
+        query_ids.iter_sync(|k| set.insert(*k));
 
         let tfc = TransitiveFirewallCallees(set);
         self.interner.intern(tfc)

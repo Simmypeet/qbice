@@ -12,6 +12,14 @@ pub struct ReadBuffer<T> {
     count: AtomicUsize,
 }
 
+thread_local! {
+    #[allow(clippy::cast_possible_truncation)]
+    static STRIPE_INDEX: usize = {
+        let id = FxBuildHasher::new().hash_one(std::thread::current().id());
+        id as usize
+    };
+}
+
 impl<T> ReadBuffer<T> {
     pub fn new(num_shards: usize, capacity_per_shard: usize) -> Self {
         // Ensure power of 2 for fast masking
@@ -39,9 +47,8 @@ impl<T> ReadBuffer<T> {
     /// Returns: Nothing. If it fails, we don't care.
     #[allow(clippy::cast_possible_truncation)]
     pub fn push(&self, item: T) {
-        let id = FxBuildHasher::new().hash_one(std::thread::current().id());
-        let index = (id as usize) & self.mask;
-
+        let index = STRIPE_INDEX.with(|i| *i) & self.mask;
+        
         if self.shards[index].push(item).is_ok() {
             self.count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }

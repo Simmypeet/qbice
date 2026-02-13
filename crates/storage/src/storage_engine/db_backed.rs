@@ -111,7 +111,6 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     ) -> Self::SingleMap<K, V> {
         CacheSingleMap::new(
             self.configuration.cache_capacity,
-            self.configuration.default_shard_amount,
             self.backing_db.clone(),
         )
     }
@@ -119,7 +118,6 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     fn new_dynamic_map<K: WideColumn>(&self) -> Self::DynamicMap<K> {
         CacheDynamicMap::new(
             self.configuration.cache_capacity,
-            self.configuration.default_shard_amount,
             self.backing_db.clone(),
         )
     }
@@ -132,7 +130,6 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     ) -> Self::KeyOfSetMap<K, C> {
         CacheKeyOfSetMap::new(
             self.configuration.cache_capacity,
-            self.configuration.default_shard_amount,
             self.backing_db.clone(),
         )
     }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{BuildHasher, Hash},
     marker::PhantomData,
     mem::ManuallyDrop,
@@ -1032,7 +1032,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         );
 
         let transitive_firewall_callees =
-            self.engine().create_tfc_from_iter(std::iter::empty());
+            self.engine().create_tfc(HashSet::default());
         let transitive_firewall_callees_fingerprint =
             self.engine().hash(&transitive_firewall_callees);
 

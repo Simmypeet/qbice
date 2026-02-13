@@ -1,11 +1,9 @@
 //! In-memory implementation of [`SingleMap`].
 
-use dashmap::DashMap;
 use fxhash::FxBuildHasher;
 
 use crate::{
     kv_database::{WideColumn, WideColumnValue},
-    sharded::default_shard_amount,
     single_map::SingleMap,
     write_batch::FauxWriteBatch,
 };
@@ -23,7 +21,7 @@ use crate::{
 /// - `S`: The hash builder type for the underlying [`DashMap`].
 #[derive(Debug)]
 pub struct InMemorySingleMap<K: WideColumn, V> {
-    map: DashMap<K::Key, V, FxBuildHasher>,
+    map: scc::HashMap<K::Key, V, FxBuildHasher>,
 }
 
 impl<K: WideColumn, V> InMemorySingleMap<K, V> {
@@ -34,12 +32,7 @@ impl<K: WideColumn, V> InMemorySingleMap<K, V> {
     /// A new instance of `InMemorySingleMap`.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            map: DashMap::with_capacity_and_hasher(
-                default_shard_amount(),
-                FxBuildHasher::default(),
-            ),
-        }
+        Self { map: scc::HashMap::with_hasher(FxBuildHasher::default()) }
     }
 }
 
@@ -53,7 +46,7 @@ impl<K: WideColumn, V: WideColumnValue<K>> SingleMap<K, V>
     type WriteTransaction = FauxWriteBatch;
 
     async fn get(&self, key: &K::Key) -> Option<V> {
-        self.map.get(key).map(|v| v.value().clone())
+        self.map.read_sync(key, |_, value| value.clone())
     }
 
     async fn insert(
@@ -62,7 +55,7 @@ impl<K: WideColumn, V: WideColumnValue<K>> SingleMap<K, V>
         value: V,
         _write_transaction: &mut Self::WriteTransaction,
     ) {
-        self.map.insert(key, value);
+        self.map.upsert_sync(key, value);
     }
 
     async fn remove(
@@ -70,6 +63,6 @@ impl<K: WideColumn, V: WideColumnValue<K>> SingleMap<K, V>
         key: &K::Key,
         _write_transaction: &mut Self::WriteTransaction,
     ) {
-        self.map.remove(key);
+        self.map.remove_sync(key);
     }
 }

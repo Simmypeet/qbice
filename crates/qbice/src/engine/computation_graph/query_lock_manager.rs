@@ -3,7 +3,7 @@ use std::sync::Arc;
 use qbice_storage::tiny_lfu::{LifecycleListener, TinyLFU};
 use tokio::sync::RwLock;
 
-use crate::{engine::default_shard_amount, query::QueryID};
+use crate::query::QueryID;
 
 #[derive(Debug)]
 pub enum QueryLock {
@@ -44,7 +44,6 @@ impl QueryLockManager {
     pub fn new(capacity: u64) -> Self {
         let cache = TinyLFU::new(
             capacity as usize,
-            default_shard_amount(),
             qbice_storage::tiny_lfu::UnpinStrategy::Poll,
             qbice_storage::tiny_lfu::MaintenanceMode::Piggyback,
         );

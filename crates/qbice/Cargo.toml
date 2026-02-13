@@ -36,6 +36,7 @@ thread_local.workspace = true
 ouroboros.workspace = true
 tracing.workspace = true
 enum-as-inner.workspace = true
+scc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

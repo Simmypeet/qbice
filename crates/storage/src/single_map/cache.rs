@@ -40,8 +40,8 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase>
     ///
     /// A new `CacheSingleMap` instance.
     #[must_use]
-    pub fn new(cap: u64, shard_amount: usize, db: Db) -> Self {
-        Self { cache: Arc::new(WideColumnCache::new(cap, shard_amount)), db }
+    pub fn new(cap: u64, db: Db) -> Self {
+        Self { cache: Arc::new(WideColumnCache::new(cap)), db }
     }
 }
 

@@ -1,12 +1,11 @@
 //! In-memory implementation of [`KeyOfSetMap`].
 
-use dashmap::DashMap;
 use fxhash::FxBuildHasher;
+use scc::hash_map::Entry;
 
 use crate::{
     key_of_set_map::{ConcurrentSet, KeyOfSetMap, OwnedIterator},
     kv_database::KeyOfSetColumn,
-    sharded::default_shard_amount,
     write_batch::FauxWriteBatch,
 };
 
@@ -26,7 +25,7 @@ pub struct InMemoryKeyOfSetMap<
     K: KeyOfSetColumn,
     C: ConcurrentSet<Element = K::Element>,
 > {
-    map: DashMap<K::Key, C, FxBuildHasher>,
+    map: scc::HashMap<K::Key, C, FxBuildHasher>,
 }
 
 impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
@@ -39,12 +38,7 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element>>
     /// A new instance of `InMemoryKeyOfSetMap`.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            map: DashMap::with_capacity_and_hasher(
-                default_shard_amount(),
-                FxBuildHasher::default(),
-            ),
-        }
+        Self { map: scc::HashMap::with_hasher(FxBuildHasher::default()) }
     }
 }
 
@@ -60,24 +54,21 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + Default>
     type WriteBatch = FauxWriteBatch;
 
     async fn get(&self, key: &K::Key) -> impl Iterator<Item = C::Element> {
-        if let Some(set) = self.map.get(key) {
-            let cloned_set = set.clone();
-            drop(set);
-
-            return OwnedIterator::new(cloned_set, |x| x.iter());
+        if let Some(set) = self.map.read_sync(key, |_, set| set.clone()) {
+            return OwnedIterator::new(set, |x| x.iter());
         }
 
-        match self.map.entry(key.clone()) {
-            dashmap::Entry::Occupied(occupied_entry) => {
+        match self.map.entry_sync(key.clone()) {
+            Entry::Occupied(occupied_entry) => {
                 let cloned_set = occupied_entry.get().clone();
                 drop(occupied_entry);
 
                 OwnedIterator::new(cloned_set, |x| x.iter())
             }
 
-            dashmap::Entry::Vacant(vacant_entry) => {
+            Entry::Vacant(vacant_entry) => {
                 let new_set = C::default();
-                vacant_entry.insert(new_set.clone());
+                vacant_entry.insert_entry(new_set.clone());
 
                 OwnedIterator::new(new_set, |x| x.iter())
             }
@@ -90,7 +81,7 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + Default>
         element: <K as KeyOfSetColumn>::Element,
         _write_batch: &mut Self::WriteBatch,
     ) {
-        let set = self.map.get(&key).map(|set| set.clone());
+        let set = self.map.read_sync(&key, |_, set| set.clone());
 
         // If the set does not exist, create a new one and insert it.
         if let Some(set) = set {
@@ -100,15 +91,15 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + Default>
 
         let new_set = C::default();
 
-        match self.map.entry(key) {
-            dashmap::Entry::Occupied(occupied_entry) => {
+        match self.map.entry_sync(key) {
+            Entry::Occupied(occupied_entry) => {
                 let set = occupied_entry.get();
 
                 set.insert_element(element);
             }
 
-            dashmap::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(new_set.clone());
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert_entry(new_set.clone());
                 new_set.insert_element(element);
             }
         }
@@ -120,7 +111,7 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + Default>
         element: &<K as KeyOfSetColumn>::Element,
         _write_batch: &mut Self::WriteBatch,
     ) {
-        let set = self.map.get(key).map(|set| set.clone());
+        let set = self.map.read_sync(key, |_, set| set.clone());
 
         if let Some(set) = set {
             set.remove_element(element);
