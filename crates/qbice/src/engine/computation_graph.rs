@@ -131,24 +131,11 @@ impl<C: Config> ComputationGraph<C> {
 /// # Creating a `TrackedEngine`
 ///
 /// Create from an `Arc<Engine>` using the [`tracked`](Engine::tracked)
-/// method:
-///
-/// ```rust,ignore
-/// use std::sync::Arc;
-/// use qbice::Engine;
-///
-/// let engine: Engine<_> = /* ... */;
-/// let engine = Arc::new(engine);
-/// let tracked = engine.tracked();
-/// ```
+/// method.
 ///
 /// # Executing Queries
 ///
-/// Use the [`query`](TrackedEngine::query) method to execute queries:
-///
-/// ```rust,ignore
-/// let result = tracked.query(&my_query).await?;
-/// ```
+/// Use the [`query`](TrackedEngine::query) method to execute queries.
 ///
 /// # Thread Safety
 ///
@@ -158,36 +145,13 @@ impl<C: Config> ComputationGraph<C> {
 /// - **Send**: Can be moved to other threads
 /// - **Sync**: Can be shared across threads via `Arc` or references
 ///
-/// This enables concurrent query execution:
-///
-/// ```rust,ignore
-/// let tracked = engine.tracked();
-///
-/// // Clone for concurrent execution
-/// let tracked1 = tracked.clone();
-/// let tracked2 = tracked.clone();
-///
-/// tokio::spawn(async move {
-///     tracked1.query(&query1).await
-/// });
-///
-/// tokio::spawn(async move {
-///     tracked2.query(&query2).await
-/// });
-/// ```
+/// This enables concurrent query execution from multiple threads.
 ///
 /// # Local Caching
 ///
 /// Each `TrackedEngine` maintains a local cache of query results. Clones
 /// share this cache:
 ///
-/// ```text
-/// TrackedEngine
-///   ├─ Arc<Engine>           (shared)
-///   └─ Arc<LocalCache>       (shared among clones)
-/// ```
-///
-/// Benefits:
 /// - Fast repeated access to the same query within a "session"
 /// - Reduces contention on the central database
 ///
@@ -195,23 +159,11 @@ impl<C: Config> ComputationGraph<C> {
 ///
 /// The typical pattern for using `TrackedEngine`:
 ///
-/// ```rust,ignore
-/// // 1. Create and use
-/// let mut engine_arc = Arc::new(engine);
-/// let tracked = engine_arc.clone().tracked();
-/// let result = tracked.query(&query).await?;
-///
-/// // 2. Drop to release Arc reference
-/// drop(tracked);
-///
-/// // 3. Modify inputs
-/// let mut session = engine_arc.input_session();
-/// session.set_input(input_query, new_value);
-/// drop(session);
-///
-/// // 4. Create new TrackedEngine for next round
-/// let tracked = engine_arc.clone().tracked();
-/// ```
+/// 1. Wrap engine in Arc and create `TrackedEngine` via `tracked()`
+/// 2. Execute queries via `query()`
+/// 3. Drop `TrackedEngine` to release Arc reference
+/// 4. Modify inputs via `InputSession`
+/// 5. Create new `TrackedEngine` for next round
 ///
 /// # Relationship to Engine
 ///
@@ -382,50 +334,22 @@ impl<C: Config> Engine<C> {
     /// # Multiple Instances
     ///
     /// You can create multiple `TrackedEngine` instances from the same
-    /// `Arc<Engine>` for concurrent querying:
-    ///
-    /// ```rust,ignore
-    /// let engine = Arc::new(engine);
-    /// let tracked1 = engine.clone().tracked();
-    /// let tracked2 = engine.clone().tracked();
-    ///
-    /// // Both can execute queries concurrently
-    /// let (result1, result2) = tokio::join!(
-    ///     tracked1.query(&query1),
-    ///     tracked2.query(&query2),
-    /// );
-    /// ```
+    /// `Arc<Engine>` by cloning the Arc before calling `tracked()`.
+    /// This enables concurrent querying.
     ///
     /// # Local Caching
     ///
     /// Each `TrackedEngine` has its own local cache for query results. Cloning
-    /// a `TrackedEngine` shares this cache:
-    ///
-    /// ```rust,ignore
-    /// let tracked1 = engine.clone().tracked();
-    /// let tracked2 = tracked1.clone(); // Shares cache with tracked1
-    /// ```
+    /// a `TrackedEngine` creates a new cache instance.
     ///
     /// # Lifecycle
     ///
     /// Typical usage pattern:
     ///
-    /// ```rust,ignore
-    /// // 1. Wrap engine in Arc and create TrackedEngine
-    /// let engine = Arc::new(engine);
-    /// let tracked = engine.clone().tracked();
-    ///
-    /// // 2. Execute queries
-    /// let result = tracked.query(&my_query).await?;
-    ///
-    /// // 3. Drop TrackedEngine to release Arc reference
-    /// drop(tracked);
-    ///
-    /// // 4. Modify inputs
-    /// let mut session = engine.input_session();
-    /// session.set_input(input_query, new_value);
-    /// drop(session);
-    /// ```
+    /// 1. Wrap engine in Arc and create `TrackedEngine`
+    /// 2. Execute queries
+    /// 3. Drop `TrackedEngine` to release Arc reference
+    /// 4. Modify inputs via `InputSession`
     #[must_use]
     #[allow(clippy::unused_async)]
     pub async fn tracked(self: Arc<Self>) -> TrackedEngine<C> {

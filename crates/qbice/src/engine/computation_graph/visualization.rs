@@ -14,75 +14,6 @@
 //! - **Filtering**: Filter by query type
 //! - **Edge coloring**: Distinguish clean vs dirty dependency edges
 //!
-//! # Example
-//!
-//! ```rust,ignore
-//! use std::sync::Arc;
-//!
-//! use qbice::{
-//!     Config, DefaultConfig, Decode, Encode, Engine, Executor, Identifiable,
-//!     StableHash, TrackedEngine, CyclicError, Query,
-//!     serialize::Plugin,
-//!     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
-//!     storage::kv_database::rocksdb::RocksDB,
-//! };
-//!
-//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable, Encode, Decode)]
-//! struct Input(u64);
-//! impl Query for Input {
-//!     type Value = i64;
-//! }
-//!
-//! #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable, Encode, Decode)]
-//! struct Sum {
-//!     a: Input,
-//!     b: Input,
-//! }
-//! impl Query for Sum {
-//!     type Value = i64;
-//! }
-//!
-//! struct SumExecutor;
-//! impl<C: Config> Executor<Sum, C> for SumExecutor {
-//!     async fn execute(
-//!         &self,
-//!         q: &Sum,
-//!         e: &TrackedEngine<C>,
-//!     ) -> Result<i64, CyclicError> {
-//!         Ok(e.query(&q.a).await? + e.query(&q.b).await?)
-//!     }
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let temp_dir = tempfile::tempdir()?;
-//!
-//!     let mut engine = Engine::<DefaultConfig>::new_with(
-//!         Plugin::default(),
-//!         RocksDB::factory(temp_dir.path()),
-//!         SeededStableHasherBuilder::<Sip128Hasher>::new(0),
-//!     )?;
-//!     engine.register_executor::<Sum, _>(Arc::new(SumExecutor));
-//!
-//!     {
-//!         let mut session = engine.input_session();
-//!         session.set_input(Input(0), 10);
-//!         session.set_input(Input(1), 20);
-//!     }
-//!
-//!     let mut engine = Arc::new(engine);
-//!     let tracked = engine.clone().tracked();
-//!     let query = Sum { a: Input(0), b: Input(1) };
-//!     let _ = tracked.query(&query).await;
-//!     drop(tracked);
-//!
-//!     // Generate visualization
-//!     engine.visualize_html(&query, "dependency_graph.html")?;
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
 //! # Graph Structure
 //!
 //! The visualization shows:
@@ -177,38 +108,6 @@ impl<C: Config> Engine<C> {
     /// # Returns
     ///
     /// A [`GraphSnapshot`] containing all reachable nodes and edges.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use qbice::{
-    ///     Identifiable, StableHash, Encode, Decode,
-    ///     config::DefaultConfig, Engine, Query,
-    ///     serialize::Plugin,
-    ///     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
-    ///     storage::kv_database::rocksdb::RocksDB,
-    /// };
-    ///
-    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable, Encode, Decode)]
-    /// struct MyQuery(u64);
-    /// impl Query for MyQuery {
-    ///     type Value = i64;
-    /// }
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let temp_dir = tempfile::tempdir()?;
-    /// let mut engine = Engine::<DefaultConfig>::new_with(
-    ///     Plugin::default(),
-    ///     RocksDB::factory(temp_dir.path()),
-    ///     SeededStableHasherBuilder::<Sip128Hasher>::new(0),
-    /// )?;
-    /// // ... register executors and run queries ...
-    ///
-    /// let snapshot = engine.snapshot_graph_from(&MyQuery(0));
-    /// println!("Graph has {} nodes", snapshot.nodes.len());
-    /// # Ok(())
-    /// # }
-    /// ```
     #[must_use]
     async fn snapshot_graph_from<Q: Query>(&self, query: &Q) -> GraphSnapshot {
         let _caller = CallerInformation::new(
@@ -334,39 +233,6 @@ impl<C: Config> Engine<C> {
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use qbice::{
-    ///     Identifiable, StableHash, Encode, Decode,
-    ///     config::DefaultConfig, Engine, Query,
-    ///     serialize::Plugin,
-    ///     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
-    ///     storage::kv_database::rocksdb::RocksDB,
-    /// };
-    ///
-    /// #[derive(Debug, Clone, PartialEq, Eq, Hash, StableHash, Identifiable, Encode, Decode)]
-    /// struct MyQuery(u64);
-    /// impl Query for MyQuery {
-    ///     type Value = i64;
-    /// }
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let temp_dir = tempfile::tempdir()?;
-    /// let mut engine = Engine::<DefaultConfig>::new_with(
-    ///     Plugin::default(),
-    ///     RocksDB::factory(temp_dir.path()),
-    ///     SeededStableHasherBuilder::<Sip128Hasher>::new(0),
-    /// )?;
-    /// // ... register executors and run queries ...
-    ///
-    /// engine
-    ///     .visualize_html(&MyQuery(0), "graph.html")
-    ///     .expect("Failed to write visualization");
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn visualize_html<Q: Query>(
         &self,
         query: &Q,
@@ -391,17 +257,6 @@ impl<C: Config> Engine<C> {
 /// # Errors
 ///
 /// Returns an error if the file cannot be written.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use qbice::engine::computation_graph::visualization::{GraphSnapshot, write_html_visualization};
-///
-/// let snapshot = GraphSnapshot { nodes: vec![], edges: vec![] };
-///
-/// write_html_visualization(&snapshot, "empty_graph.html")
-///     .expect("Failed to write");
-/// ```
 fn write_html_visualization(
     snapshot: &GraphSnapshot,
     output_path: impl AsRef<Path>,

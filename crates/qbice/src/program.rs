@@ -8,17 +8,12 @@
 //!
 //! In large applications with many executors, the traditional approach of
 //! registering all executors in one place leads to a long, hard-to-maintain
-//! list of registration calls:
+//! list of registration calls. This causes several issues:
 //!
-//! ```ignore
-//! fn main() {
-//!     let mut engine = Engine::new();
-//!     engine.register_executor::<QueryA, ExecutorA>(Arc::new(ExecutorA::default()));
-//!     engine.register_executor::<QueryB, ExecutorB>(Arc::new(ExecutorB::default()));
-//!     engine.register_executor::<QueryC, ExecutorC>(Arc::new(ExecutorC::default()));
-//!     // ... hundreds more lines ...
-//! }
-//! ```
+//! - **Scalability**: Adding a new query type requires modifying a central file
+//! - **Coupling**: Query declarations become tightly coupled to a single
+//!   registration point
+//! - **Maintainability**: Long registration functions are error-prone
 //!
 //! This module allows you to declare executor registrations alongside the
 //! executor definitions themselves, using the [`linkme`] crate's distributed
@@ -26,42 +21,32 @@
 //!
 //! # Usage
 //!
-//! 1. Define a distributed slice for your program's registrations:
+//! 1. **Define a Distributed Slice**: Create a module or library that defines
+//!    your program's registrations using `#[distributed_slice]`
 //!
-//! ```ignore
-//! use linkme::distributed_slice;
-//! use qbice::{program::Registration, MyConfig};
+//! 2. **Register Executors at Declaration Site**: In each module where you
+//!    define executors, add a distributed slice entry using
+//!    `#[distributed_slice(REGISTRATIONS)]`
 //!
-//! #[distributed_slice]
-//! pub static REGISTRATIONS: [Registration<MyConfig>];
-//! ```
+//! 3. **Register All Executors at Once**: In your `main` or initialization
+//!    function, call [`Engine::register_program`] with your distributed slice
 //!
-//! 2. Register executors at their declaration site:
+//! # Benefits
 //!
-//! ```ignore
-//! use linkme::distributed_slice;
-//! use qbice::{program::Registration, Executor, Query};
+//! - **Modularity**: Executors are registered near their definitions
+//! - **Scalability**: Adding new queries doesn't require modifying a central
+//!   file
+//! - **Maintainability**: Each executor registration is self-contained
+//! - **Decoupling**: Query modules don't depend on a central registry
 //!
-//! struct MyQuery;
-//! impl Query for MyQuery { /* ... */ }
+//! # Comparison with Manual Registration
 //!
-//! #[derive(Default)]
-//! struct MyExecutor;
-//! impl Executor<MyQuery, MyConfig> for MyExecutor { /* ... */ }
-//!
-//! #[distributed_slice(REGISTRATIONS)]
-//! static _: Registration<MyConfig> = Registration::new::<MyQuery, MyExecutor>();
-//! ```
-//!
-//! 3. Register all executors at once during engine setup:
-//!
-//! ```ignore
-//! fn main() {
-//!     let mut engine = Engine::new();
-//!     engine.register_program(REGISTRATIONS);
-//!     // All executors are now registered!
-//! }
-//! ```
+//! | Aspect | Manual | Distributed |
+//! |--------|--------|-------------|
+//! | New executor | Modify main.rs | Add line near executor |
+//! | Central point of failure | Yes | No |
+//! | Scalability | Poor | Good |
+//! | Code organization | Centralized | Decentralized |
 
 use std::sync::Arc;
 
@@ -77,21 +62,6 @@ use crate::{Config, Engine, Executor, Query};
 /// # Type Parameters
 ///
 /// * `C` - The configuration type that implements [`Config`].
-///
-/// # Example
-///
-/// ```ignore
-/// use linkme::distributed_slice;
-/// use qbice::{program::Registration, MyConfig};
-///
-/// // Define the distributed slice in a central location
-/// #[distributed_slice]
-/// pub static MY_PROGRAM: [Registration<MyConfig>];
-///
-/// // In each executor's module, add a registration
-/// #[distributed_slice(MY_PROGRAM)]
-/// static _: Registration<MyConfig> = Registration::new::<MyQuery, MyExecutor>();
-/// ```
 #[derive(Debug, Clone, Copy, Hash)]
 pub struct Registration<C: Config> {
     register_executor_fn: fn(&mut Engine<C>),
@@ -104,6 +74,9 @@ impl<C: Config> Registration<C> {
     /// [`Engine`], will register the specified executor type `E` to handle
     /// queries of type `Q`.
     ///
+    /// The executor is instantiated using its `Default` implementation. If you
+    /// need custom executor initialization, use manual registration instead.
+    ///
     /// # Type Parameters
     ///
     /// * `Q` - The query type that the executor handles. Must implement
@@ -112,15 +85,14 @@ impl<C: Config> Registration<C> {
     ///   [`Default`]. The [`Default`] implementation is used to create the
     ///   executor instance during registration.
     ///
-    /// # Example
+    /// # Best Practices
     ///
-    /// ```ignore
-    /// use linkme::distributed_slice;
-    /// use qbice::program::Registration;
-    ///
-    /// #[distributed_slice(MY_PROGRAM)]
-    /// static _: Registration<MyConfig> = Registration::new::<MyQuery, MyExecutor>();
-    /// ```
+    /// - Place the registration next to the executor definition for clarity
+    /// - Use the `_` name for the registration (it's never directly used)
+    /// - Make sure the executor implements `Default` or create a manual
+    ///   registration
+    /// - Test that all expected executors are registered by the distributed
+    ///   slice
     #[must_use]
     pub const fn new<Q: Query, E: Executor<Q, C> + Default>() -> Self {
         Self { register_executor_fn: Self::register_executor::<Q, E> }
@@ -148,25 +120,6 @@ impl<C: Config> Engine<C> {
     ///   [`Registration`] entries to process. This is typically a static slice
     ///   populated using `#[distributed_slice]` attributes throughout the
     ///   codebase.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use linkme::distributed_slice;
-    /// use qbice::{Engine, program::Registration, MyConfig};
-    ///
-    /// // Define the program's registration slice
-    /// #[distributed_slice]
-    /// pub static MY_PROGRAM: [Registration<MyConfig>];
-    ///
-    /// fn main() {
-    ///     let mut engine: Engine<MyConfig> = Engine::new();
-    ///     
-    ///     // Register all executors that were added to MY_PROGRAM
-    ///     // throughout the codebase
-    ///     engine.register_program(MY_PROGRAM);
-    /// }
-    /// ```
     pub fn register_program<'x>(
         &mut self,
         registrations: impl IntoIterator<Item = &'x Registration<C>>,

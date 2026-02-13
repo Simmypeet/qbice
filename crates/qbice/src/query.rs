@@ -59,31 +59,7 @@ use qbice_stable_type_id::{Identifiable, StableTypeID};
 /// - [`Debug`]: For error messages and debugging
 /// - [`Send`] + [`Sync`]: For thread-safe access
 ///
-/// Most of these can be derived automatically:
-///
-/// ```rust
-/// use qbice::{Decode, Encode, Identifiable, Query, StableHash};
-///
-/// #[derive(
-///     Debug,
-///     Clone,
-///     PartialEq,
-///     Eq,
-///     Hash,
-///     StableHash,
-///     Identifiable,
-///     Encode,
-///     Decode,
-/// )]
-/// struct MyQuery {
-///     id: u64,
-///     name: String,
-/// }
-///
-/// impl Query for MyQuery {
-///     type Value = Vec<u8>;
-/// }
-/// ```
+/// Most of these can be derived automatically using the [`Query`] derive macro.
 ///
 /// # Value Type Requirements
 ///
@@ -129,7 +105,7 @@ pub trait Query:
 {
     /// The output value type associated with this query.
     ///
-    /// This is the type returned when fuerying the engine for this query key.
+    /// This is the type returned when querying the engine for this query key.
     type Value: 'static
         + Send
         + Sync
@@ -152,7 +128,7 @@ pub trait Query:
 ///   standard incremental computation semantics
 /// - **External data**: Use [`ExternalInput`](ExecutionStyle::ExternalInput)
 ///   for queries that read from files, network, or other external sources
-/// - **Dirty Popagation Optimization**: Use
+/// - **Dirty Propagation Optimization**: Use
 ///   [`Firewall`](ExecutionStyle::Firewall) and
 ///   [`Projection`](ExecutionStyle::Projection) to optimize dirty propagation
 ///   in large dependency graphs
@@ -235,24 +211,6 @@ pub trait Query:
 /// - Querying databases
 /// - Reading system time or environment variables
 /// - Any external state that should be explicitly controlled
-///
-/// **Example:**
-/// ```rust,ignore
-/// #[derive(Query)]
-/// struct ConfigFileQuery;
-///
-/// impl Executor<ConfigFileQuery> for ConfigFileExecutor {
-///     fn execution_style() -> ExecutionStyle {
-///         ExecutionStyle::ExternalInput
-///     }
-///
-///     async fn execute(&self, ...) -> Result<Config, CyclicError> {
-///         // Read from file system
-///         let config = read_config_from_disk()?;
-///         Ok(config)
-///     }
-/// }
-/// ```
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode,
 )]

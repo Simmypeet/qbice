@@ -13,6 +13,8 @@ keywords = ["incremental", "computation", "query", "cache", "async"]
 categories = ["caching", "concurrency", "asynchronous"]
 
 [features]
+default = ["default-config"]
+default-config = ["rocksdb"]
 rocksdb = ["qbice_storage/rocksdb"]
 fjall = ["qbice_storage/fjall"]
 

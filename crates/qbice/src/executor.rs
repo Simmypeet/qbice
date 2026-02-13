@@ -143,78 +143,9 @@ impl CyclicPanicPayload {
 /// - They may be called from multiple threads concurrently
 /// - The engine is designed for parallel query execution
 ///
-/// # Example: Basic Executor
-///
-/// ```rust,ignore
-/// use qbice::{Executor, Query, TrackedEngine, CyclicError, Config};
-///
-/// // The query type
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-/// struct Add { a: u64, b: u64 }
-///
-/// impl Query for Add {
-///     type Value = u64;
-/// }
-///
-/// // The executor implementation
-/// struct AddExecutor;
-///
-/// impl<C: Config> Executor<Add, C> for AddExecutor {
-///     async fn execute(
-///         &self,
-///         query: &Add,
-///         _engine: &TrackedEngine<C>,
-///     ) -> Result<u64, CyclicError> {
-///         // Simple, pure computation
-///         Ok(query.a + query.b)
-///     }
-/// }
-/// ```
-///
-/// # Example: Executor with Dependencies
-///
-/// ```rust,ignore
-/// struct MultiplyExecutor;
-///
-/// impl<C: Config> Executor<Multiply, C> for MultiplyExecutor {
-///     async fn execute(
-///         &self,
-///         query: &Multiply,
-///         engine: &TrackedEngine<C>,
-///     ) -> Result<u64, CyclicError> {
-///         // Query dependencies
-///         let a = engine.query(&query.a).await?;
-///         let b = engine.query(&query.b).await?;
-///
-///         // Compute based on dependencies
-///         Ok(a * b)
-///     }
-/// }
-/// ```
-///
-/// # Example: Executor with State (Instrumentation)
-///
-/// ```rust,ignore
-/// use std::sync::atomic::{AtomicUsize, Ordering};
-///
-/// struct InstrumentedExecutor {
-///     call_count: AtomicUsize,
-/// }
-///
-/// impl<C: Config> Executor<MyQuery, C> for InstrumentedExecutor {
-///     async fn execute(
-///         &self,
-///         query: &MyQuery,
-///         engine: &TrackedEngine<C>,
-///     ) -> Result<Value, CyclicError> {
-///         // Track calls (doesn't affect purity of result)
-///         self.call_count.fetch_add(1, Ordering::Relaxed);
-///
-///         // Pure computation
-///         // ...
-///     }
-/// }
-/// ```
+/// The [`execute`](Executor::execute) method returns `Q::Value`
+/// directly. If you need error handling, use `Result<T, E>` as your `Value`
+/// type.
 pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     /// Executes the query and returns its computed value.
     ///
@@ -228,16 +159,18 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(value)` on success, or `Err(CyclicError)` if a cyclic
-    /// dependency is detected during execution.
+    /// Returns the computed query value. Note that the return type is
+    /// `Q::Value`, not a `Result` type. Use a `Result<T, E>` as your
+    /// `Value` type if you need to represent errors.
     ///
     /// # Dependency Queries
     ///
-    /// Use `engine.query(&dep_query)` to access dependent values. Each such
-    /// call:
+    /// Use `engine.query(&dep_query).await` to access dependent values. Each
+    /// such call:
     /// - Records a dependency edge in the computation graph
     /// - May trigger recursive execution if the dependency is stale
-    /// - May detect cycles and return `CyclicError`
+    /// - May pause execution if a cyclic dependency is being handled
+    /// - Returns the cached or newly computed value
     ///
     /// # Async Execution
     ///
@@ -249,46 +182,8 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     ///
     /// # Error Handling
     ///
-    /// Currently, only `CyclicError` can be returned. If your computation can
-    /// fail in other ways, encode the error in the value type:
-    ///
-    /// ```rust,ignore
-    /// impl Query for Fallible {
-    ///     type Value = Result<Success, MyError>;
-    /// }
-    ///
-    /// impl<C: Config> Executor<Fallible, C> for FallibleExecutor {
-    ///     async fn execute(...) -> Result<Result<Success, MyError>, CyclicError> {
-    ///         let result = try_computation();
-    ///         Ok(result) // Wrap your Result in Ok
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// # Example: Concurrent Dependency Queries
-    ///
-    /// ```rust,ignore
-    /// async fn execute(
-    ///     &self,
-    ///     query: &ComplexQuery,
-    ///     engine: &TrackedEngine<C>,
-    /// ) -> Result<Value, CyclicError> {
-    ///     // Query multiple dependencies in parallel
-    ///     let (a, b, c) = tokio::join!(
-    ///         engine.query(&query.dep_a),
-    ///         engine.query(&query.dep_b),
-    ///         engine.query(&query.dep_c),
-    ///     );
-    ///
-    ///     // All three must succeed
-    ///     let a = a?;
-    ///     let b = b?;
-    ///     let c = c?;
-    ///
-    ///     // Compute based on dependencies
-    ///     Ok(combine(a, b, c))
-    /// }
-    /// ```
+    /// The executor returns `Q::Value` directly. To handle computation errors,
+    /// use a `Result<T, E>` as your `Value` type.
     fn execute<'s, 'q, 'e>(
         &'s self,
         query: &'q Q,
@@ -336,41 +231,6 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     ///
     /// The default implementation **panics**. Override this method if your
     /// query intentionally participates in cycles.
-    ///
-    /// # Use Cases
-    ///
-    /// ## Fixed-Point Computation
-    ///
-    /// Some algorithms require iterative refinement until a fixed point:
-    ///
-    /// ```rust,ignore
-    /// impl<C: Config> Executor<IterativeQuery, C> for IterativeExecutor {
-    ///     fn scc_value() -> Value {
-    ///         // Start with a conservative initial value
-    ///         Value::default()
-    ///     }
-    ///
-    ///     async fn execute(...) -> Result<Value, CyclicError> {
-    ///         // Compute based on previous iteration
-    ///         let prev = engine.query(&self).await?;  // May get SCC value
-    ///         let next = refine(prev);
-    ///         Ok(next)
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// ## Graph Analysis
-    ///
-    /// Queries representing graph nodes that reference each other:
-    ///
-    /// ```rust,ignore
-    /// impl<C: Config> Executor<NodeQuery, C> for NodeExecutor {
-    ///     fn scc_value() -> NodeInfo {
-    ///         // Provide a default for cyclic references
-    ///         NodeInfo::unresolved()
-    ///     }
-    /// }
-    /// ```
     ///
     /// # Best Practices
     ///

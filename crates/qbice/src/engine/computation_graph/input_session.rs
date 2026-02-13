@@ -54,28 +54,6 @@ use crate::{
 /// The session increments the timestamp on creation, causing any in-flight
 /// queries to become stale and await cancellation. This ensures consistency
 /// between the input changes and query results.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use qbice::Engine;
-///
-/// // Initial setup
-/// {
-///     let mut session = engine.input_session();
-///     session.set_input(UserId, 42);
-///     session.set_input(UserName, "Alice");
-/// } // Changes committed and dirty propagation occurs here
-///
-/// // Query dependent values
-/// let profile = engine.query(UserProfile(42)).await;
-///
-/// // Update an input
-/// {
-///     let mut session = engine.input_session();
-///     session.set_input(UserName, "Alice Smith"); // Only this query marked dirty
-/// } // Dirty propagation recomputes affected queries
-/// ```
 pub struct InputSession<C: Config> {
     engine: Arc<Engine<C>>,
     dirty_batch: Arc<RwLock<VecDeque<QueryID>>>,
@@ -179,25 +157,6 @@ impl<C: Config> Engine<C> {
     /// - Compares new values with existing ones via fingerprints
     /// - Marks changed queries and their dependents as dirty
     /// - Increments the global timestamp (if any changes occurred)
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use qbice::Engine;
-    ///
-    /// // Set initial inputs
-    /// {
-    ///     let mut session = engine.input_session();
-    ///     session.set_input(InputA, 10);
-    ///     session.set_input(InputB, 20);
-    /// } // Changes committed here
-    ///
-    /// // Later, update an input
-    /// {
-    ///     let mut session = engine.input_session();
-    ///     session.set_input(InputA, 15); // Triggers dirty propagation
-    /// }
-    /// ```
     ///
     /// # Cancellation and Timestamp Management
     ///
@@ -370,20 +329,6 @@ impl<C: Config> InputSession<C> {
     /// External input queries represent data from the outside world (files,
     /// network, databases, etc.). When you know the external data has changed,
     /// call this method to refresh and update all queries of that type.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// // Assume ConfigFileQuery reads configuration from disk
-    /// // and was executed with ExecutionStyle::ExternalInput
-    ///
-    /// // When you know the config file has changed:
-    /// {
-    ///     let mut session = engine.input_session();
-    ///     session.refresh::<ConfigFileQuery>().await;
-    /// } // Only changed ConfigFileQuery instances will trigger dirty
-    ///   // propagation
-    /// ```
     ///
     /// # Type Parameters
     ///
