@@ -32,12 +32,10 @@ async fn scan_iterator_isolation() {
 
     a.commit();
 
-    let iter = db.scan_members::<KeyOfSetTest>(&0).collect::<HashSet<_>>();
+    let scanned = db.scan_members::<KeyOfSetTest>(&0).collect::<HashSet<_>>();
+    let expected = HashSet::from([1, 2, 3]);
 
-    assert_eq!(iter.len(), 3);
-    assert!(iter.contains(&0));
-    assert!(iter.contains(&1));
-    assert!(iter.contains(&2));
+    assert_eq!(scanned, expected);
 
     let mut b = db.write_batch();
     b.insert_member::<KeyOfSetTest>(&0, &4);
@@ -46,10 +44,7 @@ async fn scan_iterator_isolation() {
     let iter_after =
         db.scan_members::<KeyOfSetTest>(&0).collect::<HashSet<_>>();
 
-    assert_eq!(iter_after.len(), 3);
-    assert!(iter_after.contains(&0));
-    assert!(iter_after.contains(&1));
-    assert!(iter_after.contains(&2));
+    assert_eq!(iter_after, expected);
 
     b.commit();
 
@@ -60,10 +55,8 @@ async fn scan_iterator_isolation() {
     c.insert_member::<KeyOfSetTest>(&0, &5);
     c.commit();
 
+    let expected_final = HashSet::from([1, 2, 3, 4]);
+
     // Should not see 5 as it was added after the iterator was created
-    assert_eq!(iter_final.len(), 4);
-    assert!(iter_final.contains(&0));
-    assert!(iter_final.contains(&1));
-    assert!(iter_final.contains(&2));
-    assert!(iter_final.contains(&4));
+    assert_eq!(iter_final, expected_final);
 }

@@ -58,11 +58,11 @@ pub struct MultiplyQuery {
 }
 
 // Test with explicit config type
-#[executor(config = qbice::DefaultConfig)]
+#[executor(config = qbice::config::DefaultConfig)]
 #[allow(clippy::unused_async)]
 async fn multiply_executor(
     query: &MultiplyQuery,
-    _engine: &TrackedEngine<qbice::DefaultConfig>,
+    _engine: &TrackedEngine<qbice::config::DefaultConfig>,
 ) -> u64 {
     u64::from(query.x) * u64::from(query.y)
 }
@@ -72,9 +72,11 @@ fn test_executor_trait_implementation() {
     // This test just verifies compilation - the executor trait is implemented
     fn requires_executor<Q: qbice::Query, C: Config, E: Executor<Q, C>>(_: E) {}
 
-    requires_executor::<AddQuery, qbice::DefaultConfig, _>(AddExecutor);
-    requires_executor::<GreetQuery, qbice::DefaultConfig, _>(GreetExecutor);
-    requires_executor::<MultiplyQuery, qbice::DefaultConfig, _>(
+    requires_executor::<AddQuery, qbice::config::DefaultConfig, _>(AddExecutor);
+    requires_executor::<GreetQuery, qbice::config::DefaultConfig, _>(
+        GreetExecutor,
+    );
+    requires_executor::<MultiplyQuery, qbice::config::DefaultConfig, _>(
         MultiplyExecutor,
     );
 }
