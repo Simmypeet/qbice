@@ -37,7 +37,10 @@ use qbice::{
     Identifiable, Query, StableHash, TrackedEngine,
     serialize::Plugin,
     stable_hash::{SeededStableHasherBuilder, Sip128Hasher},
-    storage::kv_database::rocksdb::RocksDB,
+    storage::{
+        kv_database::rocksdb::RocksDB,
+        storage_engine::db_backed::{Configuration, DbBacked, DbBackedFactory},
+    },
 };
 
 // Define query types
@@ -88,22 +91,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create and configure the engine
     let mut engine = Engine::<DefaultConfig>::new_with(
         Plugin::default(),
-        RocksDB::factory(temp_dir.path()),
+        DbBackedFactory::builder()
+            .configuration(Configuration::builder().build())
+            .db_factory(RocksDB::factory(tempdir.path()))
+            .build(),
         SeededStableHasherBuilder::<Sip128Hasher>::new(0),
-    )?;
+    ).await?;
 
     // Register executor
     engine.register_executor(Arc::new(SafeDivideExecutor));
 
     // Set initial inputs
     {
-        let mut input_session = engine.input_session();
-        input_session.set_input(Variable::A, 42);
-        input_session.set_input(Variable::B, 2);
+        let mut input_session = engine.input_session().await;
+        input_session.set_input(Variable::A, 42).await;
+        input_session.set_input(Variable::B, 2).await;
+        input_session.commit().await;
     }
 
     // Execute query
-    let tracked_engine = Arc::new(engine).tracked();
+    let tracked_engine = Arc::new(engine).tracked().await;
     let result = tracked_engine.query(&SafeDivide {
         numerator: Variable::A,
         denominator: Variable::B,
@@ -220,19 +227,11 @@ QBICE supports persistent storage of query results across program restarts. Comp
 
 ```rust
 // Results persist across program runs
-let engine1 = Engine::<DefaultConfig>::new_with(
-    Plugin::default(),
-    RocksDB::factory(&db_path),
-    hasher,
-)?;
+let engine1 = Engine::<DefaultConfig>::new_with(...).await?;
 // ... compute and store results ...
 
 // Later, in a new process
-let engine2 = Engine::<DefaultConfig>::new_with(
-    Plugin::default(),
-    RocksDB::factory(&db_path), // Same path
-    hasher,
-)?;
+let engine2 = Engine::<DefaultConfig>::new_with(...)?;
 // Previous results are loaded automatically
 ```
 

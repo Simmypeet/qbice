@@ -86,6 +86,8 @@ pub mod program;
 pub mod query;
 
 pub use config::Config;
+#[cfg(feature = "default-config")]
+pub use config::DefaultConfig;
 pub use engine::{
     Engine,
     computation_graph::{InputSession, SetInputResult, TrackedEngine},

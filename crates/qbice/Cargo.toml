@@ -1,6 +1,6 @@
 [package]
 name = "qbice"
-version = "0.4.4"
+version = "0.5.0"
 authors.workspace = true
 description.workspace = true
 edition.workspace = true
@@ -22,7 +22,7 @@ fjall = ["qbice_storage/fjall"]
 qbice_stable_hash = { version = "0.1.5", path = "../stable_hash" }
 qbice_stable_type_id = { version = "0.1.5", path = "../stable_type_id" }
 qbice_serialize = { version = "0.1.3", path = "../serialize" }
-qbice_storage = { version = "0.4.8", path = "../storage" }
+qbice_storage = { version = "0.5.0", path = "../storage" }
 qbice_derive = { version = "0.1.3", path = "../qbice_derive" }
 tokio.workspace = true
 dashmap.workspace = true
