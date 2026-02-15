@@ -77,7 +77,7 @@ impl<C: Config> Drop for InputSession<C> {
         let engine = self.engine.clone();
 
         tokio::spawn(async move {
-            let Some((transaction, _guard)) = transaction.write().await.take()
+            let Some((transaction, guard)) = transaction.write().await.take()
             else {
                 // the transaction has already been committed
                 return;
@@ -86,6 +86,8 @@ impl<C: Config> Drop for InputSession<C> {
             let dirty_batch = std::mem::take(&mut *dirty_batch.write().await);
 
             Self::commit_internal(engine, dirty_batch, transaction).await;
+
+            drop(guard);
         });
     }
 }
@@ -104,9 +106,9 @@ impl<C: Config> InputSession<C> {
             let (transaction, guard) =
                 self.transaction.write().await.take().unwrap();
 
-            let _guard = guard;
-
             Self::commit_internal(engine, dirty_batch, transaction).await;
+
+            drop(guard);
         }
         .guarded()
         .await;
@@ -260,6 +262,81 @@ impl<C: Config> InputSession<C> {
         let query_id = QueryID::new::<Q>(query_hash);
 
         let mut snapshot = self.engine.get_exclusive_snapshot(query_hash).await;
+
+        let query_value_fingerprint = self.engine.hash(&new_value);
+
+        // has prior node infos, check for fingerprint diff
+        // also, unwire the backward edges (if any)
+        let set_input_result = (snapshot.node_info().await).map_or(
+            SetInputResult::Fresh,
+            |node_info| {
+                let fingerprint_diff =
+                    node_info.value_fingerprint() != query_value_fingerprint;
+
+                // only dirty propagate if the fingerprint differs
+                if fingerprint_diff {
+                    SetInputResult::Updated
+                } else {
+                    SetInputResult::Unchanged
+                }
+            },
+        );
+
+        // should be safe since we're holding input session phase guard
+        let ts = unsafe { self.engine.get_current_timestamp_unchecked() };
+
+        let transaction = self.transaction.clone();
+        let dirty_batch = self.dirty_batch.clone();
+
+        async move {
+            if set_input_result == SetInputResult::Updated {
+                dirty_batch.write().await.push_back(query_id);
+            }
+
+            let mut transaction = transaction.write().await;
+
+            let Some((write_buffer, _guard)) = transaction.as_mut() else {
+                panic!("InputSession transaction has already been committed");
+            };
+
+            snapshot
+                .set_computed_input(
+                    query,
+                    query_hash,
+                    new_value,
+                    query_value_fingerprint,
+                    write_buffer,
+                    true,
+                    ts,
+                )
+                .await;
+
+            set_input_result
+        }
+        .guarded()
+        .await
+    }
+
+    /// Inspects the current value and performs an update based on the provided
+    /// function.
+    ///
+    /// This method allows you to read the existing value of an input query,
+    /// compute a new value based on it, and update the query atomically. The
+    /// update function receives an `Option<Q::Value>`, which is `None` if the
+    /// query has never been set before, or `Some(value)` if it has an existing
+    /// value.
+    pub async fn update<Q: Query>(
+        &mut self,
+        query: Q,
+        update_fn: impl FnOnce(Option<Q::Value>) -> Q::Value,
+    ) -> SetInputResult {
+        let query_hash = self.engine.hash(&query);
+        let query_id = QueryID::new::<Q>(query_hash);
+
+        let mut snapshot = self.engine.get_exclusive_snapshot(query_hash).await;
+
+        let current_value = snapshot.query_result().await;
+        let new_value = update_fn(current_value);
 
         let query_value_fingerprint = self.engine.hash(&new_value);
 
