@@ -202,6 +202,13 @@ impl<C: Config> TrackedEngine<C> {
     /// Returns [`CyclicError`] if a cyclic dependency is detected (the query
     /// directly or indirectly depends on itself).
     pub async fn query<Q: Query>(&self, query: &Q) -> Q::Value {
+        if self.caller.timestamp()
+            != unsafe { self.engine.get_current_timestamp_from_engine().await }
+        {
+            // this is a good yield point for possible cancellation
+            tokio::task::yield_now().await;
+        }
+
         let query_with_id = self.engine.new_query_with_id(query);
 
         // check local cache
@@ -412,6 +419,13 @@ impl<C: Config> Engine<C> {
         query: &QueryWithID<'_, Q>,
         caller: &CallerInformation,
     ) -> Result<QueryResult<Q::Value>, CyclicError> {
+        if caller.timestamp()
+            != unsafe { self.get_current_timestamp_from_engine().await }
+        {
+            // this is a good yield point for possible cancellation
+            tokio::task::yield_now().await;
+        }
+
         // register the dependency for the sake of detecting cycles
         let undo_register = self.register_callee(caller, &query.id);
 
