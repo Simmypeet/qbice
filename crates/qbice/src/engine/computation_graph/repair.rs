@@ -75,6 +75,13 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             return;
         };
 
+        // IMPORTANT: we must clear all dependencies record before executing the
+        // query. During repairation, query might record the dependencies in
+        // order to determine if the query needs to be recomputed. When it's
+        // decided to recompute, we will have to clear the dependencies recorded
+        // during the repairation phase to avoid keeping stale dependencies.
+        lock_guard.query_computing().clear_dependencies();
+
         // recompute the query
         snapshot
             .execute_query(

@@ -53,6 +53,11 @@ impl CalleeOrder {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.order.clear();
+        self.mode = Mode::Single;
+    }
+
     pub fn start_unordered_group(&mut self) {
         assert!(
             self.mode == Mode::Single,
@@ -139,6 +144,11 @@ impl QueryComputing {
         let mut callee_order = self.callee_info.callee_order.write();
 
         callee_order.abort_callee(callee);
+    }
+
+    pub fn clear_dependencies(&self) {
+        self.callee_info.callee_queries.clear_sync();
+        self.callee_info.callee_order.write().clear();
     }
 
     pub fn mark_scc(&self) {
