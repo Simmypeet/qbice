@@ -110,10 +110,13 @@ impl<C: Config> Engine<C> {
     /// A [`GraphSnapshot`] containing all reachable nodes and edges.
     #[must_use]
     async fn snapshot_graph_from<Q: Query>(&self, query: &Q) -> GraphSnapshot {
+        let (active_computation_guard, timestamp) =
+            self.acquire_active_computation_guard().await;
+
         let _caller = CallerInformation::new(
             CallerKind::Tracing,
-            unsafe { self.get_current_timestamp_from_engine().await },
-            Some(self.acquire_active_computation_guard().await),
+            timestamp,
+            Some(active_computation_guard),
         );
 
         let mut nodes = Vec::new();

@@ -203,7 +203,7 @@ impl<C: Config> TrackedEngine<C> {
     /// directly or indirectly depends on itself).
     pub async fn query<Q: Query>(&self, query: &Q) -> Q::Value {
         if self.caller.timestamp()
-            != unsafe { self.engine.get_current_timestamp_from_engine().await }
+            != unsafe { self.engine.get_current_timestamp_unchecked() }
         {
             // this is a good yield point for possible cancellation
             tokio::task::yield_now().await;
@@ -360,11 +360,13 @@ impl<C: Config> Engine<C> {
     #[must_use]
     #[allow(clippy::unused_async)]
     pub async fn tracked(self: Arc<Self>) -> TrackedEngine<C> {
+        let (active_computation_guard, timestamp) =
+            self.acquire_active_computation_guard().await;
         TrackedEngine {
             caller: CallerInformation::new(
                 CallerKind::User,
-                unsafe { self.get_current_timestamp_from_engine().await },
-                Some(self.acquire_active_computation_guard().await),
+                timestamp,
+                Some(active_computation_guard),
             ),
             cache: ThreadLocal::new(),
             engine: self,
@@ -420,7 +422,7 @@ impl<C: Config> Engine<C> {
         caller: &CallerInformation,
     ) -> Result<QueryResult<Q::Value>, CyclicError> {
         if caller.timestamp()
-            != unsafe { self.get_current_timestamp_from_engine().await }
+            != unsafe { self.get_current_timestamp_unchecked() }
         {
             // this is a good yield point for possible cancellation
             tokio::task::yield_now().await;

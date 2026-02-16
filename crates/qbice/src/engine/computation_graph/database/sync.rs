@@ -93,7 +93,7 @@ impl<C: Config> Engine<C> {
 
     pub(in crate::engine::computation_graph) async fn acquire_active_computation_guard(
         &self,
-    ) -> ActiveComputationGuard {
+    ) -> (ActiveComputationGuard, Timestamp) {
         let guard = self
             .computation_graph
             .database
@@ -103,7 +103,15 @@ impl<C: Config> Engine<C> {
             .read_owned()
             .await;
 
-        ActiveComputationGuard(Arc::new(guard))
+        let timestamp = Timestamp(
+            self.computation_graph
+                .database
+                .sync
+                .timestamp
+                .load(Ordering::SeqCst),
+        );
+
+        (ActiveComputationGuard(Arc::new(guard)), timestamp)
     }
 
     pub(in crate::engine::computation_graph) async fn acquire_active_input_session_guard(
@@ -157,21 +165,6 @@ impl<C: Config> Engine<C> {
     pub(in crate::engine::computation_graph) unsafe fn get_current_timestamp_unchecked(
         &self,
     ) -> Timestamp {
-        Timestamp(
-            self.computation_graph
-                .database
-                .sync
-                .timestamp
-                .load(Ordering::SeqCst),
-        )
-    }
-
-    pub(in crate::engine::computation_graph) async unsafe fn get_current_timestamp_from_engine(
-        &self,
-    ) -> Timestamp {
-        let _active_computation_phase_guard =
-            self.computation_graph.database.sync.phase_mutex.read().await;
-
         Timestamp(
             self.computation_graph
                 .database
