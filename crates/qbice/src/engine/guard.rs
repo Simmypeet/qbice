@@ -33,7 +33,6 @@ impl<T: Send + 'static> Drop for Guard<T> {
         // If the future is still present, spawn it to ensure it completes.
 
         if let Some(future) = self.future.take() {
-            println!("RESPAWNING GUARDED FUTURE ON DROP");
             tokio::spawn(future);
         }
     }
