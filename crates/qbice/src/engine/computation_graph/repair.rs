@@ -460,7 +460,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                     );
 
                     let cancelled = Arc::new(AtomicBool::new(false));
-                    let mut chunk_handles = Vec::new();
+                    let mut chunk_handles = JoinSet::new();
 
                     for chunk in query_ids.chunks(chunk_size).map(<[_]>::to_vec)
                     {
@@ -479,7 +479,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                                 super::caller::QueryCaller::pedantic_repair,
                             );
 
-                        chunk_handles.push(tokio::spawn(async move {
+                        chunk_handles.spawn(async move {
                             Self::check_callee_chunked(
                                 &engine,
                                 &query_id,
@@ -492,25 +492,19 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                                 cancelled,
                             )
                             .await
-                        }));
+                        });
                     }
 
                     let mut found_recompute = false;
-                    for handle in chunk_handles {
-                        if found_recompute {
-                            // tell the other tasks to cancel the checking
-                            // as we've found one dirty edge that requires
-                            // recompute.
-                            handle.abort();
-                        }
-
-                        match handle.await {
+                    while let Some(result) = chunk_handles.join_next().await {
+                        match result {
                             Ok(
                                 ChunkedCalleeCheckDecision::Cancelled
                                 | ChunkedCalleeCheckDecision::Recompute,
                             )
                             | Err(_) => {
                                 found_recompute = true;
+                                chunk_handles.abort_all();
                             }
 
                             Ok(ChunkedCalleeCheckDecision::Cleaned {
