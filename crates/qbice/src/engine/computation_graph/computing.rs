@@ -636,6 +636,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         has_pending_backward_projection: bool,
         current_timestamp: Timestamp,
         existing_forward_edges: Option<&[NodeDependency]>,
+        clean_existing_forward_edges: bool,
         continuing_tx: WriteTransaction<C>,
     ) {
         let (query_kind, forward_edge_order, forward_edges, tfc_archetype) = {
@@ -690,6 +691,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             has_pending_backward_projection,
             current_timestamp,
             existing_forward_edges,
+            clean_existing_forward_edges,
             continuing_tx,
         )
         .await;

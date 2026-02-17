@@ -842,7 +842,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         self.engine().submit_write_buffer(tx);
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity
+    )]
     #[inline(never)]
     pub(super) async fn set_computed(
         mut self,
@@ -860,6 +864,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         has_pending_backward_projection: bool,
         current_timestamp: Timestamp,
         existing_forward_edges: Option<&[NodeDependency]>,
+        clean_existing_forward_edges: bool,
         mut tx: WriteTransaction<C>,
     ) {
         self.upgrade_to_exclusive().await;
@@ -894,6 +899,18 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                                 .backward_edges
                                 .remove(edge, self.query_id(), &mut tx)
                                 .await;
+
+                            if clean_existing_forward_edges {
+                                let edge =
+                                    Edge { from: *self.query_id(), to: *edge };
+
+                                self.engine()
+                                    .computation_graph
+                                    .database
+                                    .dirty_edge_set
+                                    .remove(&edge, &mut tx)
+                                    .await;
+                            }
                         }
                         NodeDependency::Unordered(unordered) => {
                             for edge in unordered {
@@ -903,6 +920,20 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                                     .backward_edges
                                     .remove(edge, self.query_id(), &mut tx)
                                     .await;
+
+                                if clean_existing_forward_edges {
+                                    let edge = Edge {
+                                        from: *self.query_id(),
+                                        to: *edge,
+                                    };
+
+                                    self.engine()
+                                        .computation_graph
+                                        .database
+                                        .dirty_edge_set
+                                        .remove(&edge, &mut tx)
+                                        .await;
+                                }
                             }
                         }
                     }

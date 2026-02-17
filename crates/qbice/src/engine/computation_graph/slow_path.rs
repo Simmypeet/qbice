@@ -171,6 +171,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 need_backward_projection_propagation,
                 timestamp,
                 existing_forward_edges.as_ref().map(|x| x.0.as_ref()),
+                // recompute query means, there were dirty edges from the old
+                // value, so we need to clean them up. But for fresh query,
+                // there is no dirty edge, so we can skip cleaning up.
+                execute_query_for == ExecuteQueryFor::RecomputeQuery,
                 continuing_tx,
             )
             .await;
