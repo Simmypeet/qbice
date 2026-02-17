@@ -442,21 +442,15 @@ impl<C: Config> Engine<C> {
     }
 
     pub(super) fn is_query_running_in_scc(
-        &self,
-        caller: Option<&QueryID>,
+        caller: &CallerInformation,
     ) -> Result<(), CyclicError> {
-        let Some(called_from) = caller else {
+        let Some(query_caller) =
+            caller.get_query_caller().and_then(|x| x.try_computing())
+        else {
             return Ok(());
         };
 
-        let is_in_scc = self
-            .computation_graph
-            .computing
-            .computing_lock
-            .read_sync(called_from, |_, v| v.is_in_scc())
-            .expect("computing lock should exist for caller");
-
-        if is_in_scc {
+        if query_caller.is_in_scc() {
             return Err(CyclicError);
         }
 

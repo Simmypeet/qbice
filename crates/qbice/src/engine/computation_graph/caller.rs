@@ -60,6 +60,10 @@ impl QueryCaller {
 
     pub const fn pedantic_repair(&self) -> bool { self.pedantic_repair }
 
+    pub const fn try_computing(&self) -> Option<&Arc<QueryComputing>> {
+        self.computing.as_ref()
+    }
+
     #[must_use]
     pub const fn computing(&self) -> &Arc<QueryComputing> {
         self.computing
@@ -114,17 +118,6 @@ impl CallerInformation {
             | CallerKind::User => None,
 
             CallerKind::Query(q) => Some(q),
-        }
-    }
-
-    pub const fn get_caller(&self) -> Option<&QueryID> {
-        match &self.kind {
-            CallerKind::RepairFirewall
-            | CallerKind::BackwardProjectionPropagation
-            | CallerKind::Tracing
-            | CallerKind::User => None,
-
-            CallerKind::Query(q) => Some(&q.query_id),
         }
     }
 
