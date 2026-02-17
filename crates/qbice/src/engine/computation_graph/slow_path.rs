@@ -68,7 +68,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[allow(clippy::too_many_lines)]
     #[instrument(
         skip(self, execute_query_for, caller_information, lock_guard),
-        level = "info",
+        level = "debug",
         name = "execute_query",
         target = "qbice"
     )]
@@ -212,7 +212,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[instrument(
         skip(self, caller_information, lock_guard),
-        level = "info",
+        level = "debug",
         target = "qbice"
     )]
     pub async fn process_query(

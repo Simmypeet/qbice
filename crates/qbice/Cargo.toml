@@ -17,6 +17,7 @@ default = ["default-config"]
 default-config = ["rocksdb"]
 rocksdb = ["qbice_storage/rocksdb"]
 fjall = ["qbice_storage/fjall"]
+tracing_resource = ["qbice_storage/tracing_resource"]
 
 [dependencies]
 qbice_stable_hash = { version = "0.1.5", path = "../stable_hash" }

@@ -10,11 +10,13 @@ license.workspace = true
 [features]
 rocksdb = ["dep:rust-rocksdb"]
 fjall = ["dep:fjall"]
+tracing_resource = ["dep:tracing"]
 
 [dependencies]
 qbice_serialize = { version = "0.1.3", path = "../serialize" }
 qbice_stable_type_id = { version = "0.1.5", path = "../stable_type_id" }
 qbice_stable_hash = { version = "0.1.5", path = "../stable_hash" }
+tracing = { workspace = true, optional = true }
 moka.workspace = true
 parking_lot.workspace = true
 fxhash.workspace = true

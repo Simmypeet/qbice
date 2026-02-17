@@ -59,7 +59,7 @@ pub enum ChunkedCalleeCheckDecision {
 impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[instrument(
         skip(self, caller_information, lock_guard),
-        level = "info",
+        level = "debug",
         name = "repair_query",
         target = "qbice"
     )]

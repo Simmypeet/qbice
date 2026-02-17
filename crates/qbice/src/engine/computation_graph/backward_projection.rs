@@ -15,7 +15,7 @@ use crate::{
 impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[instrument(
         skip(self, caller_information, backward_projection_lock_guard),
-        level = "info",
+        level = "debug",
         fields(
             type = std::any::type_name::<Q>(),
         )

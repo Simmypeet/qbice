@@ -284,7 +284,7 @@ impl<C: Config> Drop for DirtyWorker<C> {
 impl<C: Config> Engine<C> {
     #[instrument(
         skip(self, query_id, trasnaction),
-        level = "info",
+        level = "debug",
         name = "dirty_propagation",
         target = "qbice"
     )]

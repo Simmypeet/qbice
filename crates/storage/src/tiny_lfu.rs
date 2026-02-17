@@ -230,6 +230,9 @@ struct TinyLFUInner<K, V, L = DefaultLifecycleListener> {
 
     lifecycle_listener: L,
     build_hasher: FxBuildHasher,
+
+    #[cfg(feature = "tracing_resource")]
+    resource_span: tracing::Span,
 }
 
 impl<K, V, L> std::fmt::Debug for TinyLFUInner<K, V, L> {
@@ -243,6 +246,30 @@ impl<K: Eq + Hash + Clone, V, L: Default> TinyLFUInner<K, V, L> {
     /// count.
     #[must_use]
     pub fn new(capacity: usize, unpin_strategy: UnpinStrategy) -> Self {
+        #[cfg(feature = "tracing_resource")]
+        let resource_span = {
+            let location = std::panic::Location::caller();
+
+            let resource_span = tracing::trace_span!(
+                parent: None,
+                "runtime.resource",
+                concrete_type = "TinyLFU",
+                kind = "Cache",
+                loc.file = location.file(),
+                loc.line = location.line(),
+                loc.col = location.column(),
+            );
+
+            resource_span.in_scope(|| {
+                tracing::trace!(
+                    target: "runtime::resource::state_update",
+                    len = 0
+                );
+            });
+
+            resource_span
+        };
+
         Self {
             storage: CachePadded::new(scc::HashMap::with_hasher(
                 FxBuildHasher::default(),
@@ -262,6 +289,9 @@ impl<K: Eq + Hash + Clone, V, L: Default> TinyLFUInner<K, V, L> {
             unpin_strategy,
             build_hasher: FxBuildHasher::default(),
             maintenance_flag: AtomicBool::new(false),
+
+            #[cfg(feature = "tracing_resource")]
+            resource_span,
         }
     }
 }
@@ -271,6 +301,9 @@ pub struct OccupiedEntry<'a, 'x, K, V> {
     entry: scc::hash_map::OccupiedEntry<'a, K, V, FxBuildHasher>,
 
     write_buffer: &'x write_buffer::UnboundedBuffer<WriteMessage<K>>,
+
+    #[cfg(feature = "tracing_resource")]
+    resource_span: &'x tracing::Span,
 }
 
 impl<K, V> std::fmt::Debug for OccupiedEntry<'_, '_, K, V> {
@@ -292,6 +325,16 @@ impl<K: Clone + std::hash::Hash + Eq, V> OccupiedEntry<'_, '_, K, V> {
     #[must_use]
     pub fn remove(self) -> V {
         let key = self.entry.key().clone();
+
+        #[cfg(feature = "tracing_resource")]
+        self.resource_span.in_scope(|| {
+            tracing::trace!(
+                target: "runtime::resource::state_update",
+                len = 1,
+                len.op = "sub",
+            );
+        });
+
         self.write_buffer.push(WriteMessage::Removed(key));
 
         self.entry.remove()
@@ -303,6 +346,9 @@ pub struct VacantEntry<'a, 'x, K, V> {
     entry: scc::hash_map::VacantEntry<'a, K, V, FxBuildHasher>,
 
     write_buffer: &'x write_buffer::UnboundedBuffer<WriteMessage<K>>,
+
+    #[cfg(feature = "tracing_resource")]
+    resource_span: &'x tracing::Span,
 }
 
 impl<K, V> std::fmt::Debug for VacantEntry<'_, '_, K, V> {
@@ -318,6 +364,15 @@ impl<K: Clone + std::hash::Hash + Eq, V> VacantEntry<'_, '_, K, V> {
 
         self.write_buffer.push(WriteMessage::Insert(key));
         self.entry.insert_entry(value);
+
+        #[cfg(feature = "tracing_resource")]
+        self.resource_span.in_scope(|| {
+            tracing::trace!(
+                target: "runtime::resource::state_update",
+                len = 1,
+                len.op = "add",
+            );
+        });
     }
 }
 
@@ -374,6 +429,9 @@ impl<
                 f(Entry::Vacant(VacantEntry {
                     entry,
                     write_buffer: &self.inner.write_buffer,
+
+                    #[cfg(feature = "tracing_resource")]
+                    resource_span: &self.inner.resource_span,
                 }))
             }
 
@@ -381,6 +439,9 @@ impl<
                 f(Entry::Occupied(OccupiedEntry {
                     entry: occupied_entry,
                     write_buffer: &self.inner.write_buffer,
+
+                    #[cfg(feature = "tracing_resource")]
+                    resource_span: &self.inner.resource_span,
                 }))
             }
         };
@@ -487,6 +548,15 @@ impl<
                     // value drop times blocking other
                     // operations
                     let value = if can_remove {
+                        #[cfg(feature = "tracing_resource")]
+                        self.resource_span.in_scope(|| {
+                            tracing::trace!(
+                                target: "runtime::resource::state_update",
+                                len = 1,
+                                len.op = "sub",
+                            );
+                        });
+
                         Some(occupied_entry.remove_entry())
                     } else {
                         None
