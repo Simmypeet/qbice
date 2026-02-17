@@ -1,6 +1,5 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use crossbeam::sync::WaitGroup;
 use qbice_stable_hash::{Compact128, StableHash};
 use tokio::{sync::RwLock, task::JoinSet};
 
@@ -11,7 +10,6 @@ use crate::{
         computation_graph::{
             ActiveInputSessionGuard,
             caller::{CallerInformation, CallerKind, QueryCaller},
-            slow_path::GuardedTrackedEngine,
         },
         guard::GuardExt,
     },
@@ -460,30 +458,30 @@ impl<C: Config> InputSession<C> {
                     let query = engine.get_query_input::<Q>(&query_hash).await;
 
                     // Create a tracked engine to execute the query
-                    let wait_group = WaitGroup::new();
+                    let wait_group = waitgroup::WaitGroup::new();
 
                     let tracked_engine = TrackedEngine::new(
                         engine.clone(),
                         CallerInformation::new(
                             CallerKind::Query(QueryCaller::new_external_input(
-                                query_id, wait_group,
+                                query_id,
+                                wait_group.worker(),
                             )),
                             timestamp,
                             None,
                         ),
                     );
-                    let guarded_tracked_engine =
-                        GuardedTrackedEngine::new(tracked_engine);
 
                     // Invoke the executor to get the new value
                     let entry =
                         engine.executor_registry.get_executor_entry::<Q>();
                     let result = entry
-                        .invoke_executor::<Q>(&query, &guarded_tracked_engine)
+                        .invoke_executor::<Q>(&query, &tracked_engine)
                         .await;
 
                     // Wait for any spawned tasks to complete
-                    drop(guarded_tracked_engine);
+                    drop(tracked_engine);
+                    wait_group.wait().await;
 
                     let new_value = match result {
                         Ok(value) => value,

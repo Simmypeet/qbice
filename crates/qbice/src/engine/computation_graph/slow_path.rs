@@ -1,4 +1,3 @@
-use crossbeam::sync::WaitGroup;
 use thread_local::ThreadLocal;
 use tracing::instrument;
 
@@ -37,33 +36,6 @@ pub enum ExecuteQueryFor {
     RecomputeQuery,
 }
 
-pub struct GuardedTrackedEngine<C: Config> {
-    tracked_engine: TrackedEngine<C>,
-}
-
-impl<C: Config> GuardedTrackedEngine<C> {
-    /// Creates a new `GuardedTrackedEngine` wrapping the given
-    /// `TrackedEngine`.
-    ///
-    /// When dropped, this will wait for any spawned tasks associated with the
-    /// tracked engine to complete.
-    pub(crate) const fn new(tracked_engine: TrackedEngine<C>) -> Self {
-        Self { tracked_engine }
-    }
-
-    pub const fn tracked_engine(&self) -> &TrackedEngine<C> {
-        &self.tracked_engine
-    }
-}
-
-impl<C: Config> Drop for GuardedTrackedEngine<C> {
-    fn drop(&mut self) {
-        if let Some(wait_group) = self.tracked_engine.caller.get_wait_group() {
-            wait_group.wait();
-        }
-    }
-}
-
 impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[allow(clippy::too_many_lines)]
     #[instrument(
@@ -79,7 +51,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         caller_information: &CallerInformation,
         lock_guard: ComputingLockGuard<C>,
     ) {
-        let wait_group = WaitGroup::new();
+        let wait_group = waitgroup::WaitGroup::new();
 
         let pedantic_repair = match caller_information.kind() {
             CallerKind::Query(query_caller) => query_caller.pedantic_repair(),
@@ -94,7 +66,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             caller: CallerInformation::new(
                 CallerKind::Query(QueryCaller::new_with_pedantic_repair(
                     *self.query_id(),
-                    CallerReason::RequireValue(Some(wait_group)),
+                    CallerReason::RequireValue(Some(wait_group.worker())),
                     lock_guard.query_computing().clone(),
                     pedantic_repair,
                 )),
@@ -102,18 +74,17 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 caller_information.clone_active_computation_guard(),
             ),
         };
-        let guarded_tracked_engine = GuardedTrackedEngine { tracked_engine };
 
         let entry = self.engine().executor_registry.get_executor_entry::<Q>();
 
-        let result =
-            entry.invoke_executor::<Q>(query, &guarded_tracked_engine).await;
+        let result = entry.invoke_executor::<Q>(query, &tracked_engine).await;
 
         // WAIT POINT: We must wait all the potentially spawned threads that
         // might hold references to the tracked engine to finish before
         // proceeding, to ensure that there are no more references that can
         // modify the query's state.
-        drop(guarded_tracked_engine);
+        drop(tracked_engine);
+        wait_group.wait().await;
 
         let is_in_scc = lock_guard.query_computing().is_in_scc();
 

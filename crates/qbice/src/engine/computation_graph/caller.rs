@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use crossbeam::sync::WaitGroup;
-
 use crate::{
     engine::computation_graph::{
         ActiveComputationGuard, computing::QueryComputing, database::Timestamp,
@@ -9,10 +7,21 @@ use crate::{
     query::QueryID,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum CallerReason {
-    RequireValue(Option<WaitGroup>),
+    RequireValue(#[allow(unused)] Option<waitgroup::Worker>),
     Repair,
+}
+
+impl std::fmt::Debug for CallerReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequireValue(_) => {
+                f.debug_tuple("RequireValue").finish_non_exhaustive()
+            }
+            Self::Repair => f.debug_tuple("Repair").finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,12 +48,12 @@ impl QueryCaller {
 
     pub const fn new_external_input(
         query_id: QueryID,
-        wait_group: WaitGroup,
+        worker: waitgroup::Worker,
     ) -> Self {
         Self {
             query_id,
             computing: None,
-            reason: CallerReason::RequireValue(Some(wait_group)),
+            reason: CallerReason::RequireValue(Some(worker)),
             pedantic_repair: false,
         }
     }
@@ -95,20 +104,6 @@ impl CallerInformation {
         &self,
     ) -> Option<&ActiveComputationGuard> {
         self.active_computation_guard.as_ref()
-    }
-
-    pub const fn get_wait_group(&mut self) -> Option<WaitGroup> {
-        match &mut self.kind {
-            CallerKind::RepairFirewall
-            | CallerKind::BackwardProjectionPropagation
-            | CallerKind::Tracing
-            | CallerKind::User => None,
-
-            CallerKind::Query(q) => match &mut q.reason {
-                CallerReason::RequireValue(wait_group) => wait_group.take(),
-                CallerReason::Repair => None,
-            },
-        }
     }
 
     pub const fn get_query_caller(&self) -> Option<&QueryCaller> {

@@ -38,6 +38,7 @@ tracing.workspace = true
 enum-as-inner.workspace = true
 scc.workspace = true
 bon.workspace = true
+waitgroup.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

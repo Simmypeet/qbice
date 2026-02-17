@@ -8,7 +8,6 @@ pub use input_session::{InputSession, SetInputResult};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};
 use qbice_stable_type_id::Identifiable;
-pub(crate) use slow_path::GuardedTrackedEngine;
 use thread_local::ThreadLocal;
 
 use crate::{
