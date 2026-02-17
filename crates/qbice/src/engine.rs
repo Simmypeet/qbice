@@ -40,6 +40,7 @@ use std::{
     time::Duration,
 };
 
+use bon::{Builder, bon};
 use qbice_serialize::Plugin;
 use qbice_stable_hash::{
     BuildStableHasher, Compact128, StableHash, StableHasher,
@@ -49,13 +50,45 @@ use qbice_storage::{intern::Interner, storage_engine::StorageEngineFactory};
 
 use crate::{
     config::Config,
-    engine::computation_graph::ComputationGraph,
+    engine::{computation_graph::ComputationGraph, yielder::Yielder},
     executor::{Executor, Registry},
     query::Query,
 };
 
 pub(super) mod computation_graph;
 pub(super) mod guard;
+pub(super) mod yielder;
+
+/// Specifies how often the engine should yield to the async runtime during
+/// long-running query executions.
+///
+/// This is a tuning parameter that can help improve responsiveness in
+/// interactive applications such as IDEs, at the cost of potentially increased
+/// total execution time due to more frequent context switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum YieldFrequency {
+    /// Yield to the async runtime after every "N+1" queries, where "N" is the
+    /// provided number.
+    ///
+    /// For example, `EveryNQuery(0)` means yielding after every query,
+    /// `EveryNQuery(1)` means yielding after every 2 queries, and so on.
+    EveryNQuery(usize),
+
+    /// Don't voluntarily yield to the async runtime at all during query
+    /// execution. The engine will only yield when necessary for internal
+    /// synchronization (e.g., waiting for locks) or when awaiting on async
+    /// operations.
+    Never,
+}
+
+/// The runtime tuning options for the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Builder)]
+pub struct EngineOptions {
+    /// How often the engine should yield to the async runtime during
+    /// long-running query executions.
+    #[builder(default = YieldFrequency::Never)]
+    pub yield_frequency: YieldFrequency,
+}
 
 /// The central query database engine.
 ///
@@ -114,6 +147,9 @@ pub struct Engine<C: Config> {
     computation_graph: ComputationGraph<C>,
     executor_registry: Registry<C>,
     build_stable_hasher: C::BuildStableHasher,
+    #[allow(unused)]
+    options: EngineOptions,
+    yielder: Yielder,
 }
 
 impl<C: Config> Engine<C> {
@@ -190,6 +226,7 @@ fn default_shard_amount() -> usize {
     })
 }
 
+#[bon]
 impl<C: Config> Engine<C> {
     /// Creates a new engine instance with the specified configuration.
     ///
@@ -209,9 +246,40 @@ impl<C: Config> Engine<C> {
     pub async fn new_with<
         F: StorageEngineFactory<StorageEngine = C::StorageEngine>,
     >(
-        mut serialization_plugin: Plugin,
+        serialization_plugin: Plugin,
         storage_engine_factory: F,
         stable_hasher: C::BuildStableHasher,
+    ) -> Result<Self, F::Error> {
+        Self::new_with_options()
+            .serialization_plugin(serialization_plugin)
+            .storage_engine_factory(storage_engine_factory)
+            .stable_hasher(stable_hasher)
+            .build()
+            .await
+    }
+
+    /// Creates a new engine instance with the specified configuration and
+    /// options.
+    ///
+    /// This is the builder-pattern style constructor for creating an engine,
+    /// allowing you to specify runtime options such as yield frequency.
+    #[builder(finish_fn = build)]
+    pub async fn new_with_options<
+        F: StorageEngineFactory<StorageEngine = C::StorageEngine>,
+    >(
+        /// The serialization plugin to use for serializing and deserializing
+        /// query results.
+        mut serialization_plugin: Plugin,
+
+        /// The factory for creating the storage engine backend.
+        storage_engine_factory: F,
+
+        /// The stable hasher for computing query IDs and fingerprints.
+        stable_hasher: C::BuildStableHasher,
+
+        /// Additional runtime options for the engine.
+        #[builder(default = EngineOptions::builder().build())]
+        options: EngineOptions,
     ) -> Result<Self, F::Error> {
         let shared_interner = Interner::new_with_vacuum(
             default_shard_amount(),
@@ -232,6 +300,11 @@ impl<C: Config> Engine<C> {
             interner: shared_interner,
             executor_registry: Registry::default(),
             build_stable_hasher: stable_hasher,
+            yielder: match options.yield_frequency {
+                YieldFrequency::EveryNQuery(n) => Yielder::every_n_query(n),
+                YieldFrequency::Never => Yielder::never(),
+            },
+            options,
         })
     }
 

@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use crossbeam::sync::WaitGroup;
 use dashmap::DashSet;
 use enum_as_inner::EnumAsInner;
 use ouroboros::self_referencing;
@@ -588,6 +589,18 @@ impl<C: Config> Database<C> {
 impl<C: Config> Drop for Database<C> {
     fn drop(&mut self) {
         unsafe {
+            macro_rules! drop_async {
+                ($wait_group:ident, $drop:ident) => {{
+                    let wait_group = $wait_group.clone();
+
+                    tokio::task::spawn_blocking(move || {
+                        drop($drop);
+                        drop(wait_group);
+                    });
+                }};
+            }
+            let wait_group = WaitGroup::new();
+
             // These are the heavy data structures that take time to drop.
             let sync = ManuallyDrop::take(&mut self.sync);
             let last_verified = ManuallyDrop::take(&mut self.last_verified);
@@ -605,19 +618,21 @@ impl<C: Config> Drop for Database<C> {
             let external_input_queries =
                 ManuallyDrop::take(&mut self.external_input_queries);
 
-            rayon::scope(|scope| {
-                scope.spawn(|_| drop(sync));
-                scope.spawn(|_| drop(last_verified));
-                scope.spawn(|_| drop(forward_edge_order));
-                scope.spawn(|_| drop(forward_edge_observation));
-                scope.spawn(|_| drop(query_kind));
-                scope.spawn(|_| drop(node_info));
-                scope.spawn(|_| drop(pending_backward_projection));
-                scope.spawn(|_| drop(dirty_edge_set));
-                scope.spawn(|_| drop(query_store));
-                scope.spawn(|_| drop(backward_edges));
-                scope.spawn(|_| drop(external_input_queries));
-            });
+            drop_async!(wait_group, sync);
+            drop_async!(wait_group, last_verified);
+            drop_async!(wait_group, forward_edge_order);
+            drop_async!(wait_group, forward_edge_observation);
+            drop_async!(wait_group, query_kind);
+            drop_async!(wait_group, node_info);
+            drop_async!(wait_group, pending_backward_projection);
+            drop_async!(wait_group, dirty_edge_set);
+            drop_async!(wait_group, query_store);
+            drop_async!(wait_group, backward_edges);
+            drop_async!(wait_group, external_input_queries);
+
+            // blocks until all the above data structures are dropped in their
+            // respective threads
+            wait_group.wait();
         }
     }
 }

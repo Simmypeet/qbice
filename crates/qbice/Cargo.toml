@@ -29,7 +29,6 @@ dashmap.workspace = true
 thiserror.workspace = true
 parking_lot = { workspace = true, features = ["send_guard"] }
 fxhash.workspace = true
-rayon.workspace = true
 futures.workspace = true
 crossbeam.workspace = true
 thread_local.workspace = true
@@ -37,6 +36,7 @@ ouroboros.workspace = true
 tracing.workspace = true
 enum-as-inner.workspace = true
 scc.workspace = true
+bon.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

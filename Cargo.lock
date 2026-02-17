@@ -1060,6 +1060,7 @@ dependencies = [
 name = "qbice"
 version = "0.6.3"
 dependencies = [
+ "bon",
  "crossbeam",
  "dashmap",
  "enum-as-inner",
@@ -1072,7 +1073,6 @@ dependencies = [
  "qbice_stable_hash",
  "qbice_stable_type_id",
  "qbice_storage",
- "rayon",
  "scc",
  "tempfile",
  "thiserror",
