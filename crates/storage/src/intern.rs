@@ -265,6 +265,13 @@ pub struct InternedID {
 #[stable_type_id_crate(qbice_stable_type_id)]
 pub struct Interned<T: ?Sized>(Arc<T>);
 
+impl Interned<dyn Any + Send + Sync> {
+    /// Attempts to downcast the interned value to a specific type `U`.
+    pub fn downcast<U: Any + Send + Sync>(self) -> Result<Interned<U>, Self> {
+        self.0.downcast().map(Interned).map_err(|arc_any| Interned(arc_any))
+    }
+}
+
 impl<T: ?Sized> Interned<T> {
     /// Creates a new `Interned<T>` by wrapping the given value in an `Arc`.
     ///
