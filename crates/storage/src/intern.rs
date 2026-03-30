@@ -268,7 +268,7 @@ pub struct Interned<T: ?Sized>(Arc<T>);
 impl Interned<dyn Any + Send + Sync> {
     /// Attempts to downcast the interned value to a specific type `U`.
     pub fn downcast<U: Any + Send + Sync>(self) -> Result<Interned<U>, Self> {
-        self.0.downcast().map(Interned).map_err(|arc_any| Interned(arc_any))
+        self.0.downcast().map(Interned).map_err(Interned)
     }
 }
 
