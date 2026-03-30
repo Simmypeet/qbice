@@ -14,7 +14,7 @@ use crate::{
     Engine, Query,
     config::Config,
     engine::computation_graph::{
-        ActiveComputationGuard, QueryStatus, QueryWithID,
+        ActiveComputationGuard, QueryKind, QueryStatus, QueryWithID,
         caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
         computing::{ComputingLockGuard, QueryComputing},
         database::{Snapshot, Timestamp},
@@ -239,6 +239,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         engine: &Arc<Engine<C>>,
         query_id: &QueryID,
         callee: &QueryID,
+        current_query_kind: QueryKind,
         forward_edge_observation: &ForwardEdgeObservation<C>,
         current_timestamp: Timestamp,
         active_computation_guard: Option<&ActiveComputationGuard>,
@@ -249,7 +250,17 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         // however, we can't skip if pedantic_repair is true
         let edge_is_dirty = engine.is_edge_dirty(*query_id, *callee).await;
 
-        if !edge_is_dirty && !pedantic_repair {
+        if !edge_is_dirty
+            && !pedantic_repair
+
+            // This is required due to the dynamic firewall and projection 
+            // scenario. 
+            //
+            // To understand why, try to comment out this condition and run
+            // the `dynamic_firewall_and_projection` test. You will see that 
+            // the test will fail due to this condition.
+            && !current_query_kind.is_projection()
+        {
             return CalleeCheckDecision::NoNeed;
         }
 
@@ -333,6 +344,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     async fn check_callee_chunked(
         engine: &Arc<Engine<C>>,
         query_id: &QueryID,
+        current_query_kind: QueryKind,
         callees: &[QueryID],
         forward_edge_observation: &ForwardEdgeObservation<C>,
         current_timestamp: Timestamp,
@@ -355,6 +367,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 engine,
                 query_id,
                 callee,
+                current_query_kind,
                 forward_edge_observation,
                 current_timestamp,
                 active_computation_guard,
@@ -412,10 +425,15 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         for dep in forward_edges.0.iter() {
             match dep {
                 NodeDependency::Single(callee) => {
+                    let kind = self.query_kind().await.expect(
+                        "should have query kind set in the previous session",
+                    );
+
                     let decision = Self::check_callee(
                         self.engine(),
                         self.query_id(),
                         callee,
+                        kind,
                         &forward_edge_observation,
                         caller_information.timestamp(),
                         caller_information.active_computation_guard(),
@@ -460,6 +478,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                     );
 
                     let cancelled = Arc::new(AtomicBool::new(false));
+                    let query_kind = self.query_kind().await.unwrap();
                     let mut chunk_handles = JoinSet::new();
 
                     for chunk in query_ids.chunks(chunk_size).map(<[_]>::to_vec)
@@ -483,6 +502,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                             Self::check_callee_chunked(
                                 &engine,
                                 &query_id,
+                                query_kind,
                                 &chunk,
                                 &forward_edge_observation,
                                 timestamp,
