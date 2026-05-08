@@ -5,6 +5,12 @@ pub use qbice_identifiable_derive::Identifiable;
 use qbice_serialize::{Decode, Encode};
 pub use qbice_stable_hash::StableHash;
 
+#[cfg(feature = "smallvec")]
+use smallvec::{Array, SmallVec};
+
+#[cfg(feature = "bitvec")]
+use bitvec::prelude::*;
+
 /// A stable alternative to [`std::any::TypeId`] that is used to uniquely
 /// identify types in a way that is consistent across different runs of the
 /// compiler.
@@ -533,6 +539,22 @@ impl<T: Identifiable> Identifiable for Vec<T> {
     const STABLE_TYPE_ID: StableTypeID = {
         let base = StableTypeID::from_unique_type_name("std::vec::Vec");
         base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+#[cfg(feature = "smallvec")]
+impl<T: Array + Identifiable> Identifiable for SmallVec<T> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("smallvec::SmallVec");
+        base.combine(T::STABLE_TYPE_ID)
+    };
+}
+
+#[cfg(feature = "bitvec")]
+impl<T: Identifiable + BitStore, O: Identifiable + BitOrder> Identifiable for BitVec<T, O> {
+    const STABLE_TYPE_ID: StableTypeID = {
+        let base = StableTypeID::from_unique_type_name("bitvec::BitVec");
+        base.combine(T::STABLE_TYPE_ID).combine(O::STABLE_TYPE_ID)
     };
 }
 

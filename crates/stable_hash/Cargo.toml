@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+bitvec = ["dep:bitvec"]
+smallvec = ["dep:smallvec"]
+
 [dependencies]
 siphasher.workspace = true
 static_assertions.workspace = true
@@ -14,6 +18,8 @@ dashmap.workspace = true
 flexstr.workspace = true
 qbice_serialize = { version = "0.1.1", path = "../serialize" }
 qbice_stable_hash_derive = { version = "0.1.3", path = "../stable_hash_derive" }
+bitvec = { workspace = true, optional = true}
+smallvec = { workspace = true, optional = true}
 
 [lints]
 workspace = true

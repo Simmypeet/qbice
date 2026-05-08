@@ -13,7 +13,14 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "bitvec")]
+use bitvec::{
+    field::BitField, order::BitOrder, slice::BitSlice, store::BitStore,
+    vec::BitVec,
+};
 use dashmap::DashMap;
+#[cfg(feature = "smallvec")]
+use smallvec::{Array, SmallVec};
 
 use crate::{plugin::Plugin, session::Session};
 
@@ -632,6 +639,50 @@ impl<T: Decode> Decode for Vec<T> {
         for _ in 0..len {
             vec.push(T::decode(decoder, plugin, session)?);
         }
+        Ok(vec)
+    }
+}
+
+#[cfg(feature = "smallvec")]
+impl<T: Array> Decode for SmallVec<T> where T::Item: Decode {
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<Self> {
+        let len = decoder.read_usize()?;
+        let mut vec = Self::with_capacity(len);
+        for _ in 0..len {
+            vec.push(T::Item::decode(decoder, plugin, session)?);
+        }
+        Ok(vec)
+    }
+}
+
+#[cfg(feature = "bitvec")]
+impl<T: Decode + BitStore, O: BitOrder> Decode for BitVec<T, O>
+where
+    BitSlice<T, O>: BitField,
+{
+    fn decode<D: Decoder + ?Sized>(
+        decoder: &mut D,
+        _plugin: &Plugin,
+        _session: &mut Session,
+    ) -> io::Result<Self> {
+        use bitvec::{mem::bits_of, vec::BitVec};
+        use std::io::Write;
+
+        // TODO: Testing
+        let len = decoder.read_usize()?;
+        let number_of_bytes = len.div_ceil(bits_of::<u8>());
+        let byte_vec = decoder.read_raw_bytes(number_of_bytes)?;
+        let mut vec = BitVec::new(); // Write will resize as needed.
+        let written = vec.write(byte_vec.as_slice())?;
+        assert!(
+            written == number_of_bytes,
+            "Should write the same number of bytes ({written}) as had been stored ({number_of_bytes})"
+        );
+        vec.truncate(len); // Ensure trailing bits aren't added.
         Ok(vec)
     }
 }

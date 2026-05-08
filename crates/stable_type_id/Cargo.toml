@@ -7,10 +7,16 @@ description.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+bitvec = ["dep:bitvec"]
+smallvec = ["dep:smallvec"]
+
 [dependencies]
 qbice_stable_hash = { version = "0.1.5", path = "../stable_hash" }
 qbice_serialize = { version = "0.1.0", path = "../serialize" }
 qbice_identifiable_derive = { version = "0.1.1", path = "../identifiable_derive" }
+bitvec = { workspace = true, optional = true}
+smallvec = { workspace = true, optional = true}
 
 [lints]
 workspace = true
