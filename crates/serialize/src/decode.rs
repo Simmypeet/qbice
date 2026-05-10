@@ -672,7 +672,6 @@ where
         use bitvec::{mem::bits_of, vec::BitVec};
         use std::io::Write;
 
-        // TODO: Testing
         let len = decoder.read_usize()?;
         let number_of_bytes = len.div_ceil(bits_of::<u8>());
         let byte_vec = decoder.read_raw_bytes(number_of_bytes)?;

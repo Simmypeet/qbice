@@ -1,3 +1,7 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, LinkedList, VecDeque};
+use std::fmt::Debug;
+use dashmap::DashMap;
+
 use super::*;
 use crate::Plugin;
 
@@ -68,6 +72,179 @@ fn float_roundtrip() {
     assert_eq!(bytes.len(), 8); // f64 is always 8 bytes
     let decoded: f64 = decode(&bytes, &plugin).unwrap();
     assert_eq!(f64_value, decoded);
+}
+
+// =============================================================================
+// Container tests
+// =============================================================================
+
+fn roundtrip_values_unordered<C: Debug + IntoIterator + Encode + Decode>(value: C) where C::Item: PartialEq + Debug + Ord {
+    let plugin = Plugin::new();
+    let bytes = encode(&value, &plugin).unwrap();
+    assert!(!bytes.is_empty()); // Container should always produce bytes
+    let decoded: C = decode(&bytes, &plugin).unwrap();
+    let mut value_as_vec: Vec<C::Item> = value.into_iter().collect();
+    value_as_vec.sort();
+    let mut decoded_as_vec: Vec<C::Item> = decoded.into_iter().collect();
+    decoded_as_vec.sort();
+    assert_eq!(value_as_vec, decoded_as_vec);
+    // assert_eq!(value, decoded); // TODO: Use when `DashMap` implements `PartialEq`
+}
+
+fn roundtrip_values<C: Debug + IntoIterator + Encode + Decode + PartialEq>(value: C) where C::Item: PartialEq + Debug {
+    let plugin = Plugin::new();
+    let bytes = encode(&value, &plugin).unwrap();
+    assert!(!bytes.is_empty()); // Container should always produce bytes
+    let decoded: C = decode(&bytes, &plugin).unwrap();
+    assert_eq!(value, decoded);
+}
+
+#[test]
+fn vec_empty_roundtrip() {
+    roundtrip_values::<Vec<i32>>(vec![]);
+}
+
+#[test]
+fn vec_i32_roundtrip() {
+    roundtrip_values::<Vec<i32>>(vec![1, -2, 3]);
+}
+
+#[test]
+fn linkedlist_empty_roundtrip() {
+    roundtrip_values::<LinkedList<i32>>(LinkedList::from([]));
+}
+
+#[test]
+fn linkedlist_i32_roundtrip() {
+    roundtrip_values::<LinkedList<i32>>(LinkedList::from([1, -2, 3]));
+}
+
+#[test]
+fn vec_deque_empty_roundtrip() {
+    roundtrip_values::<VecDeque<i32>>(VecDeque::from(vec![]));
+}
+
+#[test]
+fn vec_deque_i32_roundtrip() {
+    roundtrip_values::<VecDeque<i32>>(VecDeque::from(vec![1, -2, 3]));
+}
+
+#[cfg(feature = "smallvec")]
+mod test_smallvec {
+    use smallvec::{smallvec, SmallVec};
+    use super::*;
+
+    #[test]
+    fn empty_roundtrip() {
+        roundtrip_values::<SmallVec<[i32; 2]>>(smallvec![]);
+    }
+
+    #[test]
+    fn i32_roundtrip() {
+        roundtrip_values::<SmallVec<[i32; 2]>>(smallvec![1, -2, 3]);
+    }
+}
+
+#[cfg(feature = "bitvec")]
+mod test_bitvec {
+    use bitvec::prelude::*;
+    use super::*;
+
+    #[test]
+    fn empty_roundtrip() {
+        roundtrip_values::<BitVec>(bitvec![]);
+    }
+
+    #[test]
+    fn i32_roundtrip() {
+        roundtrip_values::<BitVec>(bitvec![1, 0, 1, 1]);
+    }
+}
+
+// =============================================================================
+// Set tests
+// =============================================================================
+
+#[test]
+fn btreeset_empty_roundtrip() {
+    roundtrip_values_unordered::<BTreeSet<String>>(BTreeSet::new());
+}
+
+#[test]
+fn btreeset_i32_to_str_roundtrip() {
+    roundtrip_values_unordered::<BTreeSet<String>>(BTreeSet::from([
+        "one".to_owned(),
+        "two".to_owned(),
+        "three".to_owned(),
+        "negative three".to_owned(),
+    ]));
+}
+
+#[test]
+fn hashset_empty_roundtrip() {
+    roundtrip_values_unordered::<HashSet<String>>(HashSet::new());
+}
+
+#[test]
+fn hashset_i32_to_str_roundtrip() {
+    roundtrip_values_unordered::<HashSet<String>>(HashSet::from([
+        "one".to_owned(),
+        "two".to_owned(),
+        "three".to_owned(),
+        "negative three".to_owned(),
+    ]));
+}
+
+// =============================================================================
+// Map tests
+// =============================================================================
+
+#[test]
+fn btreemap_empty_roundtrip() {
+    roundtrip_values_unordered::<BTreeMap<i32, String>>(BTreeMap::new());
+}
+
+#[test]
+fn btreemap_i32_to_str_roundtrip() {
+    roundtrip_values_unordered::<BTreeMap<i32, String>>(BTreeMap::from([
+        (1, "one".to_owned()),
+        (2, "two".to_owned()),
+        (3, "three".to_owned()),
+        (-3, "negative three".to_owned()),
+    ]));
+}
+
+#[test]
+fn hashmap_empty_roundtrip() {
+    roundtrip_values_unordered::<HashMap<i32, String>>(HashMap::new());
+}
+
+#[test]
+fn hashmap_i32_to_str_roundtrip() {
+    roundtrip_values_unordered::<HashMap<i32, String>>(HashMap::from([
+        (1, "one".to_owned()),
+        (2, "two".to_owned()),
+        (3, "three".to_owned()),
+        (-3, "negative three".to_owned()),
+    ]));
+}
+
+#[test]
+fn dashmap_empty_roundtrip() {
+    roundtrip_values_unordered::<DashMap<i32, String>>(DashMap::new());
+}
+
+#[test]
+fn dashmap_i32_to_str_roundtrip() {
+    roundtrip_values_unordered::<DashMap<i32, String>>([
+        (1, "one".to_owned()),
+        (2, "two".to_owned()),
+        (3, "three".to_owned()),
+        (-3, "negative three".to_owned()),
+        ]
+        .into_iter()
+        .collect()
+    );
 }
 
 // =============================================================================

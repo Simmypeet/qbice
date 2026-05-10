@@ -551,11 +551,21 @@ impl<T: Array + Identifiable> Identifiable for SmallVec<T> {
 }
 
 #[cfg(feature = "bitvec")]
-impl<T: Identifiable + BitStore, O: Identifiable + BitOrder> Identifiable for BitVec<T, O> {
+impl<T: BitStore + Identifiable, O: BitOrder + Identifiable> Identifiable for BitVec<T, O> {
     const STABLE_TYPE_ID: StableTypeID = {
         let base = StableTypeID::from_unique_type_name("bitvec::BitVec");
         base.combine(T::STABLE_TYPE_ID).combine(O::STABLE_TYPE_ID)
     };
+}
+
+#[cfg(feature = "bitvec")]
+impl Identifiable for bitvec::order::Lsb0 {
+    const STABLE_TYPE_ID: StableTypeID = StableTypeID::from_unique_type_name("bitvec::order::Lsb0");
+}
+
+#[cfg(feature = "bitvec")]
+impl Identifiable for bitvec::order::Msb0 {
+    const STABLE_TYPE_ID: StableTypeID = StableTypeID::from_unique_type_name("bitvec::order::Msb0");
 }
 
 impl Identifiable for str {

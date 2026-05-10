@@ -559,7 +559,6 @@ impl<T: Encode + BitStore, O: BitOrder> Encode for BitVec<T, O> {
         plugin: &Plugin,
         session: &mut Session,
     ) -> io::Result<()> {
-        // TODO: Testing
         encoder.emit_usize(self.len())?;
         let underlying = self.as_raw_slice();
         for item in underlying {
