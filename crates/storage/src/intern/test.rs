@@ -366,6 +366,30 @@ fn deserialize_interned_value_shares_allocation() {
     assert!(Arc::ptr_eq(&decoded1.0, &interned.0));
 }
 
+#[cfg(feature = "bitvec")]
+#[test]
+fn serialize_deserialize_interned_bitvec_shares_allocation() {
+    use bitvec::prelude::*;
+
+    let shared = test_interner();
+    let mut plugin = Plugin::new();
+    plugin.insert(shared.clone());
+
+    let data = bitvec::bitvec![1, 0, 1, 1, 0, 1, 1];
+    let interned = shared.intern(data);
+
+    let bytes = encode_to_bytes(&interned, &plugin);
+
+    // Decode twice - both should share the same allocation from the interner
+    let decoded1: Interned<BitVec> = decode_from_bytes(&bytes, &plugin);
+    let decoded2: Interned<BitVec> = decode_from_bytes(&bytes, &plugin);
+
+    assert!(Arc::ptr_eq(&decoded1.0, &decoded2.0));
+    assert!(Arc::ptr_eq(&decoded1.0, &interned.0));
+    assert_eq!(&decoded1.0, &interned.0);
+    assert_eq!(&decoded2.0, &interned.0);
+}
+
 #[test]
 fn serialize_deserialize_tuple_with_duplicate_interned_values() {
     let shared = test_interner();
@@ -390,6 +414,35 @@ fn serialize_deserialize_tuple_with_duplicate_interned_values() {
 
 #[test]
 fn serialize_deserialize_vec_with_interned_values() {
+    let shared = test_interner();
+    let mut plugin = Plugin::new();
+    plugin.insert(shared.clone());
+
+    let data1 = TestData { name: "first".to_string(), value: 1 };
+    let data2 = TestData { name: "second".to_string(), value: 2 };
+    let data3 = TestData { name: "first".to_string(), value: 1 }; // Duplicate of data1
+
+    let vec: Vec<Interned<TestData>> =
+        vec![shared.intern(data1), shared.intern(data2), shared.intern(data3)];
+
+    // The first and third should share allocation
+    assert!(Arc::ptr_eq(&vec[0].0, &vec[2].0));
+
+    let bytes = encode_to_bytes(&vec, &plugin);
+    let decoded: Vec<Interned<TestData>> = decode_from_bytes(&bytes, &plugin);
+
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(decoded[0].name, "first");
+    assert_eq!(decoded[1].name, "second");
+    assert_eq!(decoded[2].name, "first");
+
+    // The decoded first and third should also share allocation
+    assert!(Arc::ptr_eq(&decoded[0].0, &decoded[2].0));
+}
+
+#[cfg(feature = "smallvec")]
+#[test]
+fn serialize_deserialize_smallvec_with_interned_values() {
     let shared = test_interner();
     let mut plugin = Plugin::new();
     plugin.insert(shared.clone());

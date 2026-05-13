@@ -36,6 +36,11 @@ extern crate self as qbice_stable_hash;
 pub use qbice_stable_hash_derive::StableHash;
 use siphasher::sip128::Hasher128;
 
+#[cfg(feature = "bitvec")]
+use bitvec::prelude::*;
+#[cfg(feature = "smallvec")]
+use smallvec::{Array, SmallVec};
+
 #[doc(hidden)]
 pub mod __internal {}
 
@@ -440,6 +445,29 @@ impl StableHash for String {
 }
 
 impl<T: StableHash> StableHash for Vec<T> {
+    fn stable_hash<H: StableHasher + ?Sized>(&self, state: &mut H) {
+        state.write_length_prefix(self.len());
+        for item in self {
+            item.stable_hash(state);
+        }
+    }
+}
+
+#[cfg(feature = "smallvec")]
+impl<T: StableHash + Array> StableHash for SmallVec<T>
+where
+    T::Item: StableHash,
+{
+    fn stable_hash<H: StableHasher + ?Sized>(&self, state: &mut H) {
+        state.write_length_prefix(self.len());
+        for item in self {
+            item.stable_hash(state);
+        }
+    }
+}
+
+#[cfg(feature = "bitvec")]
+impl<T: StableHash + BitStore, O: BitOrder> StableHash for BitVec<T, O> {
     fn stable_hash<H: StableHasher + ?Sized>(&self, state: &mut H) {
         state.write_length_prefix(self.len());
         for item in self {

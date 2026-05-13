@@ -13,6 +13,10 @@ use std::{
 };
 
 use dashmap::DashMap;
+#[cfg(feature="smallvec")]
+use smallvec::{Array, SmallVec};
+#[cfg(feature="bitvec")]
+use bitvec::prelude::*;
 
 use crate::{plugin::Plugin, session::Session};
 
@@ -525,6 +529,39 @@ impl<T: Encode> Encode for Vec<T> {
     ) -> io::Result<()> {
         encoder.emit_usize(self.len())?;
         for item in self {
+            item.encode(encoder, plugin, session)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature="smallvec")]
+impl<T: Array> Encode for SmallVec<T> where T::Item: Encode {
+    fn encode<E: Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<()> {
+        encoder.emit_usize(self.len())?;
+        for item in self {
+            item.encode(encoder, plugin, session)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature="bitvec")]
+impl<T: Encode + BitStore, O: BitOrder> Encode for BitVec<T, O> {
+    fn encode<E: Encoder + ?Sized>(
+        &self,
+        encoder: &mut E,
+        plugin: &Plugin,
+        session: &mut Session,
+    ) -> io::Result<()> {
+        encoder.emit_usize(self.len())?;
+        let underlying = self.as_raw_slice();
+        for item in underlying {
             item.encode(encoder, plugin, session)?;
         }
         Ok(())

@@ -11,6 +11,8 @@ license.workspace = true
 rocksdb = ["dep:rust-rocksdb"]
 fjall = ["dep:fjall"]
 tracing_resource = ["dep:tracing"]
+smallvec = ["dep:smallvec", "qbice_serialize/smallvec", "qbice_stable_type_id/smallvec", "qbice_stable_hash/smallvec"]
+bitvec = ["dep:bitvec", "qbice_serialize/bitvec", "qbice_stable_type_id/bitvec", "qbice_stable_hash/bitvec"]
 
 [dependencies]
 qbice_serialize = { version = "0.1.3", path = "../serialize" }
@@ -31,6 +33,8 @@ ouroboros.workspace = true
 bon.workspace = true
 crossbeam.workspace = true
 scc.workspace = true
+smallvec = { workspace = true, optional = true }
+bitvec = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
