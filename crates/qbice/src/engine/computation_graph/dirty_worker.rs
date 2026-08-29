@@ -41,9 +41,8 @@ impl<C: Config> DirtyWorker<C> {
         stats: &Arc<Statistic>,
         dirtied_queries: &Arc<DashSet<QueryID, C::BuildHasher>>,
     ) -> Self {
-        let parallelism = thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(8);
+        let parallelism =
+            thread::available_parallelism().map_or(8, std::num::NonZero::get);
 
         let injector = Arc::new(Injector::new());
         let notify = Arc::new(Notify::new());

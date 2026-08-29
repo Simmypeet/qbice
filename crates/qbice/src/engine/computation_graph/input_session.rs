@@ -120,9 +120,8 @@ impl<C: Config> InputSession<C> {
         engine.computation_graph.reset_statistic();
         engine.clear_dirtied_queries();
 
-        transaction = engine
-            .dirty_propagate_from_batch(dirty_batch.into_iter(), transaction)
-            .await;
+        transaction =
+            engine.dirty_propagate_from_batch(dirty_batch, transaction).await;
 
         engine.submit_write_buffer(transaction);
     }

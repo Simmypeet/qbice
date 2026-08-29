@@ -275,9 +275,7 @@ impl<K: Eq + Hash + Clone, V, L: Default> TinyLFUInner<K, V, L> {
                 FxBuildHasher::default(),
             )),
             read_buffer: CachePadded::new(read_buffer::ReadBuffer::new(
-                std::thread::available_parallelism()
-                    .map(|x| x.get() * 4)
-                    .unwrap_or(4),
+                std::thread::available_parallelism().map_or(4, |x| x.get() * 4),
                 16,
             )),
             write_buffer: CachePadded::new(write_buffer::UnboundedBuffer::new()),

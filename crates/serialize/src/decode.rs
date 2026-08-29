@@ -669,13 +669,13 @@ where
         _plugin: &Plugin,
         _session: &mut Session,
     ) -> io::Result<Self> {
-        use bitvec::{mem::bits_of, vec::BitVec};
+        use bitvec::mem::bits_of;
         use std::io::Write;
 
         let len = decoder.read_usize()?;
         let number_of_bytes = len.div_ceil(bits_of::<u8>());
         let byte_vec = decoder.read_raw_bytes(number_of_bytes)?;
-        let mut vec = BitVec::new(); // Write will resize as needed.
+        let mut vec = Self::new(); // Write will resize as needed.
         let written = vec.write(byte_vec.as_slice())?;
         assert!(
             written == number_of_bytes,

@@ -21,8 +21,7 @@ pub struct StrippedBuffer {
 impl StrippedBuffer {
     pub fn new() -> Self {
         let parallelism = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(8);
+            .map_or(8, std::num::NonZero::get);
 
         let size = parallelism.next_power_of_two();
         let buffers = (0..size)
