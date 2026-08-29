@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "qbice"
-version = "0.6.8"
+version = "0.6.9"
 dependencies = [
  "bon",
  "crossbeam",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_derive"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "flexstr",
  "proc-macro2",
@@ -1137,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_identifiable_derive"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "qbice_identifiable_derive_lib",
  "syn",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_identifiable_derive_lib"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_serialize"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bitvec",
  "dashmap",
@@ -1184,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_stable_hash"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bitvec",
  "dashmap",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_stable_type_id"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bitvec",
  "qbice_identifiable_derive",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "qbice_storage"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "bitvec",
  "bon",
