@@ -21,7 +21,6 @@
 
 use std::{
     any::{Any, TypeId},
-    cell::RefCell,
     collections::{BinaryHeap, HashMap},
     ops::Not,
     sync::{
@@ -32,7 +31,6 @@ use std::{
 };
 
 use fxhash::FxBuildHasher;
-use thread_local::ThreadLocal;
 
 use crate::{
     kv_database::{
@@ -353,7 +351,7 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
 ///    `remove_set_element` methods
 /// 3. **Submission**: Buffer is submitted to [`WriteBehind`] for async flushing
 /// 4. **Processing**: Background thread writes to database and commits
-/// 5. **Recycling**: Buffer is returned to pool for reuse
+/// 5. **Release**: Buffer is dropped once the caches have been notified
 ///
 /// # Epoch Ordering
 ///
@@ -375,8 +373,8 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
 /// # Active State
 ///
 /// The buffer has an "active" flag:
-/// - Set when created from pool
-/// - Cleared when returned to pool
+/// - Set when created
+/// - Cleared once the background writer has finished with it
 /// - **Panics** if dropped while still active (indicates programming error)
 ///
 /// # Example
@@ -496,13 +494,13 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 ///
 /// # Write Processing Pipeline
 ///
-/// 1. **Buffer Creation**: Application obtains buffer from pool
+/// 1. **Buffer Creation**: Application creates a buffer
 /// 2. **Accumulation**: Writes accumulate in buffer (fast, in-memory)
 /// 3. **Submission**: Buffer submitted to global work queue
 /// 4. **Worker Processing**: Worker picks up buffer, creates write batch
 /// 5. **Commit Ordering**: Commit thread applies batches in epoch order
 /// 6. **Notification**: Cache is notified to decrement pending write counts
-/// 7. **Buffer Recycling**: Buffer returned to pool
+/// 7. **Buffer Release**: Buffer is dropped
 ///
 /// # Epoch-Based Ordering
 ///
@@ -550,7 +548,7 @@ pub struct WriteBehind<Db: KvDatabase> {
     after_commit_handle: Option<thread::JoinHandle<()>>,
     shutting_down: Arc<AtomicBool>,
 
-    pool: Arc<WriteBufferPool<Db>>,
+    epoch: AtomicU64,
 }
 
 impl<Db: KvDatabase> write_manager::WriteManager for WriteBehind<Db> {
@@ -651,7 +649,6 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         let (after_commit_sender, after_commit_receiver) =
             crossbeam_channel::unbounded::<AfterCommitTask<Db>>();
 
-        let pool = Arc::new(WriteBufferPool::new());
         let shutting_down = Arc::new(AtomicBool::new(false));
 
         Self {
@@ -696,7 +693,6 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             after_commit_handle: Some({
                 let after_commit_receiver = after_commit_receiver;
                 let shutting_down = shutting_down.clone();
-                let pool = pool.clone();
 
                 thread::Builder::new()
                     .name("bg_writer_after_commit".to_string())
@@ -704,20 +700,21 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                         Self::after_commit_worker(
                             &after_commit_receiver,
                             &shutting_down,
-                            &pool,
                         );
                     })
                     .unwrap()
             }),
 
-            pool,
             shutting_down,
+            epoch: AtomicU64::new(0),
         }
     }
 
     /// Creates a new write buffer for accumulating write operations.
     #[must_use]
-    pub fn new_write_batch(&self) -> WriteBatch<Db> { self.pool.get_buffer() }
+    pub fn new_write_batch(&self) -> WriteBatch<Db> {
+        WriteBatch::new(Epoch(self.epoch.fetch_add(1, Ordering::SeqCst)), true)
+    }
 
     /// Submits a write buffer to be processed by the background writer.
     pub fn submit_write_batch(&self, write_buffer: WriteBatch<Db>) {
@@ -729,7 +726,6 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     fn after_commit_worker(
         receiver: &crossbeam_channel::Receiver<AfterCommitTask<Db>>,
         shutting_down: &Arc<AtomicBool>,
-        pool: &WriteBufferPool<Db>,
     ) {
         while let Ok(mut task) = receiver.recv() {
             let epoch = task.write_buffer.epoch();
@@ -740,7 +736,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             }
 
             task.write_buffer.after_commit(epoch);
-            pool.return_buffer(task.write_buffer);
+            task.write_buffer.active = false;
         }
     }
 
@@ -890,40 +886,5 @@ impl<Db: KvDatabase> Ord for WriteTask<Db> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse order for min-heap behavior
         other.write_buffer.epoch.cmp(&self.write_buffer.epoch)
-    }
-}
-
-struct WriteBufferPool<Db: KvDatabase> {
-    pool: ThreadLocal<RefCell<Vec<WriteBatch<Db>>>>,
-    epoch: AtomicU64,
-}
-
-impl<Db: KvDatabase> WriteBufferPool<Db> {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { pool: ThreadLocal::new(), epoch: AtomicU64::new(0) }
-    }
-
-    pub fn get_buffer(&self) -> WriteBatch<Db> {
-        let curr_epoch = self.epoch.fetch_add(1, Ordering::SeqCst);
-        let curr_pool = self.pool.get_or(|| RefCell::new(Vec::new()));
-
-        let mut pool = curr_pool.borrow_mut();
-
-        pool.pop().map_or_else(
-            || WriteBatch::new(Epoch(curr_epoch), true),
-            |mut buffer| {
-                buffer.epoch = Epoch(curr_epoch);
-                buffer.active = true;
-
-                buffer
-            },
-        )
-    }
-
-    pub fn return_buffer(&self, mut buffer: WriteBatch<Db>) {
-        buffer.active = false;
-
-        self.pool.get_or(|| RefCell::new(Vec::new())).borrow_mut().push(buffer);
     }
 }

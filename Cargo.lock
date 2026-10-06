@@ -1239,7 +1239,6 @@ dependencies = [
  "siphasher",
  "smallvec",
  "tempfile",
- "thread_local",
  "tokio",
  "tracing",
 ]
