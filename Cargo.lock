@@ -1114,6 +1114,7 @@ dependencies = [
  "fxhash",
  "mimalloc",
  "qbice",
+ "tempfile",
  "tokio",
 ]
 
