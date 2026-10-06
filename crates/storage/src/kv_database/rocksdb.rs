@@ -13,7 +13,7 @@ use qbice_serialize::{
 };
 use qbice_stable_type_id::{Identifiable, StableTypeID};
 use rust_rocksdb::{
-    BlockBasedOptions, BoundColumnFamily, ColumnFamilyDescriptor,
+    BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor,
     DBCompactionStyle, DBCompressionType, DBWithThreadMode, DataBlockIndexType,
     IteratorMode, MultiThreaded, Options, SliceTransform,
 };
@@ -66,6 +66,9 @@ struct Impl {
     ///
     /// This is used to avoid repeated lookups for the same column family.
     column_families: DashMap<StableTypeID, String>,
+
+    /// The block cache shared by every column family.
+    block_cache: Cache,
 }
 
 impl std::fmt::Debug for Impl {
@@ -97,6 +100,19 @@ impl<P: AsRef<Path>> KvDatabaseFactory for RocksDBFactory<P> {
     }
 }
 
+/// Capacity of the block cache shared by all column families.
+///
+/// Without a shared cache every column family gets a private 32MB cache, so
+/// this is roughly the same memory budget, but pooled.
+const BLOCK_CACHE_CAPACITY: usize = 256 * 1024 * 1024;
+
+/// Number of background threads `RocksDB` may use for flushes and compactions.
+fn background_jobs() -> i32 {
+    let cores = std::thread::available_parallelism().map_or(4, usize::from);
+
+    i32::try_from(cores.clamp(2, 8)).unwrap_or(8)
+}
+
 fn configure_rocksdb_for_small_kv_high_writes() -> Options {
     let mut opts = Options::default();
 
@@ -107,6 +123,9 @@ fn configure_rocksdb_for_small_kv_high_writes() -> Options {
 
     // Shared Memtable Budget (e.g., 512MB total for all CFs)
     opts.set_db_write_buffer_size(512 * 1024 * 1024);
+
+    // Flushes and compactions otherwise share two background threads.
+    opts.increase_parallelism(background_jobs());
 
     opts
 }
@@ -134,6 +153,8 @@ impl RocksDB {
         plugin: Plugin,
     ) -> Result<Self, rust_rocksdb::Error> {
         let opts = configure_rocksdb_for_small_kv_high_writes();
+        let block_cache =
+            Cache::new_hyper_clock_cache(BLOCK_CACHE_CAPACITY, 0);
 
         // List existing column families
         let existing_cfs =
@@ -145,9 +166,9 @@ impl RocksDB {
             .iter()
             .map(|name| {
                 let options = if name.contains("wide_column") {
-                    Impl::get_point_lookup_options()
+                    Impl::get_point_lookup_options(&block_cache)
                 } else if name.contains("key_of_set") {
-                    Impl::get_key_of_set_options()
+                    Impl::get_key_of_set_options(&block_cache)
                 } else {
                     configure_rocksdb_for_small_kv_high_writes()
                 };
@@ -170,6 +191,7 @@ impl RocksDB {
             db,
             plugin: Arc::new(plugin),
             column_families: DashMap::with_shard_amount(default_shard_amount()),
+            block_cache,
         })))
     }
 
@@ -193,10 +215,14 @@ impl Impl {
         )
     }
 
-    fn get_cf_options(kind: ColumnKind) -> Options {
+    fn get_cf_options(&self, kind: ColumnKind) -> Options {
         match kind {
-            ColumnKind::WideColumn => Self::get_point_lookup_options(),
-            ColumnKind::KeyOfSet => Self::get_key_of_set_options(),
+            ColumnKind::WideColumn => {
+                Self::get_point_lookup_options(&self.block_cache)
+            }
+            ColumnKind::KeyOfSet => {
+                Self::get_key_of_set_options(&self.block_cache)
+            }
         }
     }
 
@@ -225,7 +251,7 @@ impl Impl {
             dashmap::Entry::Occupied(occupied_entry) => {
                 self.db.cf_handle(occupied_entry.get()).unwrap_or_else(|| {
                     self.db
-                        .create_cf(&cf_name, &Self::get_cf_options(kind))
+                        .create_cf(&cf_name, &self.get_cf_options(kind))
                         .expect("failed to create column family");
 
                     self.db
@@ -242,7 +268,7 @@ impl Impl {
                     // proceed to create new column family
                     let Ok(()) = self
                         .db
-                        .create_cf(&cf_name, &Self::get_cf_options(kind))
+                        .create_cf(&cf_name, &self.get_cf_options(kind))
                     else {
                         panic!("failed to create column family");
                     };
@@ -367,9 +393,14 @@ impl Impl {
             DBCompressionType::Lz4,  // L5
             DBCompressionType::Lz4,  // L6
         ]);
+
+        // 3. Bloom filter over the memtable, so that looking up a key that
+        //    was never written does not have to search the skiplist.
+        opts.set_memtable_whole_key_filtering(true);
+        opts.set_memtable_prefix_bloom_ratio(0.02);
     }
 
-    fn get_point_lookup_options() -> Options {
+    fn get_point_lookup_options(block_cache: &Cache) -> Options {
         let mut opts = Options::default();
         opts.set_compaction_style(DBCompactionStyle::Level);
 
@@ -386,6 +417,7 @@ impl Impl {
         table_opts.set_whole_key_filtering(true);
 
         // Cache & Index
+        table_opts.set_block_cache(block_cache);
         table_opts.set_cache_index_and_filter_blocks(true);
         table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
         table_opts.set_format_version(5);
@@ -394,7 +426,7 @@ impl Impl {
         opts
     }
 
-    fn get_key_of_set_options() -> Options {
+    fn get_key_of_set_options(block_cache: &Cache) -> Options {
         let mut opts = Options::default();
         opts.set_compaction_style(DBCompactionStyle::Level);
 
@@ -417,6 +449,7 @@ impl Impl {
         table_opts.set_bloom_filter(10.0, false);
         table_opts.set_whole_key_filtering(true);
 
+        table_opts.set_block_cache(block_cache);
         table_opts.set_cache_index_and_filter_blocks(true);
         table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
         table_opts.set_format_version(5);
