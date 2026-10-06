@@ -1261,17 +1261,13 @@ async fn asymmetric_diamond_projection_pattern() {
 
     // =========================================================================
     // Test Case 4: Change Variable(1) - affects shallow branch only
-    // IMPORTANT: Since L1(1) is only queried by Combiner (a projection),
-    // and L3 (combiner's other dependency) output didn't change,
-    // the Combiner won't be invoked via backward prop!
-    //
-    // This is the key asymmetric behavior: changes in the shallow branch
-    // don't automatically propagate because the combiner projection
-    // wasn't re-executed.
+    // The firewall reads every variable, so it recomputes and re-runs both
+    // L1(0) and L1(1) via backward prop. Only L1(1) changes, which invokes
+    // the Combiner; the deep branch is not touched.
     //
     // Variable(0)=5 -> L1(0)=10 -> L2=110 -> L3=110 (same)
-    // Variable(1)=10 but L1(1) won't be queried again!
-    // Result stays: Combiner=114, Consumer=1140
+    // Variable(1)=10 -> L1(1)=20
+    // Combiner=110+20=130, Consumer=1300
     // =========================================================================
     {
         let mut input_session = engine.input_session().await;
@@ -1281,30 +1277,21 @@ async fn asymmetric_diamond_projection_pattern() {
     {
         let tracked = engine.clone().tracked().await;
         let result = tracked.query(&AsymmetricFinalConsumer).await;
-        // L1(1) is NOT re-queried because Combiner wasn't invoked
-        // (its other dependency L3 didn't change)
-        // The firewall also doesn't recompute because the query path
-        // (through L1(0)) doesn't touch Variable(1)
-        assert_eq!(result, 1140); // SAME as before!
+        assert_eq!(result, 1300);
     }
 
-    // Firewall NOT recomputed - the query path through L3->L2->L1(0) doesn't
-    // trigger recomputation because Variable(0) hasn't changed
-    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 3); // unchanged!
-    // proj1 unchanged - L1(0) was not re-invoked
-    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 6); // unchanged!
-    // Deep branch unchanged - nothing triggered recomputation
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 4); // +1
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 8); // +2 (backward prop)
+    // Deep branch NOT invoked - L1(0) output unchanged
     assert_eq!(l2_ex.0.load(Ordering::SeqCst), 2); // unchanged
     assert_eq!(l3_ex.0.load(Ordering::SeqCst), 2); // unchanged
-    // Combiner NOT invoked - L3 output unchanged!
-    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 2); // unchanged!
-    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2); // unchanged!
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 3); // +1 (L1(1) changed)
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // +1 (combiner changed)
 
     // =========================================================================
-    // Test Case 5: Now change Variable(0) so L3 changes - this will trigger
-    // Combiner to re-execute and pick up the NEW L1(1) value
+    // Test Case 5: Change Variable(0) again - affects deep branch only
     // Variable(0)=10 -> L1(0)=20 -> L2=120 -> L3=120
-    // L1(1) will be re-queried now: 10*2=20
+    // Variable(1)=10 -> L1(1)=20 (unchanged)
     // Combiner=120+20=140, Consumer=1400
     // =========================================================================
     {
@@ -1318,13 +1305,12 @@ async fn asymmetric_diamond_projection_pattern() {
         assert_eq!(result, 1400);
     }
 
-    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 4); // +1
-    // L1(0) invoked via backward prop, L1(1) when Combiner executes
-    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 8); // +2
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 5); // +1
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 10); // +2 (backward prop)
     assert_eq!(l2_ex.0.load(Ordering::SeqCst), 3); // +1 (L1(0) changed)
     assert_eq!(l3_ex.0.load(Ordering::SeqCst), 3); // +1 (L2 changed)
-    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 3); // +1 (L3 changed)
-    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // +1 (combiner changed)
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 4); // +1 (L3 changed)
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 4); // +1 (combiner changed)
 
     // =========================================================================
     // Test Case 6: Change Variable(0) to negative - L3 uses abs() so output
@@ -1350,15 +1336,15 @@ async fn asymmetric_diamond_projection_pattern() {
         assert_eq!(result, 1400);
     }
 
-    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 5); // +1
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 6); // +1
     // Both L1(0) and L1(1) invoked via backward prop from firewall
-    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 10); // +2
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 12); // +2
     // Deep branch recomputes through L2, but L3 output unchanged
     assert_eq!(l2_ex.0.load(Ordering::SeqCst), 4); // +1 (L1(0) changed)
     assert_eq!(l3_ex.0.load(Ordering::SeqCst), 4); // +1 (L2 changed)
     // Combiner NOT invoked - L3 output unchanged, L1(1) unchanged
-    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 3); // unchanged!
-    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // unchanged!
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 4); // unchanged!
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 4); // unchanged!
 
     // =========================================================================
     // Test Case 7: Query intermediate projections to verify values
@@ -1370,7 +1356,7 @@ async fn asymmetric_diamond_projection_pattern() {
         assert_eq!(l1_0, -220); // -110 * 2
 
         let l1_1 = tracked.query(&ProjectionLevel1(1)).await;
-        assert_eq!(l1_1, 20); // 10 * 2 (from test case 5)
+        assert_eq!(l1_1, 20); // 10 * 2 (from test case 4)
 
         let l2 = tracked.query(&DeepProjectionL2).await;
         assert_eq!(l2, -120); // -220 + 100
@@ -1383,12 +1369,12 @@ async fn asymmetric_diamond_projection_pattern() {
     }
 
     // No additional executions - everything cached
-    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 5); // unchanged
-    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 10); // unchanged
+    assert_eq!(firewall_ex.0.load(Ordering::SeqCst), 6); // unchanged
+    assert_eq!(proj1_ex.0.load(Ordering::SeqCst), 12); // unchanged
     assert_eq!(l2_ex.0.load(Ordering::SeqCst), 4); // unchanged
     assert_eq!(l3_ex.0.load(Ordering::SeqCst), 4); // unchanged
-    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 3); // unchanged
-    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 3); // unchanged
+    assert_eq!(combiner_ex.0.load(Ordering::SeqCst), 4); // unchanged
+    assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 4); // unchanged
 }
 
 // ============================================================================

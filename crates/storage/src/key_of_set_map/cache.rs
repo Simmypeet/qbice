@@ -4,7 +4,7 @@
 //! with caching for improved read performance on key-to-set relationships.
 
 use std::{
-    collections::{BinaryHeap, HashSet},
+    collections::{BTreeMap, HashSet},
     hash::Hash,
     ops::Not,
     sync::{
@@ -87,24 +87,6 @@ pub struct VersionedOperation<V> {
     epoch: Epoch,
 }
 
-impl<V> Eq for VersionedOperation<V> {}
-
-impl<V> PartialEq for VersionedOperation<V> {
-    fn eq(&self, other: &Self) -> bool { self.epoch.eq(&other.epoch) }
-}
-
-impl<V> PartialOrd for VersionedOperation<V> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<V> Ord for VersionedOperation<V> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.epoch.cmp(&other.epoch)
-    }
-}
-
 #[derive(Debug)]
 struct TrackedConcurrentLog<V> {
     log: Arc<ConcurrentLog<V>>,
@@ -116,16 +98,50 @@ enum ConcurrentLogMessage<V> {
     AppendOperation(VersionedOperation<V>),
 }
 
+/// The staged operations of one set, kept in the order in which the database
+/// applies them: by the epoch of their write batch first, then by the order in
+/// which they were appended.
+#[derive(Debug)]
+struct Log<V> {
+    operations: BTreeMap<(Epoch, u64), Operation<V>>,
+
+    /// The position given to the next appended operation.
+    next_sequence: u64,
+}
+
+impl<V> Log<V> {
+    fn apply_message(&mut self, message: ConcurrentLogMessage<V>) {
+        match message {
+            ConcurrentLogMessage::FlushUpTo(epoch) => {
+                while self
+                    .operations
+                    .first_key_value()
+                    .is_some_and(|((oldest, _), _)| *oldest <= epoch)
+                {
+                    self.operations.pop_first();
+                }
+            }
+            ConcurrentLogMessage::AppendOperation(op) => {
+                self.operations.insert((op.epoch, self.next_sequence), op.op);
+                self.next_sequence += 1;
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ConcurrentLog<V> {
-    log: RwLock<BinaryHeap<VersionedOperation<V>>>,
+    log: RwLock<Log<V>>,
     deferred_messages: SegQueue<ConcurrentLogMessage<V>>,
 }
 
 impl<V: Eq + Hash + Clone> ConcurrentLog<V> {
     const fn new() -> Self {
         Self {
-            log: RwLock::new(BinaryHeap::new()),
+            log: RwLock::new(Log {
+                operations: BTreeMap::new(),
+                next_sequence: 0,
+            }),
             deferred_messages: SegQueue::new(),
         }
     }
@@ -139,38 +155,25 @@ impl<V: Eq + Hash + Clone> ConcurrentLog<V> {
 
         Self::fix(&mut lock, &self.deferred_messages);
 
-        Self::apply_message_to_heap(&mut lock, op);
-    }
-
-    fn apply_message_to_heap(
-        heap_lock: &mut BinaryHeap<VersionedOperation<V>>,
-        op: ConcurrentLogMessage<V>,
-    ) {
-        match op {
-            ConcurrentLogMessage::FlushUpTo(epoch) => {
-                while let Some(peek) = heap_lock.peek() {
-                    if peek.epoch <= epoch {
-                        heap_lock.pop();
-                    } else {
-                        break;
-                    }
-                }
-            }
-            ConcurrentLogMessage::AppendOperation(op) => {
-                heap_lock.push(op);
-            }
-        }
+        lock.apply_message(op);
     }
 
     fn fix(
-        heap_lock: &mut BinaryHeap<VersionedOperation<V>>,
+        log: &mut Log<V>,
         message_queue: &SegQueue<ConcurrentLogMessage<V>>,
     ) {
         while let Some(message) = message_queue.pop() {
-            Self::apply_message_to_heap(heap_lock, message);
+            log.apply_message(message);
         }
     }
 
+    /// Summarizes the staged operations as the elements they add to and
+    /// remove from the set stored in the database.
+    ///
+    /// The last operation staged for an element decides which of the two it
+    /// ends up in. That makes the snapshot safe to merge with any state of the
+    /// database that the write-behind can produce: replaying an operation the
+    /// database has already applied gives the same membership again.
     fn get_snapshot(&self) -> StagingShapshot<V> {
         let mut log = self.log.write();
 
@@ -180,17 +183,15 @@ impl<V: Eq + Hash + Clone> ConcurrentLog<V> {
         let mut added = HashSet::with_hasher(FxBuildHasher::default());
         let mut removed = HashSet::with_hasher(FxBuildHasher::default());
 
-        for op in log.iter() {
-            match &op.op {
+        for op in log.operations.values() {
+            match op {
                 Operation::Insert(v) => {
-                    if removed.remove(v).not() {
-                        added.insert(v.clone());
-                    }
+                    removed.remove(v);
+                    added.insert(v.clone());
                 }
                 Operation::Remove(v) => {
-                    if added.remove(v).not() {
-                        removed.insert(v.clone());
-                    }
+                    added.remove(v);
+                    removed.insert(v.clone());
                 }
             }
         }
@@ -465,19 +466,45 @@ impl<T> StagingShapshot<T> {
     #[must_use]
     pub fn into_iter_snapshot(self) -> StagingShapshotIntoIter<T> {
         StagingShapshotIntoIter {
-            added: self.added.into_iter(),
+            added: self.added,
             removed: self.removed,
+            remaining_added: None,
         }
     }
 }
 
-/// An iterator over a staging snapshot's added elements.
+/// A staging snapshot that is being merged into the elements read from the
+/// database.
 ///
-/// Filters out elements that were subsequently removed from the staging area.
+/// It filters the database's elements first and yields the staged insertions
+/// once the database is exhausted.
 #[derive(Debug)]
 pub struct StagingShapshotIntoIter<T> {
-    added: std::collections::hash_set::IntoIter<T>,
+    added: HashSet<T, FxBuildHasher>,
     removed: HashSet<T, FxBuildHasher>,
+
+    /// Drains `added` once the database's elements are exhausted.
+    remaining_added: Option<std::collections::hash_set::IntoIter<T>>,
+}
+
+impl<T: Eq + Hash> StagingShapshotIntoIter<T> {
+    /// Returns whether an element read from the database should be yielded.
+    ///
+    /// Elements staged for removal are dropped. Elements staged for insertion
+    /// are dropped as well, since [`Self::next_added`] yields them; the
+    /// database can already contain them when their write batch has been
+    /// committed but not yet flushed from the staging area.
+    fn keeps(&self, element: &T) -> bool {
+        self.removed.contains(element).not()
+            && self.added.contains(element).not()
+    }
+
+    /// Yields the staged insertions, after the database's elements.
+    fn next_added(&mut self) -> Option<T> {
+        self.remaining_added
+            .get_or_insert_with(|| std::mem::take(&mut self.added).into_iter())
+            .next()
+    }
 }
 
 impl<
@@ -629,23 +656,21 @@ impl<
         match self {
             Self::Spilled(spilled, snapshot) => {
                 // First drain from half_constructed
-                if let Some(item) = spilled.half_constructed.next() {
-                    let item = item;
-
-                    if snapshot.removed.contains(&item).not() {
+                for item in spilled.half_constructed.by_ref() {
+                    if snapshot.keeps(&item) {
                         return Some(item);
                     }
                 }
 
                 // Then drain from rest_iterator
                 for item in spilled.rest_iterator.by_ref() {
-                    if snapshot.removed.remove(&item).not() {
+                    if snapshot.keeps(&item) {
                         return Some(item);
                     }
                 }
 
                 // Finally drain from snapshot.added
-                snapshot.added.next()
+                snapshot.next_added()
             }
 
             Self::OwnedIterator(iter) => iter.next(),
@@ -653,13 +678,13 @@ impl<
             Self::Streaming(db_iter, snapshot) => {
                 // First drain from db_iter
                 for item in db_iter.by_ref() {
-                    if snapshot.removed.remove(&item).not() {
+                    if snapshot.keeps(&item) {
                         return Some(item);
                     }
                 }
 
                 // Finally drain from snapshot.added
-                snapshot.added.next()
+                snapshot.next_added()
             }
         }
     }
@@ -679,3 +704,6 @@ impl<
         self.flush_staging(epoch, keys);
     }
 }
+
+#[cfg(test)]
+mod test;
