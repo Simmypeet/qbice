@@ -269,3 +269,179 @@ mod rocksdb {
         assert_eq!(map.get(&0).await.collect::<Vec<_>>(), [0; 0]);
     }
 }
+
+/// These run a write in the middle of a load, which needs a database that
+/// can be interrupted while it is being scanned.
+mod load {
+    use std::sync::Arc;
+
+    use dashmap::DashSet;
+    use parking_lot::Mutex;
+    use qbice_stable_type_id::Identifiable;
+
+    use super::super::{CacheKeyOfSetMap, Operation};
+    use crate::{
+        key_of_set_map::KeyOfSetMap,
+        kv_database::{
+            KeyOfSetColumn, KvDatabase, SerializationBuffer, WideColumn,
+            WideColumnValue, WriteBatch,
+        },
+        write_manager::write_behind::Epoch,
+    };
+
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+    )]
+    #[stable_type_id_crate(qbice_stable_type_id)]
+    pub struct Column;
+
+    impl KeyOfSetColumn for Column {
+        type Key = i32;
+
+        type Element = i32;
+    }
+
+    type Hook = Box<dyn FnOnce() + Send + Sync>;
+
+    /// An empty database that runs a hook while it is being scanned.
+    #[derive(Clone, Default)]
+    struct InterruptibleDb {
+        during_scan: Arc<Mutex<Option<Hook>>>,
+    }
+
+    /// Nothing is ever written to [`InterruptibleDb`].
+    struct Unused;
+
+    impl SerializationBuffer for Unused {
+        fn put<W: WideColumn, C: WideColumnValue<W>>(
+            &mut self,
+            _: &W::Key,
+            _: &C,
+        ) {
+            unreachable!()
+        }
+
+        fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, _: &W::Key) {
+            unreachable!()
+        }
+
+        fn insert_member<C: KeyOfSetColumn>(
+            &mut self,
+            _: &C::Key,
+            _: &C::Element,
+        ) {
+            unreachable!()
+        }
+
+        fn delete_member<C: KeyOfSetColumn>(
+            &mut self,
+            _: &C::Key,
+            _: &C::Element,
+        ) {
+            unreachable!()
+        }
+    }
+
+    impl WriteBatch for Unused {
+        type SerializationBuffer = Self;
+
+        fn put<W: WideColumn, C: WideColumnValue<W>>(
+            &mut self,
+            _: &W::Key,
+            _: &C,
+        ) {
+            unreachable!()
+        }
+
+        fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, _: &W::Key) {
+            unreachable!()
+        }
+
+        fn insert_member<C: KeyOfSetColumn>(
+            &mut self,
+            _: &C::Key,
+            _: &C::Element,
+        ) {
+            unreachable!()
+        }
+
+        fn delete_member<C: KeyOfSetColumn>(
+            &mut self,
+            _: &C::Key,
+            _: &C::Element,
+        ) {
+            unreachable!()
+        }
+
+        fn consume_serialization_buffer(&mut self, _: Self) { unreachable!() }
+
+        fn commit(self) { unreachable!() }
+    }
+
+    impl KvDatabase for InterruptibleDb {
+        type WriteBatch = Unused;
+
+        type SerializationBuffer = Unused;
+
+        type ScanMemberIterator<C: KeyOfSetColumn> =
+            std::iter::Empty<C::Element>;
+
+        fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
+            &self,
+            _: &W::Key,
+        ) -> Option<C> {
+            None
+        }
+
+        fn scan_members<C: KeyOfSetColumn>(
+            &self,
+            _: &C::Key,
+        ) -> Self::ScanMemberIterator<C> {
+            let hook = self.during_scan.lock().take();
+
+            if let Some(hook) = hook {
+                hook();
+            }
+
+            std::iter::empty()
+        }
+
+        fn write_batch(&self) -> Unused { Unused }
+
+        fn serialization_buffer(&self) -> Unused { Unused }
+    }
+
+    type Map = CacheKeyOfSetMap<Column, Arc<DashSet<i32>>, InterruptibleDb>;
+
+    /// The operation is in neither the load's snapshot nor the database, and
+    /// its writer finds no cached set to apply it to. The loaded set must not
+    /// go on being served without it.
+    #[tokio::test]
+    async fn operation_staged_during_a_load_is_not_lost() {
+        let db = InterruptibleDb::default();
+        let map = Arc::new(Map::new(16, db.clone()));
+
+        *db.during_scan.lock() = Some(Box::new({
+            let map = map.clone();
+
+            move || map.apply_op(&0, Operation::Insert(7), Epoch(0), true)
+        }));
+
+        // the read that overlaps the write may or may not see it
+        let _ = map.get(&0).await.count();
+
+        // every later read must
+        assert_eq!(map.get(&0).await.collect::<Vec<_>>(), [7]);
+    }
+
+    /// The check for overlapping writes must not stop sets from being cached.
+    #[tokio::test]
+    async fn load_without_an_overlapping_write_stays_cached() {
+        let map = Map::new(16, InterruptibleDb::default());
+
+        map.apply_op(&0, Operation::Insert(7), Epoch(0), true);
+
+        assert_eq!(map.get(&0).await.collect::<Vec<_>>(), [7]);
+        assert!(map.repr.cache.get(&0).is_some());
+    }
+}

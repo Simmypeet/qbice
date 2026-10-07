@@ -5,11 +5,11 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    hash::Hash,
+    hash::{BuildHasher, Hash},
     ops::Not,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -183,6 +183,9 @@ impl<V: Eq + Hash + Clone> ConcurrentLog<V> {
         let mut added = HashSet::with_hasher(FxBuildHasher::default());
         let mut removed = HashSet::with_hasher(FxBuildHasher::default());
 
+        // NOTE: the `.values()` iteratees the values in the order of their
+        // keys. this means the earliest operations are applied first,
+        // in chronological order.
         for op in log.operations.values() {
             match op {
                 Operation::Insert(v) => {
@@ -226,7 +229,15 @@ pub struct Repr<
 
     cache: TinyLFU<K::Key, Arc<RwLock<Entry<C>>>>,
     single_flight: single_flight::SingleFlight<K::Key>,
+
+    /// Versions of the staging area, striped by key. A stripe's version
+    /// changes whenever an operation is staged for one of its keys, which is
+    /// how a load notices a write that overlapped it.
+    staging_versions: Box<[AtomicU64]>,
 }
+
+/// `2^STAGING_VERSION_BITS` versions are kept per map.
+const STAGING_VERSION_BITS: u32 = 12;
 
 impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
     Repr<K, C>
@@ -249,7 +260,22 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
             single_flight: single_flight::SingleFlight::new(
                 default_shard_amount(),
             ),
+            staging_versions: (0..1usize << STAGING_VERSION_BITS)
+                .map(|_| AtomicU64::new(0))
+                .collect(),
         }
+    }
+
+    /// Returns the staging version shared by `key` and the other keys of its
+    /// stripe.
+    #[allow(clippy::cast_possible_truncation)]
+    fn staging_version(&self, key: &K::Key) -> &AtomicU64 {
+        let hash = FxBuildHasher::default().hash_one(key);
+
+        // the top bits, which are the best mixed ones of this hasher
+        let stripe = (hash >> (u64::BITS - STAGING_VERSION_BITS)) as usize;
+
+        &self.staging_versions[stripe]
     }
 
     pub(crate) fn flush_staging(
@@ -382,6 +408,11 @@ impl<
         Option<Spilled<C, Db::ScanMemberIterator<K>>>,
     ) {
         loop {
+            // Read before the snapshot is taken, so that an operation the
+            // snapshot misses is certain to change it.
+            let staging_version =
+                self.repr.staging_version(key).load(Ordering::SeqCst);
+
             let staging_snapshot = self.get_staging_snapshot(key);
             let mut spilled = None;
 
@@ -406,6 +437,17 @@ impl<
                         }
                     });
 
+                    // An operation staged while the set was being loaded is
+                    // in neither the snapshot nor the database, and its writer
+                    // may have found no cached set to apply it to. The set
+                    // that was just cached could be missing it for good, so it
+                    // must not stay cached.
+                    if self.repr.staging_version(key).load(Ordering::SeqCst)
+                        != staging_version
+                    {
+                        self.uncache_loaded_set(key, &entry);
+                    }
+
                     entry
                 })
                 .await;
@@ -414,6 +456,28 @@ impl<
                 return (entry, staging_snapshot, spilled);
             }
         }
+    }
+
+    /// Removes `entry` from the cache if it is still the cached entry of `key`
+    /// and holds a loaded set.
+    ///
+    /// A [`Entry::TooLarge`] entry is left alone: it holds no elements that
+    /// could be out of date, and every read of it merges the staged operations
+    /// anyway.
+    fn uncache_loaded_set(&self, key: &K::Key, entry: &Arc<RwLock<Entry<C>>>) {
+        let removed = self.repr.cache.entry(key.clone(), |e| match e {
+            tiny_lfu::Entry::Occupied(occupied)
+                if Arc::ptr_eq(occupied.get(), entry)
+                    && matches!(&*entry.read(), Entry::InMemory(_)) =>
+            {
+                Some(occupied.remove())
+            }
+
+            tiny_lfu::Entry::Occupied(_) | tiny_lfu::Entry::Vacant(_) => None,
+        });
+
+        // drop the set outside of the cache's lock
+        drop(removed);
     }
 
     fn fetch_entry(
@@ -547,6 +611,8 @@ impl<
                         }
 
                         tiny_lfu::Entry::Occupied(occupied_entry) => {
+                            // REVIEW: Don't we need to check if the `unpdated`
+                            // flag is true first?
                             occupied_entry
                                 .get()
                                 .dirty
@@ -564,6 +630,12 @@ impl<
                 VersionedOperation { op: op.clone(), epoch },
             ));
         }
+
+        // Tell the loads that are in flight that the log has moved. This must
+        // come after the append and before the cache lookup below: a load
+        // whose snapshot misses the operation then sees the new version, and
+        // a load that publishes its set later is seen by the lookup.
+        self.repr.staging_version(key).fetch_add(1, Ordering::SeqCst);
 
         // Step 2: Update Cache (Optimization)
         // We DO NOT load from DB if missing. We only update if present.
