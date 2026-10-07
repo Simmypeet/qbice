@@ -16,8 +16,10 @@
 //!    [`WriteBehind::new_write_transaction()`]
 //! 2. Writes accumulate in the transaction (fast, in-memory)
 //! 3. Transaction is submitted via [`WriteBehind::submit_write_transaction()`]
-//! 4. Worker threads process transactions asynchronously
-//! 5. Commit thread ensures epoch ordering and applies writes to database
+//! 4. Worker threads serialize transactions asynchronously
+//! 5. Batch thread puts the transactions back in epoch order and groups them
+//!    into database write batches
+//! 6. Commit thread applies the write batches to the database, one at a time
 
 use std::{
     any::{Any, TypeId},
@@ -493,6 +495,9 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 ///           WriteBatch      WriteBatch
 ///                 |               |
 ///                 v               v
+///                   Batch Thread
+///                         |
+///                         v
 ///                   Commit Thread
 ///                         |
 ///                         v
@@ -505,10 +510,13 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 /// 1. **Buffer Creation**: Application creates a buffer
 /// 2. **Accumulation**: Writes accumulate in buffer (fast, in-memory)
 /// 3. **Submission**: Buffer submitted to global work queue
-/// 4. **Worker Processing**: Worker picks up buffer, creates write batch
-/// 5. **Commit Ordering**: Commit thread applies batches in epoch order
-/// 6. **Notification**: Cache is notified to decrement pending write counts
-/// 7. **Buffer Release**: Buffer is dropped
+/// 4. **Worker Processing**: Worker picks up buffer, serializes its writes
+/// 5. **Batching**: Batch thread collects the buffers in epoch order into a
+///    database write batch and prepares it
+/// 6. **Commit**: Commit thread applies the write batches in that order, while
+///    the batch thread is already preparing the next one
+/// 7. **Notification**: Cache is notified to decrement pending write counts
+/// 8. **Buffer Release**: Buffer is dropped
 ///
 /// # Epoch-Based Ordering
 ///
@@ -548,6 +556,7 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 /// drop(write_manager);
 /// ```
 pub struct WriteBehind<Db: KvDatabase> {
+    batch_handle: Option<thread::JoinHandle<()>>,
     commit_handle: Option<thread::JoinHandle<()>>,
 
     serialize_sender: Option<crossbeam_channel::Sender<SerializeTask<Db>>>,
@@ -584,31 +593,23 @@ struct CurrentBatch<Db: KvDatabase> {
 }
 
 impl<Db: KvDatabase> CurrentBatch<Db> {
+    /// Hands the physical batch over to the commit thread and starts a new
+    /// one.
     pub fn flush(
         &mut self,
         db: &Db,
-        after_commit_sender: &crossbeam_channel::Sender<AfterCommitTask<Db>>,
-        shutting_down: &Arc<AtomicBool>,
+        commit_sender: &crossbeam_channel::Sender<CommitTask<Db>>,
     ) {
-        // commit physical batch
-        let to_commit_db_batch =
+        let mut db_write_batch =
             std::mem::replace(&mut self.db_write_batch, db.write_batch());
-        let to_commit_logical_batches =
-            std::mem::take(&mut self.processed_logical_batch);
+        let logical_batches = std::mem::take(&mut self.processed_logical_batch);
 
-        // commit physical batch
-        to_commit_db_batch.commit();
+        // done on this thread so that the commit thread only has to write
+        db_write_batch.prepare();
 
-        // after commit actions
-        for mut logical_batch in to_commit_logical_batches {
-            if shutting_down.load(Ordering::SeqCst).not() {
-                after_commit_sender
-                    .send(AfterCommitTask { write_buffer: logical_batch })
-                    .unwrap();
-            } else {
-                logical_batch.active = false;
-            }
-        }
+        commit_sender
+            .send(CommitTask { db_write_batch, logical_batches })
+            .unwrap();
     }
 }
 
@@ -629,10 +630,12 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     ///
     /// # Thread Spawning
     ///
-    /// This method spawns `num_threads + 1` threads:
-    /// - `num_threads` worker threads (named "`bg_writer_0`", "`bg_writer_1`",
-    ///   ...)
+    /// This method spawns `num_threads + 3` threads:
+    /// - `num_threads` worker threads (named "`bg_writer_ser_0`",
+    ///   "`bg_writer_ser_1`", ...)
+    /// - 1 batch thread (named "`bg_writer_batch`")
     /// - 1 commit thread (named "`bg_writer_commit`")
+    /// - 1 after-commit thread (named "`bg_writer_after_commit`")
     ///
     /// All threads start immediately and begin waiting for work.
     ///
@@ -650,8 +653,12 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     /// drop(writer);
     /// ```
     pub fn new(db: &Db, serialize_worker_count: usize) -> Self {
-        let (commit_sender, commit_receiver) =
+        let (batch_sender, batch_receiver) =
             crossbeam_channel::unbounded::<WriteTask<Db>>();
+        // The batch thread prepares one batch ahead of the commit thread and
+        // then waits for it.
+        let (commit_sender, commit_receiver) =
+            crossbeam_channel::bounded::<CommitTask<Db>>(1);
         let (serialize_sender, serialize_receiver) =
             crossbeam_channel::unbounded::<SerializeTask<Db>>();
         let (after_commit_sender, after_commit_receiver) =
@@ -660,10 +667,19 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         let shutting_down = Arc::new(AtomicBool::new(false));
 
         Self {
-            commit_handle: Some({
-                let commit_receiver = commit_receiver;
-                let shutting_down = shutting_down.clone();
+            batch_handle: Some({
                 let db = db.clone();
+
+                thread::Builder::new()
+                    .name("bg_writer_batch".to_string())
+                    .spawn(move || {
+                        Self::batch_worker(&batch_receiver, commit_sender, &db);
+                    })
+                    .unwrap()
+            }),
+
+            commit_handle: Some({
+                let shutting_down = shutting_down.clone();
 
                 thread::Builder::new()
                     .name("bg_writer_commit".to_string())
@@ -672,7 +688,6 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                             &commit_receiver,
                             after_commit_sender,
                             &shutting_down,
-                            &db,
                         );
                     })
                     .unwrap()
@@ -682,7 +697,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             serialize_handles: (0..serialize_worker_count)
                 .map(|i| {
                     let serialize_receiver = serialize_receiver.clone();
-                    let commit_sender = commit_sender.clone();
+                    let batch_sender = batch_sender.clone();
                     let db = db.clone();
 
                     thread::Builder::new()
@@ -690,7 +705,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                         .spawn(move || {
                             Self::serialize_worker(
                                 &serialize_receiver,
-                                &commit_sender,
+                                &batch_sender,
                                 &db,
                             );
                         })
@@ -766,10 +781,11 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         }
     }
 
-    fn commit_worker(
+    /// Puts the serialized write buffers back in epoch order and collects
+    /// them into the physical batches that the commit thread writes.
+    fn batch_worker(
         receiver: &crossbeam_channel::Receiver<WriteTask<Db>>,
-        after_commit_sender: crossbeam_channel::Sender<AfterCommitTask<Db>>,
-        shutting_down: &Arc<AtomicBool>,
+        commit_sender: crossbeam_channel::Sender<CommitTask<Db>>,
         db: &Db,
     ) {
         let mut holdback_queues = BinaryHeap::new();
@@ -786,8 +802,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             Self::process_pending_commits(
                 &mut holdback_queues,
                 &mut current_batch,
-                &after_commit_sender,
-                shutting_down,
+                &commit_sender,
                 db,
             );
         }
@@ -796,16 +811,42 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         Self::process_pending_commits(
             &mut holdback_queues,
             &mut current_batch,
-            &after_commit_sender,
-            shutting_down,
+            &commit_sender,
             db,
         );
 
         // flush any remaining in current batch
-        current_batch.flush(db, &after_commit_sender, shutting_down);
+        current_batch.flush(db, &commit_sender);
 
         // should be empty now
         assert!(holdback_queues.is_empty());
+
+        // close commit sender
+        drop(commit_sender);
+    }
+
+    /// Writes the physical batches to the database in the order the batch
+    /// thread made them.
+    fn commit_worker(
+        receiver: &crossbeam_channel::Receiver<CommitTask<Db>>,
+        after_commit_sender: crossbeam_channel::Sender<AfterCommitTask<Db>>,
+        shutting_down: &Arc<AtomicBool>,
+    ) {
+        while let Ok(task) = receiver.recv() {
+            // commit physical batch
+            task.db_write_batch.commit();
+
+            // after commit actions
+            for mut logical_batch in task.logical_batches {
+                if shutting_down.load(Ordering::SeqCst).not() {
+                    after_commit_sender
+                        .send(AfterCommitTask { write_buffer: logical_batch })
+                        .unwrap();
+                } else {
+                    logical_batch.active = false;
+                }
+            }
+        }
 
         // close after commit sender
         drop(after_commit_sender);
@@ -814,8 +855,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     fn process_pending_commits(
         pending_commits: &mut BinaryHeap<WriteTask<Db>>,
         current_batch: &mut CurrentBatch<Db>,
-        after_commit_sender: &crossbeam_channel::Sender<AfterCommitTask<Db>>,
-        shutting_down: &Arc<AtomicBool>,
+        commit_sender: &crossbeam_channel::Sender<CommitTask<Db>>,
         db: &Db,
     ) {
         while let Some(top) = pending_commits.peek() {
@@ -833,7 +873,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
                 // commit if the physical batch is "big enough"
                 if current_batch.db_write_batch.should_write_more().not() {
-                    current_batch.flush(db, after_commit_sender, shutting_down);
+                    current_batch.flush(db, commit_sender);
                 }
             } else {
                 break;
@@ -849,10 +889,14 @@ impl<Db: KvDatabase> Drop for WriteBehind<Db> {
         // close serialize sender
         drop(self.serialize_sender.take());
 
-        // serialization workers should exit, close all commit senders
+        // serialization workers should exit, close all batch senders
         for handle in self.serialize_handles.drain(..) {
             let _ = handle.join();
         }
+
+        // batch sender should be closed now, wait for batch thread to exit
+        // this will also close commit sender
+        let _ = self.batch_handle.take().unwrap().join();
 
         // commit sender should be closed now, wait for commit thread to exit
         // this will also close after commit sender
@@ -874,6 +918,13 @@ struct SerializeTask<Db: KvDatabase> {
 struct WriteTask<Db: KvDatabase> {
     write_buffer: WriteBatch<Db>,
     serialize_buffer: Db::SerializationBuffer,
+}
+
+/// A physical batch that is ready to be committed, and the write buffers
+/// whose writes it holds.
+struct CommitTask<Db: KvDatabase> {
+    db_write_batch: Db::WriteBatch,
+    logical_batches: Vec<WriteBatch<Db>>,
 }
 
 impl<Db: KvDatabase> PartialEq for WriteTask<Db> {

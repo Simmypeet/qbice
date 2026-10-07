@@ -116,6 +116,15 @@ pub trait WriteBatch {
         buffer: Self::SerializationBuffer,
     );
 
+    /// Does the part of [`commit`](Self::commit) that does not write to the
+    /// database yet.
+    ///
+    /// Calling this is optional and changes nothing about what the batch
+    /// writes. It lets one thread get a batch ready while another thread is
+    /// still committing the batch before it. Operations may still be added to
+    /// the batch afterwards.
+    fn prepare(&mut self) {}
+
     /// Commits all pending write operations to the database.
     ///
     /// After commit, all changes become visible to other readers.

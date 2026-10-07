@@ -26,6 +26,11 @@ name = "rocksdb"
 path = "benches/rocksdb.rs"
 harness = false
 
+[[bench]]
+name = "shutdown"
+path = "benches/shutdown.rs"
+harness = false
+
 
 [lints]
 workspace = true
