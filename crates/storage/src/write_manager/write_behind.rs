@@ -53,14 +53,22 @@ pub(crate) trait WideColumnCache<
     );
 }
 
+/// What a committed write batch has done to the sets of a key-of-set column:
+/// for every key it has written to, the last operation on each element.
+pub(crate) type CommittedSetWrites<'a, K> = dyn Iterator<
+        Item = (
+            <K as KeyOfSetColumn>::Key,
+            HashMap<<K as KeyOfSetColumn>::Element, Operation>,
+        ),
+    > + Send
+    + 'a;
+
 pub(crate) trait KeyOfSetCache<K: KeyOfSetColumn, Db: KvDatabase>:
     Send + Sync
 {
-    fn flush(
-        &self,
-        epoch: Epoch,
-        keys: &mut (dyn Iterator<Item = K::Key> + Send),
-    );
+    /// Called once the write batch of `epoch` has been committed to the
+    /// database.
+    fn flush(&self, epoch: Epoch, writes: &mut CommittedSetWrites<'_, K>);
 }
 
 /// A monotonically increasing identifier for write transactions.
@@ -234,13 +242,13 @@ impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
     }
 
     fn after_commit(&mut self, epoch: Epoch) {
-        let mut keys = self.writes.drain().map(|x| x.0);
+        let mut writes = self.writes.drain();
 
         let Some(original_cache) = self.original_cache.clone().upgrade() else {
             return;
         };
 
-        original_cache.flush(epoch, &mut keys);
+        original_cache.flush(epoch, &mut writes);
     }
 
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync) { self }

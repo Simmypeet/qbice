@@ -1,227 +1,774 @@
-use std::sync::Arc;
+use std::{
+    any::Any,
+    collections::{BTreeSet, HashMap, VecDeque},
+    sync::Arc,
+};
 
 use dashmap::DashSet;
+use parking_lot::Mutex;
+use qbice_stable_type_id::Identifiable;
 
-use super::{
-    ConcurrentLog, ConcurrentLogMessage, MergeIterator, Operation, Spilled,
-    VersionedOperation,
-};
+use super::{CacheKeyOfSetMap, LOADED_SET_LIMIT, Stored};
 use crate::{
-    key_of_set_map::{ConcurrentSet, OwnedIterator},
-    write_manager::write_behind::Epoch,
+    key_of_set_map::KeyOfSetMap,
+    kv_database::{
+        KeyOfSetColumn, KvDatabase, SerializationBuffer, WideColumn,
+        WideColumnValue, WriteBatch,
+    },
+    write_manager::write_behind::{Epoch, KeyOfSetCache, Operation},
 };
 
-type Merge = MergeIterator<
-    Arc<DashSet<i32>>,
-    std::vec::IntoIter<i32>,
-    i32,
-    std::iter::Empty<i32>,
->;
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
+)]
+#[stable_type_id_crate(qbice_stable_type_id)]
+pub struct Column;
 
-fn append(log: &ConcurrentLog<i32>, op: Operation<i32>, epoch: u64) {
-    log.apply_message(ConcurrentLogMessage::AppendOperation(
-        VersionedOperation { op, epoch: Epoch(epoch) },
-    ));
+impl KeyOfSetColumn for Column {
+    type Key = i32;
+
+    type Element = i32;
 }
 
-fn flush_up_to(log: &ConcurrentLog<i32>, epoch: u64) {
-    log.apply_message(ConcurrentLogMessage::FlushUpTo(Epoch(epoch)));
+type Hook = Box<dyn FnOnce() + Send + Sync>;
+
+/// A database that keeps the sets of [`Column`] in memory.
+///
+/// A scan sees the members as they are when it starts. `during_scan` runs
+/// right after that, before the scan hands anything out, which is how a test
+/// makes something happen in the middle of a load.
+#[derive(Clone, Default)]
+struct MemoryDb {
+    sets: Arc<Mutex<HashMap<i32, BTreeSet<i32>>>>,
+    during_scan: Arc<Mutex<Option<Hook>>>,
 }
 
-fn staged_epochs(log: &ConcurrentLog<i32>) -> Vec<u64> {
-    log.log.read().operations.keys().map(|(epoch, _)| epoch.0).collect()
+impl MemoryDb {
+    fn members(&self, key: i32) -> Vec<i32> {
+        self.sets
+            .lock()
+            .get(&key)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    fn set_members(&self, key: i32, members: impl IntoIterator<Item = i32>) {
+        self.sets.lock().insert(key, members.into_iter().collect());
+    }
 }
 
-/// The elements the staged operations add and remove, each sorted.
-fn snapshot(log: &ConcurrentLog<i32>) -> (Vec<i32>, Vec<i32>) {
-    let snapshot = log.get_snapshot();
+/// The tests write to [`MemoryDb`] directly.
+struct Unused;
 
-    let mut added = snapshot.added.into_iter().collect::<Vec<_>>();
-    let mut removed = snapshot.removed.into_iter().collect::<Vec<_>>();
+impl SerializationBuffer for Unused {
+    fn put<W: WideColumn, C: WideColumnValue<W>>(&mut self, _: &W::Key, _: &C) {
+        unreachable!()
+    }
 
-    added.sort_unstable();
-    removed.sort_unstable();
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, _: &W::Key) {
+        unreachable!()
+    }
 
-    (added, removed)
+    fn insert_member<C: KeyOfSetColumn>(&mut self, _: &C::Key, _: &C::Element) {
+        unreachable!()
+    }
+
+    fn delete_member<C: KeyOfSetColumn>(&mut self, _: &C::Key, _: &C::Element) {
+        unreachable!()
+    }
 }
 
-fn sorted(merge: Merge) -> Vec<i32> {
-    let mut members = merge.collect::<Vec<_>>();
+impl WriteBatch for Unused {
+    type SerializationBuffer = Self;
+
+    fn put<W: WideColumn, C: WideColumnValue<W>>(&mut self, _: &W::Key, _: &C) {
+        unreachable!()
+    }
+
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, _: &W::Key) {
+        unreachable!()
+    }
+
+    fn insert_member<C: KeyOfSetColumn>(&mut self, _: &C::Key, _: &C::Element) {
+        unreachable!()
+    }
+
+    fn delete_member<C: KeyOfSetColumn>(&mut self, _: &C::Key, _: &C::Element) {
+        unreachable!()
+    }
+
+    fn consume_serialization_buffer(&mut self, _: Self) { unreachable!() }
+
+    fn commit(self) { unreachable!() }
+}
+
+impl KvDatabase for MemoryDb {
+    type WriteBatch = Unused;
+
+    type SerializationBuffer = Unused;
+
+    type ScanMemberIterator<C: KeyOfSetColumn> = std::vec::IntoIter<C::Element>;
+
+    fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
+        &self,
+        _: &W::Key,
+    ) -> Option<C> {
+        None
+    }
+
+    fn scan_members<C: KeyOfSetColumn>(
+        &self,
+        key: &C::Key,
+    ) -> Self::ScanMemberIterator<C> {
+        let key = *(key as &dyn Any)
+            .downcast_ref::<i32>()
+            .expect("only `Column` is stored");
+
+        let members = self.members(key);
+
+        let hook = self.during_scan.lock().take();
+
+        if let Some(hook) = hook {
+            hook();
+        }
+
+        let members: Box<dyn Any> = Box::new(members);
+        let members = *members
+            .downcast::<Vec<C::Element>>()
+            .expect("only `Column` is stored");
+
+        members.into_iter()
+    }
+
+    fn write_batch(&self) -> Unused { Unused }
+
+    fn serialization_buffer(&self) -> Unused { Unused }
+}
+
+type Map = CacheKeyOfSetMap<Column, Arc<DashSet<i32>>, MemoryDb>;
+
+/// Opens a map over an empty database. The map keeps up to `capacity` sets
+/// and only loads the members of sets that have at most `limit` of them.
+fn open(capacity: u64, limit: usize) -> (MemoryDb, Arc<Map>) {
+    let db = MemoryDb::default();
+    let map = Arc::new(Map::with_loaded_set_limit(capacity, db.clone(), limit));
+
+    (db, map)
+}
+
+async fn members(map: &Map, key: i32) -> Vec<i32> {
+    let mut members = map.get(&key).await.collect::<Vec<_>>();
 
     members.sort_unstable();
     members
 }
 
-#[test]
-fn flush_removes_every_operation_up_to_the_flushed_epoch() {
-    let log = ConcurrentLog::new();
-
-    // batches do not append in epoch order
-    append(&log, Operation::Insert(3), 3);
-    append(&log, Operation::Insert(0), 0);
-    append(&log, Operation::Insert(2), 2);
-    append(&log, Operation::Insert(1), 1);
-
-    flush_up_to(&log, 1);
-    assert_eq!(staged_epochs(&log), [2, 3]);
-
-    flush_up_to(&log, 3);
-    assert_eq!(staged_epochs(&log), [0; 0]);
+/// What a write batch records for the write-behind.
+struct Batch {
+    epoch: u64,
+    writes: HashMap<i32, HashMap<i32, Operation>>,
 }
 
-/// This is the log the engine builds for a backward edge whose caller is
-/// computed once and then recomputed twice: every recompute removes the edge
-/// and inserts it again. The edge must still be there.
-#[test]
-fn snapshot_keeps_an_element_that_is_removed_and_reinserted() {
-    let log = ConcurrentLog::new();
+impl Batch {
+    fn new(epoch: u64) -> Self { Self { epoch, writes: HashMap::new() } }
 
-    append(&log, Operation::Insert(7), 2);
-    append(&log, Operation::Remove(7), 109);
-    append(&log, Operation::Insert(7), 109);
-    append(&log, Operation::Remove(7), 214);
-    append(&log, Operation::Insert(7), 214);
+    fn stage(
+        &mut self,
+        map: &Map,
+        key: i32,
+        element: i32,
+        operation: Operation,
+    ) {
+        let first_in_batch = !self.writes.contains_key(&key);
 
-    assert_eq!(snapshot(&log), (vec![7], vec![]));
-}
+        self.writes.entry(key).or_default().insert(element, operation);
 
-/// A committed write batch stays in the log until the after-commit thread
-/// flushes it, so the database may already hold the insert. The remove has to
-/// be reported anyway instead of cancelling out against the insert.
-#[test]
-fn snapshot_reports_a_remove_that_follows_an_insert() {
-    let log = ConcurrentLog::new();
-
-    append(&log, Operation::Insert(7), 0);
-    append(&log, Operation::Remove(7), 1);
-
-    assert_eq!(snapshot(&log), (vec![], vec![7]));
-}
-
-#[test]
-fn snapshot_orders_operations_by_epoch_then_by_arrival() {
-    // the database applies epoch 1 before epoch 5, whichever arrives first
-    let log = ConcurrentLog::new();
-
-    append(&log, Operation::Remove(7), 5);
-    append(&log, Operation::Insert(7), 1);
-
-    assert_eq!(snapshot(&log), (vec![], vec![7]));
-
-    // within one write batch the later operation wins
-    let log = ConcurrentLog::new();
-
-    append(&log, Operation::Remove(7), 1);
-    append(&log, Operation::Insert(7), 1);
-    append(&log, Operation::Insert(8), 1);
-    append(&log, Operation::Remove(8), 1);
-
-    assert_eq!(snapshot(&log), (vec![7], vec![8]));
-}
-
-#[test]
-fn staged_remove_survives_the_flush_of_an_older_insert() {
-    let log = ConcurrentLog::new();
-
-    append(&log, Operation::Insert(7), 0);
-    append(&log, Operation::Remove(7), 1);
-
-    flush_up_to(&log, 0);
-
-    assert_eq!(snapshot(&log), (vec![], vec![7]));
-}
-
-#[test]
-fn staged_insert_survives_the_flush_of_an_older_remove() {
-    let log = ConcurrentLog::new();
-
-    append(&log, Operation::Remove(7), 0);
-    append(&log, Operation::Insert(7), 1);
-
-    flush_up_to(&log, 0);
-
-    assert_eq!(snapshot(&log), (vec![7], vec![]));
-}
-
-/// The database already holds a staged insert when its write batch has been
-/// committed but not yet flushed from staging. The element must not be
-/// yielded twice.
-#[test]
-fn streaming_merge_yields_every_member_once() {
-    let log = ConcurrentLog::new();
-
-    append(&log, Operation::Remove(1), 0);
-    append(&log, Operation::Insert(3), 0);
-    append(&log, Operation::Insert(4), 0);
-
-    let merge = Merge::Streaming(
-        vec![1, 2, 3].into_iter(),
-        log.get_snapshot().into_iter_snapshot(),
-    );
-
-    assert_eq!(sorted(merge), [2, 3, 4]);
-}
-
-/// Skipping a removed element in the partially loaded set must not end the
-/// iteration while there are members left.
-#[test]
-fn spilled_merge_yields_every_member_that_was_not_removed() {
-    let log = ConcurrentLog::new();
-
-    for element in 0..50 {
-        append(&log, Operation::Remove(element), 0);
+        map.repr.stage(
+            key,
+            element,
+            operation,
+            Epoch(self.epoch),
+            first_in_batch,
+        );
     }
 
-    append(&log, Operation::Insert(200), 0);
+    fn insert(&mut self, map: &Map, key: i32, element: i32) {
+        self.stage(map, key, element, Operation::Insert);
+    }
 
-    let half_constructed = Arc::new((0..100).collect::<DashSet<i32>>());
+    fn remove(&mut self, map: &Map, key: i32, element: i32) {
+        self.stage(map, key, element, Operation::Remove);
+    }
 
-    let merge = Merge::Spilled(
-        Spilled {
-            half_constructed: OwnedIterator::new(half_constructed, |set| {
-                set.iter()
-            }),
-            rest_iterator: vec![100, 101].into_iter(),
-        },
-        log.get_snapshot().into_iter_snapshot(),
-    );
+    /// Does what the write-behind does with a batch: writes it to the
+    /// database and then tells the cache about it.
+    fn commit(self, db: &MemoryDb, map: &Map) {
+        {
+            let mut sets = db.sets.lock();
 
-    let mut expected = (50..102).collect::<Vec<_>>();
-    expected.push(200);
+            for (key, operations) in &self.writes {
+                let set = sets.entry(*key).or_default();
 
-    assert_eq!(sorted(merge), expected);
+                for (element, operation) in operations {
+                    match operation {
+                        Operation::Insert => {
+                            set.insert(*element);
+                        }
+                        Operation::Remove => {
+                            set.remove(element);
+                        }
+                    }
+                }
+            }
+        }
+
+        KeyOfSetCache::<Column, MemoryDb>::flush(
+            &*map.repr,
+            Epoch(self.epoch),
+            &mut self.writes.into_iter(),
+        );
+    }
 }
 
-/// These replay, without the background threads, the calls the write-behind
-/// makes on the map.
+fn is_loaded(map: &Map, key: i32) -> bool {
+    map.repr
+        .sets
+        .get_map(&key, |set| matches!(set.stored, Stored::Loaded(_)))
+        .unwrap_or(false)
+}
+
+fn is_too_large(map: &Map, key: i32) -> bool {
+    map.repr
+        .sets
+        .get_map(&key, |set| matches!(set.stored, Stored::TooLarge))
+        .unwrap_or(false)
+}
+
+fn is_cached(map: &Map, key: i32) -> bool {
+    map.repr.sets.get_map(&key, |_| ()).is_some()
+}
+
+fn pending_count(map: &Map, key: i32) -> usize {
+    map.repr.sets.get_map(&key, |set| set.pending.len()).unwrap_or(0)
+}
+
+#[tokio::test]
+async fn pending_writes_are_laid_over_the_stored_members() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+    db.set_members(0, [1, 2, 3]);
+
+    let mut batch = Batch::new(0);
+    batch.remove(&map, 0, 1);
+    batch.insert(&map, 0, 3); // already stored: must not show up twice
+    batch.insert(&map, 0, 4);
+
+    // the first read loads the set, the second finds it in memory
+    assert_eq!(members(&map, 0).await, [2, 3, 4]);
+    assert_eq!(members(&map, 0).await, [2, 3, 4]);
+
+    batch.commit(&db, &map);
+
+    assert_eq!(members(&map, 0).await, [2, 3, 4]);
+    assert_eq!(db.members(0), [2, 3, 4]);
+}
+
+/// This is what the engine does to a backward edge whose caller is computed
+/// once and then recomputed twice: every recompute removes the edge and
+/// inserts it again.
+#[tokio::test]
+async fn element_that_is_removed_and_reinserted_stays_a_member() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+
+    let mut first = Batch::new(2);
+    first.insert(&map, 0, 7);
+
+    let mut second = Batch::new(109);
+    second.remove(&map, 0, 7);
+    second.insert(&map, 0, 7);
+
+    let mut third = Batch::new(214);
+    third.remove(&map, 0, 7);
+    third.insert(&map, 0, 7);
+
+    assert_eq!(members(&map, 0).await, [7]);
+
+    for batch in [first, second, third] {
+        batch.commit(&db, &map);
+
+        assert_eq!(members(&map, 0).await, [7]);
+    }
+
+    assert_eq!(db.members(0), [7]);
+}
+
+#[tokio::test]
+async fn later_write_batch_decides_whatever_the_arrival_order() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+
+    let mut older = Batch::new(1);
+    let mut newer = Batch::new(5);
+
+    // the database applies the older batch first, although it arrives last
+    newer.remove(&map, 0, 7);
+    older.insert(&map, 0, 7);
+
+    assert_eq!(members(&map, 0).await, [0; 0]);
+
+    older.commit(&db, &map);
+    assert_eq!(members(&map, 0).await, [0; 0]);
+
+    newer.commit(&db, &map);
+    assert_eq!(members(&map, 0).await, [0; 0]);
+    assert_eq!(db.members(0), [0; 0]);
+}
+
+#[tokio::test]
+async fn later_operation_of_a_write_batch_decides() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+
+    let mut batch = Batch::new(0);
+    batch.remove(&map, 0, 7);
+    batch.insert(&map, 0, 7);
+    batch.insert(&map, 0, 8);
+    batch.remove(&map, 0, 8);
+
+    assert_eq!(members(&map, 0).await, [7]);
+
+    batch.commit(&db, &map);
+
+    assert_eq!(members(&map, 0).await, [7]);
+}
+
+/// An insert that has reached the database must not hide a later remove that
+/// is still pending.
+#[tokio::test]
+async fn pending_remove_survives_the_flush_of_an_older_insert() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+
+    let mut older = Batch::new(0);
+    older.insert(&map, 0, 7);
+
+    let mut newer = Batch::new(1);
+    newer.remove(&map, 0, 7);
+
+    older.commit(&db, &map);
+
+    assert_eq!(db.members(0), [7]);
+    assert_eq!(members(&map, 0).await, [0; 0]);
+
+    newer.commit(&db, &map);
+
+    assert_eq!(members(&map, 0).await, [0; 0]);
+}
+
+/// The mirror image: a remove that has reached the database must not hide a
+/// later insert that is still pending.
+#[tokio::test]
+async fn pending_insert_survives_the_flush_of_an_older_remove() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+    db.set_members(0, [7]);
+
+    let mut older = Batch::new(0);
+    older.remove(&map, 0, 7);
+
+    let mut newer = Batch::new(1);
+    newer.insert(&map, 0, 7);
+
+    older.commit(&db, &map);
+
+    assert_eq!(db.members(0), [0; 0]);
+    assert_eq!(members(&map, 0).await, [7]);
+
+    newer.commit(&db, &map);
+
+    assert_eq!(members(&map, 0).await, [7]);
+}
+
+#[tokio::test]
+async fn flush_keeps_a_loaded_set_up_to_date() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+    db.set_members(0, [1]);
+
+    assert_eq!(members(&map, 0).await, [1]);
+    assert!(is_loaded(&map, 0));
+
+    let mut batch = Batch::new(0);
+    batch.remove(&map, 0, 1);
+    batch.insert(&map, 0, 2);
+    batch.commit(&db, &map);
+
+    // nothing is pending anymore, so this is the loaded copy on its own
+    assert_eq!(pending_count(&map, 0), 0);
+    assert!(is_loaded(&map, 0));
+    assert_eq!(members(&map, 0).await, [2]);
+}
+
+#[tokio::test]
+async fn set_that_is_only_written_is_dropped_once_flushed() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+
+    let mut batch = Batch::new(0);
+    batch.insert(&map, 0, 7);
+
+    assert!(is_cached(&map, 0));
+
+    batch.commit(&db, &map);
+
+    assert!(!is_cached(&map, 0));
+    assert_eq!(members(&map, 0).await, [7]);
+}
+
+#[tokio::test]
+async fn set_at_the_limit_is_loaded_and_one_above_is_not() {
+    let (db, map) = open(16, 8);
+
+    db.set_members(0, 0..8);
+    db.set_members(1, 0..9);
+
+    assert_eq!(members(&map, 0).await, (0..8).collect::<Vec<_>>());
+    assert_eq!(members(&map, 1).await, (0..9).collect::<Vec<_>>());
+
+    assert!(is_loaded(&map, 0));
+    assert!(is_too_large(&map, 1));
+}
+
+#[tokio::test]
+async fn large_set_is_streamed_with_the_pending_writes_laid_over() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+    db.set_members(0, 0..2000);
+
+    let mut batch = Batch::new(0);
+
+    for element in 0..50 {
+        batch.remove(&map, 0, element);
+    }
+
+    batch.insert(&map, 0, 100); // already stored: must not show up twice
+    batch.insert(&map, 0, 5000);
+
+    let mut expected = (50..2000).collect::<Vec<_>>();
+    expected.push(5000);
+
+    // the first read finds out that the set is too large to load
+    assert_eq!(members(&map, 0).await, expected);
+    assert!(is_too_large(&map, 0));
+    assert_eq!(members(&map, 0).await, expected);
+
+    batch.commit(&db, &map);
+
+    assert!(is_too_large(&map, 0));
+    assert_eq!(members(&map, 0).await, expected);
+}
+
+#[tokio::test]
+async fn loaded_set_that_outgrows_the_limit_is_streamed() {
+    let (db, map) = open(16, 8);
+    db.set_members(0, 0..6);
+
+    assert_eq!(members(&map, 0).await, (0..6).collect::<Vec<_>>());
+    assert!(is_loaded(&map, 0));
+
+    let mut batch = Batch::new(0);
+
+    for element in 6..12 {
+        batch.insert(&map, 0, element);
+    }
+
+    // pending writes do not count towards the limit
+    assert_eq!(members(&map, 0).await, (0..12).collect::<Vec<_>>());
+    assert!(is_loaded(&map, 0));
+
+    batch.commit(&db, &map);
+
+    assert!(is_too_large(&map, 0));
+    assert_eq!(members(&map, 0).await, (0..12).collect::<Vec<_>>());
+}
+
+/// The write is in neither the scan nor, when the scan started, the pending
+/// writes that the load could have looked at.
+#[tokio::test]
+async fn write_staged_during_a_load_is_not_lost() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+    db.set_members(0, [1]);
+
+    *db.during_scan.lock() = Some(Box::new({
+        let map = map.clone();
+
+        move || map.repr.stage(0, 7, Operation::Insert, Epoch(0), true)
+    }));
+
+    // the read that overlaps the write may or may not see it
+    let _ = members(&map, 0).await;
+
+    // every later read must
+    assert_eq!(members(&map, 0).await, [1, 7]);
+}
+
+/// The scan started before the write batch was committed, so it does not have
+/// the batch's writes, and the flush takes them out of the pending writes
+/// before the load is done.
+#[tokio::test]
+async fn write_batch_flushed_during_a_load_is_not_lost() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+    db.set_members(0, [1, 2]);
+
+    let mut batch = Batch::new(0);
+    batch.insert(&map, 0, 7);
+    batch.remove(&map, 0, 2);
+
+    *db.during_scan.lock() = Some(Box::new({
+        let (db, map) = (db.clone(), map.clone());
+
+        move || batch.commit(&db, &map)
+    }));
+
+    let _ = members(&map, 0).await;
+
+    // nothing is pending, so this is what the load has left in memory
+    assert_eq!(pending_count(&map, 0), 0);
+    assert!(is_loaded(&map, 0));
+    assert_eq!(members(&map, 0).await, [1, 7]);
+}
+
+/// The same, with a write batch that is staged and flushed entirely within
+/// the load.
+#[tokio::test]
+async fn write_batch_staged_and_flushed_during_a_load_is_not_lost() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+    db.set_members(0, [1, 2]);
+
+    *db.during_scan.lock() = Some(Box::new({
+        let (db, map) = (db.clone(), map.clone());
+
+        move || {
+            let mut batch = Batch::new(0);
+            batch.insert(&map, 0, 7);
+            batch.remove(&map, 0, 2);
+            batch.commit(&db, &map);
+        }
+    }));
+
+    let _ = members(&map, 0).await;
+
+    assert_eq!(pending_count(&map, 0), 0);
+    assert_eq!(members(&map, 0).await, [1, 7]);
+}
+
+#[tokio::test]
+async fn load_without_an_overlapping_write_stays_loaded() {
+    let (db, map) = open(16, LOADED_SET_LIMIT);
+    db.set_members(0, [1]);
+
+    assert_eq!(members(&map, 0).await, [1]);
+    assert!(is_loaded(&map, 0));
+}
+
+/// The pending writes of a set exist nowhere else until they are committed,
+/// however full the cache is.
+#[tokio::test]
+async fn set_with_unflushed_writes_is_not_evicted() {
+    let (db, map) = open(2, LOADED_SET_LIMIT);
+
+    let mut batch = Batch::new(0);
+
+    for key in 0..200 {
+        batch.insert(&map, key, key + 1000);
+    }
+
+    for key in 0..200 {
+        assert_eq!(members(&map, key).await, [key + 1000]);
+    }
+
+    batch.commit(&db, &map);
+
+    for key in 0..200 {
+        assert_eq!(members(&map, key).await, [key + 1000]);
+    }
+}
+
+/// A small deterministic generator, so that a failure can be replayed from
+/// its seed.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: u32) -> u32 {
+        u32::try_from(self.next() % u64::from(bound)).unwrap()
+    }
+
+    fn index(&mut self, len: usize) -> usize {
+        usize::try_from(self.next() % u64::try_from(len).unwrap()).unwrap()
+    }
+
+    fn element(&mut self, bound: u32) -> i32 {
+        i32::try_from(self.below(bound)).unwrap()
+    }
+}
+
+/// The map together with everything the write-behind would be holding.
+struct World {
+    db: MemoryDb,
+    map: Arc<Map>,
+
+    /// The write batches that have not been committed, oldest first.
+    open: VecDeque<Batch>,
+    next_epoch: u64,
+}
+
+impl World {
+    const KEYS: u32 = 24;
+    const ELEMENTS: u32 = 12;
+
+    /// What the set of `key` has to read as: the members in the database
+    /// with the open write batches applied in the order of their epochs.
+    fn expected(&self, key: i32) -> Vec<i32> {
+        let mut members =
+            self.db.sets.lock().get(&key).cloned().unwrap_or_default();
+
+        for batch in &self.open {
+            let Some(operations) = batch.writes.get(&key) else {
+                continue;
+            };
+
+            for (element, operation) in operations {
+                match operation {
+                    Operation::Insert => {
+                        members.insert(*element);
+                    }
+                    Operation::Remove => {
+                        members.remove(element);
+                    }
+                }
+            }
+        }
+
+        members.into_iter().collect()
+    }
+
+    fn open_batch(&mut self) {
+        self.open.push_back(Batch::new(self.next_epoch));
+        self.next_epoch += 1;
+    }
+
+    /// Takes a random step that a writer or the write-behind could take.
+    fn write_step(&mut self, rng: &mut Rng) {
+        match rng.below(10) {
+            // the write-behind commits the oldest batch
+            0 | 1 => {
+                if let Some(batch) = self.open.pop_front() {
+                    batch.commit(&self.db, &self.map);
+                }
+            }
+
+            2 => self.open_batch(),
+
+            // any of the open batches stages an operation
+            _ => {
+                if self.open.is_empty() {
+                    self.open_batch();
+                }
+
+                let batch = rng.index(self.open.len());
+                let key = rng.element(Self::KEYS);
+                let element = rng.element(Self::ELEMENTS);
+                let operation = if rng.below(2) == 0 {
+                    Operation::Insert
+                } else {
+                    Operation::Remove
+                };
+
+                self.open[batch].stage(&self.map, key, element, operation);
+            }
+        }
+    }
+}
+
+/// Runs random writes, commits and reads against a map that is small enough
+/// to keep evicting sets and to keep moving them across the size limit, and
+/// checks every read against a model. Every so often a write or a commit is
+/// made to happen in the middle of a load.
+#[tokio::test]
+async fn reads_match_a_model_under_random_interleavings() {
+    for seed in 0..300 {
+        let mut rng = Rng(seed);
+        let (db, map) = open(2, 6);
+
+        let world = Arc::new(Mutex::new(World {
+            db: db.clone(),
+            map: map.clone(),
+            open: VecDeque::new(),
+            next_epoch: 0,
+        }));
+
+        for step in 0..600 {
+            if rng.below(3) != 0 {
+                world.lock().write_step(&mut rng);
+                continue;
+            }
+
+            let key = rng.element(World::KEYS);
+            let before = world.lock().expected(key);
+
+            let interrupt = rng.below(4) == 0;
+
+            if interrupt {
+                let world = world.clone();
+                let mut rng = Rng(rng.next());
+
+                *db.during_scan.lock() =
+                    Some(Box::new(move || world.lock().write_step(&mut rng)));
+            }
+
+            let read = members(&map, key).await;
+
+            // the hook is still there if the read did not have to load
+            let interrupted =
+                interrupt && db.during_scan.lock().take().is_none();
+            let after = world.lock().expected(key);
+
+            if interrupted {
+                assert!(
+                    read == before || read == after,
+                    "seed {seed}, step {step}, key {key}: read {read:?}, \
+                     expected {before:?} or {after:?}"
+                );
+            } else {
+                assert_eq!(read, after, "seed {seed}, step {step}, key {key}");
+            }
+
+            // once things are quiet, there is only one right answer
+            assert_eq!(
+                members(&map, key).await,
+                after,
+                "seed {seed}, step {step}, key {key}, read again"
+            );
+        }
+    }
+}
+
+/// The same paths against the real database.
 #[cfg(feature = "rocksdb")]
 mod rocksdb {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use dashmap::DashSet;
     use qbice_serialize::Plugin;
-    use qbice_stable_type_id::Identifiable;
 
-    use super::super::{CacheKeyOfSetMap, Operation};
+    use super::Column;
     use crate::{
-        key_of_set_map::KeyOfSetMap,
-        kv_database::{
-            KeyOfSetColumn, KvDatabase, WriteBatch, rocksdb::RocksDB,
-        },
-        write_manager::write_behind::Epoch,
+        key_of_set_map::{KeyOfSetMap, cache::CacheKeyOfSetMap},
+        kv_database::{KvDatabase, WriteBatch, rocksdb::RocksDB},
+        write_manager::write_behind::{Epoch, KeyOfSetCache, Operation},
     };
-
-    #[derive(
-        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
-    )]
-    #[stable_type_id_crate(qbice_stable_type_id)]
-    pub struct Column;
-
-    impl KeyOfSetColumn for Column {
-        type Key = i32;
-
-        type Element = i32;
-    }
 
     type Map = CacheKeyOfSetMap<Column, Arc<DashSet<i32>>, RocksDB>;
 
@@ -232,216 +779,57 @@ mod rocksdb {
         (db, map)
     }
 
-    /// Nothing has been committed yet and the set is not cached, so its
-    /// members come from the staged operations alone.
+    async fn members(map: &Map, key: i32) -> Vec<i32> {
+        let mut members = map.get(&key).await.collect::<Vec<_>>();
+
+        members.sort_unstable();
+        members
+    }
+
+    /// Nothing has been committed yet, so the members come from the pending
+    /// writes alone.
     #[tokio::test]
-    async fn uncached_read_keeps_an_element_that_is_removed_and_reinserted() {
+    async fn element_that_is_removed_and_reinserted_stays_a_member() {
         let tempdir = tempfile::tempdir().unwrap();
         let (_db, map) = open(&tempdir);
 
-        map.apply_op(&0, Operation::Insert(7), Epoch(2), true);
+        map.repr.stage(0, 7, Operation::Insert, Epoch(2), true);
 
         for epoch in [109, 214] {
-            map.apply_op(&0, Operation::Remove(7), Epoch(epoch), true);
-            map.apply_op(&0, Operation::Insert(7), Epoch(epoch), false);
+            map.repr.stage(0, 7, Operation::Remove, Epoch(epoch), true);
+            map.repr.stage(0, 7, Operation::Insert, Epoch(epoch), false);
         }
 
-        assert_eq!(map.get(&0).await.collect::<Vec<_>>(), [7]);
+        assert_eq!(members(&map, 0).await, [7]);
     }
 
-    /// An older write batch is committed and flushed from staging while a
-    /// newer one that touches the same set is still open.
+    /// An older write batch is committed and flushed while a newer one that
+    /// writes to the same set is still open.
     #[tokio::test]
-    async fn uncached_read_sees_a_remove_staged_after_a_flushed_insert() {
+    async fn pending_remove_survives_the_flush_of_an_older_insert() {
         let tempdir = tempfile::tempdir().unwrap();
         let (db, map) = open(&tempdir);
 
-        map.apply_op(&0, Operation::Insert(7), Epoch(0), true);
-        map.apply_op(&0, Operation::Remove(7), Epoch(1), true);
+        map.repr.stage(0, 1, Operation::Insert, Epoch(0), true);
+        map.repr.stage(0, 7, Operation::Insert, Epoch(0), false);
+        map.repr.stage(0, 7, Operation::Remove, Epoch(1), true);
 
         // only epoch 0 reaches the database
         let mut batch = db.write_batch();
+        batch.insert_member::<Column>(&0, &1);
         batch.insert_member::<Column>(&0, &7);
         batch.commit();
 
-        map.repr.flush_staging(Epoch(0), [0]);
+        let committed =
+            HashMap::from([(1, Operation::Insert), (7, Operation::Insert)]);
 
-        assert_eq!(map.get(&0).await.collect::<Vec<_>>(), [0; 0]);
-    }
-}
+        KeyOfSetCache::<Column, RocksDB>::flush(
+            &*map.repr,
+            Epoch(0),
+            &mut std::iter::once((0, committed)),
+        );
 
-/// These run a write in the middle of a load, which needs a database that
-/// can be interrupted while it is being scanned.
-mod load {
-    use std::sync::Arc;
-
-    use dashmap::DashSet;
-    use parking_lot::Mutex;
-    use qbice_stable_type_id::Identifiable;
-
-    use super::super::{CacheKeyOfSetMap, Operation};
-    use crate::{
-        key_of_set_map::KeyOfSetMap,
-        kv_database::{
-            KeyOfSetColumn, KvDatabase, SerializationBuffer, WideColumn,
-            WideColumnValue, WriteBatch,
-        },
-        write_manager::write_behind::Epoch,
-    };
-
-    #[derive(
-        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Identifiable,
-    )]
-    #[stable_type_id_crate(qbice_stable_type_id)]
-    pub struct Column;
-
-    impl KeyOfSetColumn for Column {
-        type Key = i32;
-
-        type Element = i32;
-    }
-
-    type Hook = Box<dyn FnOnce() + Send + Sync>;
-
-    /// An empty database that runs a hook while it is being scanned.
-    #[derive(Clone, Default)]
-    struct InterruptibleDb {
-        during_scan: Arc<Mutex<Option<Hook>>>,
-    }
-
-    /// Nothing is ever written to [`InterruptibleDb`].
-    struct Unused;
-
-    impl SerializationBuffer for Unused {
-        fn put<W: WideColumn, C: WideColumnValue<W>>(
-            &mut self,
-            _: &W::Key,
-            _: &C,
-        ) {
-            unreachable!()
-        }
-
-        fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, _: &W::Key) {
-            unreachable!()
-        }
-
-        fn insert_member<C: KeyOfSetColumn>(
-            &mut self,
-            _: &C::Key,
-            _: &C::Element,
-        ) {
-            unreachable!()
-        }
-
-        fn delete_member<C: KeyOfSetColumn>(
-            &mut self,
-            _: &C::Key,
-            _: &C::Element,
-        ) {
-            unreachable!()
-        }
-    }
-
-    impl WriteBatch for Unused {
-        type SerializationBuffer = Self;
-
-        fn put<W: WideColumn, C: WideColumnValue<W>>(
-            &mut self,
-            _: &W::Key,
-            _: &C,
-        ) {
-            unreachable!()
-        }
-
-        fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, _: &W::Key) {
-            unreachable!()
-        }
-
-        fn insert_member<C: KeyOfSetColumn>(
-            &mut self,
-            _: &C::Key,
-            _: &C::Element,
-        ) {
-            unreachable!()
-        }
-
-        fn delete_member<C: KeyOfSetColumn>(
-            &mut self,
-            _: &C::Key,
-            _: &C::Element,
-        ) {
-            unreachable!()
-        }
-
-        fn consume_serialization_buffer(&mut self, _: Self) { unreachable!() }
-
-        fn commit(self) { unreachable!() }
-    }
-
-    impl KvDatabase for InterruptibleDb {
-        type WriteBatch = Unused;
-
-        type SerializationBuffer = Unused;
-
-        type ScanMemberIterator<C: KeyOfSetColumn> =
-            std::iter::Empty<C::Element>;
-
-        fn get_wide_column<W: WideColumn, C: WideColumnValue<W>>(
-            &self,
-            _: &W::Key,
-        ) -> Option<C> {
-            None
-        }
-
-        fn scan_members<C: KeyOfSetColumn>(
-            &self,
-            _: &C::Key,
-        ) -> Self::ScanMemberIterator<C> {
-            let hook = self.during_scan.lock().take();
-
-            if let Some(hook) = hook {
-                hook();
-            }
-
-            std::iter::empty()
-        }
-
-        fn write_batch(&self) -> Unused { Unused }
-
-        fn serialization_buffer(&self) -> Unused { Unused }
-    }
-
-    type Map = CacheKeyOfSetMap<Column, Arc<DashSet<i32>>, InterruptibleDb>;
-
-    /// The operation is in neither the load's snapshot nor the database, and
-    /// its writer finds no cached set to apply it to. The loaded set must not
-    /// go on being served without it.
-    #[tokio::test]
-    async fn operation_staged_during_a_load_is_not_lost() {
-        let db = InterruptibleDb::default();
-        let map = Arc::new(Map::new(16, db.clone()));
-
-        *db.during_scan.lock() = Some(Box::new({
-            let map = map.clone();
-
-            move || map.apply_op(&0, Operation::Insert(7), Epoch(0), true)
-        }));
-
-        // the read that overlaps the write may or may not see it
-        let _ = map.get(&0).await.count();
-
-        // every later read must
-        assert_eq!(map.get(&0).await.collect::<Vec<_>>(), [7]);
-    }
-
-    /// The check for overlapping writes must not stop sets from being cached.
-    #[tokio::test]
-    async fn load_without_an_overlapping_write_stays_cached() {
-        let map = Map::new(16, InterruptibleDb::default());
-
-        map.apply_op(&0, Operation::Insert(7), Epoch(0), true);
-
-        assert_eq!(map.get(&0).await.collect::<Vec<_>>(), [7]);
-        assert!(map.repr.cache.get(&0).is_some());
+        assert_eq!(db.scan_members::<Column>(&0).count(), 2);
+        assert_eq!(members(&map, 0).await, [1]);
     }
 }

@@ -2,34 +2,49 @@
 //!
 //! This module provides [`CacheKeyOfSetMap`], which wraps a database backend
 //! with caching for improved read performance on key-to-set relationships.
+//!
+//! # How a set is represented
+//!
+//! The members of a set are whatever the database holds, with the writes that
+//! the database has not confirmed yet laid over it. Every key that is in
+//! memory has one [`KeySet`] that holds both parts:
+//!
+//! - `pending` records, for each element with an unconfirmed write, whether the
+//!   element will be a member once every write batch is committed.
+//! - `stored` is a copy of the members in the database, if it has been loaded
+//!   and is small enough to keep.
+//!
+//! A write only touches `pending`. `stored` only changes when the write-behind
+//! reports that a write batch has been committed, which is also when the
+//! entries of that batch leave `pending`. A read lays `pending` over `stored`.
+//!
+//! Both parts live in one cache entry and are only changed under that entry's
+//! exclusive lock, so they cannot disagree with each other.
 
 use std::{
-    collections::{BTreeMap, HashSet},
-    hash::{BuildHasher, Hash},
+    collections::{HashMap, HashSet, hash_map},
+    hash::Hash,
     ops::Not,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
+    sync::Arc,
 };
 
-use crossbeam::queue::SegQueue;
 use fxhash::FxBuildHasher;
-use parking_lot::RwLock;
 
 use crate::{
-    key_of_set_map::{ConcurrentSet, KeyOfSetMap, OwnedIterator},
+    key_of_set_map::{ConcurrentSet, KeyOfSetMap},
     kv_database::{KeyOfSetColumn, KvDatabase},
     sharded::default_shard_amount,
     single_flight,
     tiny_lfu::{self, LifecycleListener, TinyLFU},
-    write_manager::write_behind::{self, Epoch, KeyOfSetCache},
+    write_manager::write_behind::{
+        self, CommittedSetWrites, Epoch, KeyOfSetCache, Operation,
+    },
 };
 
 /// A cached implementation of [`KeyOfSetMap`] backed by a
 /// database.
 ///
-/// This implementation combines a Moka cache for fast set access with a
+/// This implementation combines an in-memory cache for fast set access with a
 /// database backend for persistence. For large sets (>1024 elements), it
 /// falls back to streaming from the database to avoid memory exhaustion.
 ///
@@ -61,198 +76,268 @@ impl<
     /// A new `CacheKeyOfSetMap` instance.
     #[must_use]
     pub fn new(cap: u64, db: Db) -> Self {
-        Self { repr: Arc::new(Repr::new(cap)), db }
+        Self { repr: Arc::new(Repr::new(cap, LOADED_SET_LIMIT)), db }
+    }
+
+    /// Creates a map that only keeps the members of sets with at most
+    /// `loaded_set_limit` of them in memory.
+    #[cfg(test)]
+    fn with_loaded_set_limit(
+        cap: u64,
+        db: Db,
+        loaded_set_limit: usize,
+    ) -> Self {
+        Self { repr: Arc::new(Repr::new(cap, loaded_set_limit)), db }
     }
 }
 
-#[derive(Debug, Clone)]
-enum Operation<V> {
-    Insert(V),
-    Remove(V),
-}
+/// The largest set whose members are kept in memory by default. The members of
+/// a larger set are streamed from the database on every read.
+const LOADED_SET_LIMIT: usize = 1024;
 
-#[derive(Debug, Clone)]
-enum Entry<C> {
-    /// For < 1024 elements, store in-memory set
-    InMemory(C),
-
-    /// For >= 1024 elements, mark as too large, and rely on streaming from DB
-    TooLarge,
-}
-
-/// A versioned operation for tracking staged writes.
-#[derive(Debug)]
-pub struct VersionedOperation<V> {
-    op: Operation<V>,
+/// The last operation staged for an element and the write batch that staged
+/// it.
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    operation: Operation,
     epoch: Epoch,
 }
 
-#[derive(Debug)]
-struct TrackedConcurrentLog<V> {
-    log: Arc<ConcurrentLog<V>>,
-    dirty: AtomicUsize,
-}
+/// The copy of a set's members as the database holds them.
+enum Stored<E, C> {
+    /// The members have not been read from the database.
+    Absent,
 
-enum ConcurrentLogMessage<V> {
-    FlushUpTo(Epoch),
-    AppendOperation(VersionedOperation<V>),
-}
-
-/// The staged operations of one set, kept in the order in which the database
-/// applies them: by the epoch of their write batch first, then by the order in
-/// which they were appended.
-#[derive(Debug)]
-struct Log<V> {
-    operations: BTreeMap<(Epoch, u64), Operation<V>>,
-
-    /// The position given to the next appended operation.
-    next_sequence: u64,
-}
-
-impl<V> Log<V> {
-    fn apply_message(&mut self, message: ConcurrentLogMessage<V>) {
-        match message {
-            ConcurrentLogMessage::FlushUpTo(epoch) => {
-                while self
-                    .operations
-                    .first_key_value()
-                    .is_some_and(|((oldest, _), _)| *oldest <= epoch)
-                {
-                    self.operations.pop_first();
-                }
-            }
-            ConcurrentLogMessage::AppendOperation(op) => {
-                self.operations.insert((op.epoch, self.next_sequence), op.op);
-                self.next_sequence += 1;
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ConcurrentLog<V> {
-    log: RwLock<Log<V>>,
-    deferred_messages: SegQueue<ConcurrentLogMessage<V>>,
-}
-
-impl<V: Eq + Hash + Clone> ConcurrentLog<V> {
-    const fn new() -> Self {
-        Self {
-            log: RwLock::new(Log {
-                operations: BTreeMap::new(),
-                next_sequence: 0,
-            }),
-            deferred_messages: SegQueue::new(),
-        }
-    }
-
-    fn apply_message(&self, op: ConcurrentLogMessage<V>) {
-        let Some(mut lock) = self.log.try_write() else {
-            self.deferred_messages.push(op);
-
-            return;
-        };
-
-        Self::fix(&mut lock, &self.deferred_messages);
-
-        lock.apply_message(op);
-    }
-
-    fn fix(
-        log: &mut Log<V>,
-        message_queue: &SegQueue<ConcurrentLogMessage<V>>,
-    ) {
-        while let Some(message) = message_queue.pop() {
-            log.apply_message(message);
-        }
-    }
-
-    /// Summarizes the staged operations as the elements they add to and
-    /// remove from the set stored in the database.
+    /// The members are being read from the database.
     ///
-    /// The last operation staged for an element decides which of the two it
-    /// ends up in. That makes the snapshot safe to merge with any state of the
-    /// database that the write-behind can produce: replaying an operation the
-    /// database has already applied gives the same membership again.
-    fn get_snapshot(&self) -> StagingShapshot<V> {
-        let mut log = self.log.write();
+    /// The scan does not see a write batch that is committed after it has
+    /// started. The operations of the batches that are flushed in the meantime
+    /// are therefore recorded here, in order, and replayed onto the scanned
+    /// members.
+    Loading(Vec<(E, Operation)>),
 
-        // fix any deferred messages
-        Self::fix(&mut log, &self.deferred_messages);
+    /// The members, kept up to date with every flushed write batch.
+    Loaded(C),
 
-        let mut added = HashSet::with_hasher(FxBuildHasher::default());
-        let mut removed = HashSet::with_hasher(FxBuildHasher::default());
+    /// The set has too many members for them to be kept in memory.
+    TooLarge,
+}
 
-        // NOTE: the `.values()` iteratees the values in the order of their
-        // keys. this means the earliest operations are applied first,
-        // in chronological order.
-        for op in log.operations.values() {
-            match op {
-                Operation::Insert(v) => {
-                    removed.remove(v);
-                    added.insert(v.clone());
-                }
-                Operation::Remove(v) => {
-                    added.remove(v);
-                    removed.insert(v.clone());
-                }
-            }
+/// What a read of a [`KeySet`] produces.
+enum Read<E> {
+    /// The members of the set.
+    Members(Vec<E>),
+
+    /// The stored members have to be streamed from the database and combined
+    /// with this.
+    TooLarge(Overlay<E>),
+}
+
+/// What the pending writes change about the members stored in the database.
+struct Overlay<E> {
+    /// The elements with a pending write. Whether the database holds one of
+    /// them says nothing about its membership anymore.
+    overridden: HashSet<E, FxBuildHasher>,
+
+    /// The overridden elements that are members.
+    members: Vec<E>,
+}
+
+/// Everything that is known in memory about the set of one key.
+struct KeySet<E, C> {
+    /// The last operation staged for each element that has an operation the
+    /// database has not confirmed.
+    pending: HashMap<E, Pending, FxBuildHasher>,
+
+    stored: Stored<E, C>,
+
+    /// The number of write batches that have staged an operation on this set
+    /// and have not been flushed. The entry is not evicted while there is
+    /// one, since `pending` cannot be recovered from the database.
+    unflushed_batches: usize,
+}
+
+fn apply<C: ConcurrentSet>(
+    members: &C,
+    element: C::Element,
+    operation: Operation,
+) {
+    match operation {
+        Operation::Insert => {
+            members.insert_element(element);
         }
-
-        StagingShapshot { added, removed }
+        Operation::Remove => {
+            members.remove_element(&element);
+        }
     }
 }
 
-#[derive(Default)]
-struct PinnedLogLifecycleListener;
+impl<E: Eq + Hash + Clone, C: ConcurrentSet<Element = E>> KeySet<E, C> {
+    fn new() -> Self {
+        Self {
+            pending: HashMap::default(),
+            stored: Stored::Absent,
+            unflushed_batches: 0,
+        }
+    }
 
-impl<K: Hash + Eq, V: Eq + Hash + Clone>
-    LifecycleListener<K, TrackedConcurrentLog<V>>
-    for PinnedLogLifecycleListener
-{
-    fn is_pinned(&self, _key: &K, value: &TrackedConcurrentLog<V>) -> bool {
-        value.dirty.load(std::sync::atomic::Ordering::SeqCst) != 0
+    /// Stages an operation of the write batch of `epoch`.
+    ///
+    /// `first_in_batch` tells whether this is the first operation the batch
+    /// stages on this set.
+    fn stage(
+        &mut self,
+        element: E,
+        operation: Operation,
+        epoch: Epoch,
+        first_in_batch: bool,
+    ) {
+        if first_in_batch {
+            self.unflushed_batches += 1;
+        }
+
+        match self.pending.entry(element) {
+            hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(Pending { operation, epoch });
+            }
+
+            hash_map::Entry::Occupied(mut occupied) => {
+                // The database applies the write batches in the order of
+                // their epochs, so an operation of an older batch that
+                // arrives late does not decide the membership.
+                if epoch >= occupied.get().epoch {
+                    occupied.insert(Pending { operation, epoch });
+                }
+            }
+        }
+    }
+
+    /// Takes in the operations of the write batch of `epoch`, which has been
+    /// committed to the database.
+    ///
+    /// The stored members are dropped from memory if there are more than
+    /// `loaded_set_limit` of them afterwards.
+    fn flush(
+        &mut self,
+        epoch: Epoch,
+        operations: impl IntoIterator<Item = (E, Operation)>,
+        loaded_set_limit: usize,
+    ) {
+        for (element, operation) in operations {
+            // a newer write batch may have staged the element again, in which
+            // case the element stays pending until that batch is flushed
+            let confirmed = self
+                .pending
+                .get(&element)
+                .is_some_and(|pending| pending.epoch <= epoch);
+
+            if confirmed {
+                self.pending.remove(&element);
+            }
+
+            match &mut self.stored {
+                Stored::Loaded(members) => apply(members, element, operation),
+                Stored::Loading(flushed) => flushed.push((element, operation)),
+                Stored::Absent | Stored::TooLarge => {}
+            }
+        }
+
+        let outgrown = matches!(
+            &self.stored,
+            Stored::Loaded(members) if members.len() > loaded_set_limit
+        );
+
+        if outgrown {
+            self.stored = Stored::TooLarge;
+        }
+
+        debug_assert!(self.unflushed_batches > 0);
+        self.unflushed_batches = self.unflushed_batches.saturating_sub(1);
+    }
+
+    /// Returns whether there is nothing in this entry that is worth keeping
+    /// in the cache.
+    fn is_empty(&self) -> bool {
+        self.unflushed_batches == 0
+            && self.pending.is_empty()
+            && matches!(self.stored, Stored::Absent)
+    }
+
+    /// The elements that the pending writes make members.
+    fn pending_members(&self) -> impl Iterator<Item = &E> {
+        self.pending
+            .iter()
+            .filter(|(_, pending)| pending.operation == Operation::Insert)
+            .map(|(element, _)| element)
+    }
+
+    /// Lays the pending writes over `stored`, which are the members that the
+    /// database holds.
+    fn members(&self, stored: &C) -> Vec<E> {
+        let mut members = Vec::with_capacity(stored.len() + self.pending.len());
+
+        members.extend(
+            stored
+                .iter()
+                .filter(|element| self.pending.contains_key(element).not()),
+        );
+        members.extend(self.pending_members().cloned());
+
+        members
+    }
+
+    fn overlay(&self) -> Overlay<E> {
+        Overlay {
+            overridden: self.pending.keys().cloned().collect(),
+            members: self.pending_members().cloned().collect(),
+        }
+    }
+
+    /// Reads the set, or returns `None` if its stored members have to be
+    /// loaded from the database first.
+    fn read(&self) -> Option<Read<E>> {
+        match &self.stored {
+            Stored::Loaded(stored) => Some(Read::Members(self.members(stored))),
+            Stored::TooLarge => Some(Read::TooLarge(self.overlay())),
+            Stored::Absent | Stored::Loading(_) => None,
+        }
+    }
+}
+
+/// Keeps the sets that hold something the database cannot give back in the
+/// cache: writes that have not been flushed, and the flushes recorded by a
+/// load that is still running.
+#[derive(Debug, Default)]
+struct Irreplaceable;
+
+impl<K, E, C> LifecycleListener<K, KeySet<E, C>> for Irreplaceable {
+    fn is_pinned(&self, _key: &K, set: &KeySet<E, C>) -> bool {
+        set.unflushed_batches != 0 || matches!(set.stored, Stored::Loading(_))
     }
 }
 
 /// Internal representation of the cache state.
 #[derive(Debug)]
-pub struct Repr<
-    K: KeyOfSetColumn,
-    C: ConcurrentSet<Element = K::Element> + 'static,
-> {
-    staging: TinyLFU<
-        K::Key,
-        TrackedConcurrentLog<K::Element>,
-        PinnedLogLifecycleListener,
-    >,
+struct Repr<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
+{
+    /// A set is read under the shared lock of its entry and changed under
+    /// the exclusive one.
+    sets: TinyLFU<K::Key, KeySet<K::Element, C>, Irreplaceable>,
 
-    cache: TinyLFU<K::Key, Arc<RwLock<Entry<C>>>>,
+    /// Makes sure that a set is loaded by one task at a time.
     single_flight: single_flight::SingleFlight<K::Key>,
 
-    /// Versions of the staging area, striped by key. A stripe's version
-    /// changes whenever an operation is staged for one of its keys, which is
-    /// how a load notices a write that overlapped it.
-    staging_versions: Box<[AtomicU64]>,
+    /// The largest set whose members are kept in memory.
+    loaded_set_limit: usize,
 }
-
-/// `2^STAGING_VERSION_BITS` versions are kept per map.
-const STAGING_VERSION_BITS: u32 = 12;
 
 impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
     Repr<K, C>
 {
-    /// Creates a new representation with the specified cache capacity.
-    #[must_use]
     #[allow(clippy::cast_possible_truncation)]
-    pub fn new(cap: u64) -> Self {
+    fn new(cap: u64, loaded_set_limit: usize) -> Self {
         Self {
-            staging: TinyLFU::new(
-                2048,
-                tiny_lfu::UnpinStrategy::Notify,
-                tiny_lfu::MaintenanceMode::Piggyback,
-            ),
-            cache: TinyLFU::new(
+            sets: TinyLFU::new(
                 cap as usize,
                 tiny_lfu::UnpinStrategy::Poll,
                 tiny_lfu::MaintenanceMode::Piggyback,
@@ -260,59 +345,67 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
             single_flight: single_flight::SingleFlight::new(
                 default_shard_amount(),
             ),
-            staging_versions: (0..1usize << STAGING_VERSION_BITS)
-                .map(|_| AtomicU64::new(0))
-                .collect(),
+            loaded_set_limit,
         }
     }
 
-    /// Returns the staging version shared by `key` and the other keys of its
-    /// stripe.
-    #[allow(clippy::cast_possible_truncation)]
-    fn staging_version(&self, key: &K::Key) -> &AtomicU64 {
-        let hash = FxBuildHasher::default().hash_one(key);
-
-        // the top bits, which are the best mixed ones of this hasher
-        let stripe = (hash >> (u64::BITS - STAGING_VERSION_BITS)) as usize;
-
-        &self.staging_versions[stripe]
-    }
-
-    pub(crate) fn flush_staging(
+    /// Stages an operation of the write batch of `epoch` on the set of `key`.
+    ///
+    /// The database is not read: the set does not have to be loaded for an
+    /// operation to be staged on it.
+    fn stage(
         &self,
+        key: K::Key,
+        element: K::Element,
+        operation: Operation,
         epoch: Epoch,
-        keys: impl IntoIterator<Item = K::Key>,
+        first_in_batch: bool,
     ) {
-        for key in keys {
-            let result = self.staging.get_map(&key, |x| {
-                let count = x.dirty.fetch_sub(1, Ordering::SeqCst);
+        self.sets.entry(key, |entry| match entry {
+            tiny_lfu::Entry::Vacant(vacant) => {
+                let mut set = KeySet::new();
+                set.stage(element, operation, epoch, first_in_batch);
 
-                (x.log.clone(), count == 1)
-            });
-
-            if let Some((log, unpinned)) = result {
-                log.apply_message(ConcurrentLogMessage::FlushUpTo(epoch));
-
-                if unpinned {
-                    self.staging.unpin(key);
-                }
+                vacant.insert(set);
             }
-        }
+
+            tiny_lfu::Entry::Occupied(mut occupied) => {
+                occupied.get_mut().stage(
+                    element,
+                    operation,
+                    epoch,
+                    first_in_batch,
+                );
+            }
+        });
     }
 }
 
-/// A partially constructed set that exceeded the in-memory threshold.
-///
-/// This struct holds the elements that were loaded before the threshold
-/// was exceeded, along with an iterator for the remaining database elements.
-pub struct Spilled<C: ConcurrentSet + 'static, I> {
-    half_constructed: OwnedIterator<C>,
-    rest_iterator: I,
-}
+impl<
+    K: KeyOfSetColumn,
+    C: ConcurrentSet<Element = K::Element> + 'static,
+    Db: KvDatabase,
+> KeyOfSetCache<K, Db> for Repr<K, C>
+{
+    fn flush(&self, epoch: Epoch, writes: &mut CommittedSetWrites<'_, K>) {
+        for (key, operations) in writes {
+            self.sets.entry(key, |entry| {
+                // the entry cannot have been evicted: it has had an unflushed
+                // write batch since that batch's first operation on it
+                let tiny_lfu::Entry::Occupied(mut occupied) = entry else {
+                    panic!("entry for flushed write batch was evicted");
+                };
 
-impl<C: ConcurrentSet + 'static, I> std::fmt::Debug for Spilled<C, I> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Spilled").finish_non_exhaustive()
+                let set = occupied.get_mut();
+                set.flush(epoch, operations, self.loaded_set_limit);
+
+                // an entry with nothing pending and nothing loaded would only
+                // take up room in the cache
+                if set.is_empty() {
+                    drop(occupied.remove());
+                }
+            });
+        }
     }
 }
 
@@ -328,25 +421,37 @@ impl<
         &self,
         key: &<K as KeyOfSetColumn>::Key,
     ) -> impl Iterator<Item = <K as KeyOfSetColumn>::Element> {
-        let (entry, snapshot, spilled) = self.get_entry(key).await;
+        let read = loop {
+            let read = self.repr.sets.get_map(key, KeySet::read).flatten();
 
-        if let Some(spilled) = spilled {
-            return MergeIterator::Spilled(
-                spilled,
-                snapshot.into_iter_snapshot(),
-            );
-        }
+            if let Some(read) = read {
+                break read;
+            }
 
-        match entry.read().clone() {
-            Entry::InMemory(set) => {
-                MergeIterator::OwnedIterator(OwnedIterator::new(set, |set| {
-                    set.iter()
-                }))
+            // Whoever gets to load the set reads it as part of the load. The
+            // others wait for the load to finish and then look again.
+            let loaded = self
+                .repr
+                .single_flight
+                .wait_or_work(key, || self.load(key))
+                .await;
+
+            if let Some(read) = loaded {
+                break read;
             }
-            Entry::TooLarge => {
-                let db_iter = self.db.scan_members::<K>(key);
-                MergeIterator::Streaming(db_iter, snapshot.into_iter_snapshot())
-            }
+        };
+
+        match read {
+            Read::Members(members) => Members::Loaded(members.into_iter()),
+
+            // The overlay was taken before this scan starts. A write batch
+            // that is flushed in between is then in both, which is harmless,
+            // and never in neither.
+            Read::TooLarge(overlay) => Members::Streaming {
+                stored: self.db.scan_members::<K>(key),
+                overridden: overlay.overridden,
+                pending_members: overlay.members.into_iter(),
+            },
         }
     }
 
@@ -356,18 +461,19 @@ impl<
         element: <K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
-        let updated = write_batch.put_set::<K>(
+        let first_in_batch = write_batch.put_set::<K>(
             key.clone(),
             element.clone(),
-            write_behind::Operation::Insert,
+            Operation::Insert,
             Arc::downgrade(&(self.repr.clone() as _)),
         );
 
-        self.apply_op(
-            &key,
-            Operation::Insert(element),
+        self.repr.stage(
+            key,
+            element,
+            Operation::Insert,
             write_batch.epoch(),
-            updated,
+            first_in_batch,
         );
     }
 
@@ -377,18 +483,19 @@ impl<
         element: &<K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
-        let updated = write_batch.put_set::<K>(
+        let first_in_batch = write_batch.put_set::<K>(
             key.clone(),
             element.clone(),
-            write_behind::Operation::Remove,
+            Operation::Remove,
             Arc::downgrade(&(self.repr.clone() as _)),
         );
 
-        self.apply_op(
-            key,
-            Operation::Remove(element.clone()),
+        self.repr.stage(
+            key.clone(),
+            element.clone(),
+            Operation::Remove,
             write_batch.epoch(),
-            updated,
+            first_in_batch,
         );
     }
 }
@@ -399,381 +506,143 @@ impl<
     Db: KvDatabase,
 > CacheKeyOfSetMap<K, C, Db>
 {
-    async fn get_entry(
-        &self,
-        key: &K::Key,
-    ) -> (
-        Arc<RwLock<Entry<C>>>,
-        StagingShapshot<K::Element>,
-        Option<Spilled<C, Db::ScanMemberIterator<K>>>,
-    ) {
+    /// Loads the stored members of the set of `key` from the database and
+    /// reads the set.
+    ///
+    /// Only one load of a key may run at a time.
+    fn load(&self, key: &K::Key) -> Read<K::Element> {
         loop {
-            // Read before the snapshot is taken, so that an operation the
-            // snapshot misses is certain to change it.
-            let staging_version =
-                self.repr.staging_version(key).load(Ordering::SeqCst);
-
-            let staging_snapshot = self.get_staging_snapshot(key);
-            let mut spilled = None;
-
-            if let Some(entry) = self.repr.cache.get(key) {
-                return (entry, staging_snapshot, spilled);
+            if let Some(read) = self.start_load(key) {
+                return read;
             }
 
-            let entry = self
-                .repr
-                .single_flight
-                .wait_or_work(key, || {
-                    let entry =
-                        self.fetch_entry(key, &staging_snapshot, &mut spilled);
+            let scanned = C::default();
+            let mut too_large = false;
 
-                    self.repr.cache.entry(key.clone(), |e| match e {
-                        tiny_lfu::Entry::Vacant(vaccant_entry) => {
-                            vaccant_entry.insert(entry.clone());
-                        }
-                        tiny_lfu::Entry::Occupied(_) => {
-                            // Do nothing as another thread inserted an explicit
-                            // value
-                        }
-                    });
+            for (count, element) in self.db.scan_members::<K>(key).enumerate() {
+                if count == self.repr.loaded_set_limit {
+                    too_large = true;
+                    break;
+                }
 
-                    // An operation staged while the set was being loaded is
-                    // in neither the snapshot nor the database, and its writer
-                    // may have found no cached set to apply it to. The set
-                    // that was just cached could be missing it for good, so it
-                    // must not stay cached.
-                    if self.repr.staging_version(key).load(Ordering::SeqCst)
-                        != staging_version
-                    {
-                        self.uncache_loaded_set(key, &entry);
-                    }
-
-                    entry
-                })
-                .await;
-
-            if let Some(entry) = entry {
-                return (entry, staging_snapshot, spilled);
+                scanned.insert_element(element);
             }
+
+            if let Some(read) = self.finish_load(key, scanned, too_large) {
+                return read;
+            }
+
+            // The entry that was recording the flushes of this load is gone.
+            // The scanned members cannot be trusted without them, so the load
+            // starts over.
         }
     }
 
-    /// Removes `entry` from the cache if it is still the cached entry of `key`
-    /// and holds a loaded set.
+    /// Marks the set of `key` as being loaded, so that every write batch the
+    /// scan can miss is recorded when it is flushed. This has to happen
+    /// before the scan starts.
     ///
-    /// A [`Entry::TooLarge`] entry is left alone: it holds no elements that
-    /// could be out of date, and every read of it merges the staged operations
-    /// anyway.
-    fn uncache_loaded_set(&self, key: &K::Key, entry: &Arc<RwLock<Entry<C>>>) {
-        let removed = self.repr.cache.entry(key.clone(), |e| match e {
-            tiny_lfu::Entry::Occupied(occupied)
-                if Arc::ptr_eq(occupied.get(), entry)
-                    && matches!(&*entry.read(), Entry::InMemory(_)) =>
-            {
-                Some(occupied.remove())
+    /// Returns what the set reads as if it turns out not to need loading.
+    fn start_load(&self, key: &K::Key) -> Option<Read<K::Element>> {
+        self.repr.sets.entry(key.clone(), |entry| match entry {
+            tiny_lfu::Entry::Vacant(vacant) => {
+                let mut set = KeySet::new();
+                set.stored = Stored::Loading(Vec::new());
+
+                vacant.insert(set);
+
+                None
             }
 
-            tiny_lfu::Entry::Occupied(_) | tiny_lfu::Entry::Vacant(_) => None,
-        });
+            tiny_lfu::Entry::Occupied(mut occupied) => {
+                let set = occupied.get_mut();
+                let read = set.read();
 
-        // drop the set outside of the cache's lock
-        drop(removed);
+                // `Loading` can only be what a load that never finished has
+                // left behind, since the loads of a key do not overlap.
+                if read.is_none() {
+                    set.stored = Stored::Loading(Vec::new());
+                }
+
+                read
+            }
+        })
     }
 
-    fn fetch_entry(
+    /// Completes a load with the members that were scanned from the database
+    /// and reads the set.
+    ///
+    /// Returns `None` if the entry is no longer the one [`Self::start_load`]
+    /// marked. That entry is not evicted, so this is not expected to happen.
+    fn finish_load(
         &self,
         key: &K::Key,
-        snapshot: &StagingShapshot<K::Element>,
-        spilled: &mut Option<Spilled<C, Db::ScanMemberIterator<K>>>,
-    ) -> Arc<RwLock<Entry<C>>> {
-        let new_set = C::default();
-        let mut count = 0;
-        let mut iter = self.db.scan_members::<K>(key);
+        scanned: C,
+        too_large: bool,
+    ) -> Option<Read<K::Element>> {
+        let limit = self.repr.loaded_set_limit;
 
-        while let Some(element) = iter.next() {
-            new_set.insert_element(element);
-            count += 1;
+        self.repr.sets.entry(key.clone(), |entry| {
+            let tiny_lfu::Entry::Occupied(mut occupied) = entry else {
+                return None;
+            };
 
-            if count > 1024 {
-                *spilled = Some(Spilled {
-                    half_constructed: OwnedIterator::new(new_set, |x| x.iter()),
-                    rest_iterator: iter,
-                });
+            let set = occupied.get_mut();
 
-                return Arc::new(RwLock::new(Entry::TooLarge));
-            }
-        }
-
-        for element in &snapshot.added {
-            new_set.insert_element(element.clone());
-        }
-        for element in &snapshot.removed {
-            new_set.remove_element(element);
-        }
-
-        Arc::new(RwLock::new(Entry::InMemory(new_set)))
-    }
-}
-
-/// A snapshot of staged (uncommitted) set operations.
-///
-/// Captures the added and removed elements that are pending commit,
-/// allowing reads to see uncommitted changes.
-#[derive(Debug)]
-pub struct StagingShapshot<T> {
-    added: HashSet<T, FxBuildHasher>,
-    removed: HashSet<T, FxBuildHasher>,
-}
-
-impl<T> StagingShapshot<T> {
-    /// Converts this snapshot into an iterator-based representation.
-    #[must_use]
-    pub fn into_iter_snapshot(self) -> StagingShapshotIntoIter<T> {
-        StagingShapshotIntoIter {
-            added: self.added,
-            removed: self.removed,
-            remaining_added: None,
-        }
-    }
-}
-
-/// A staging snapshot that is being merged into the elements read from the
-/// database.
-///
-/// It filters the database's elements first and yields the staged insertions
-/// once the database is exhausted.
-#[derive(Debug)]
-pub struct StagingShapshotIntoIter<T> {
-    added: HashSet<T, FxBuildHasher>,
-    removed: HashSet<T, FxBuildHasher>,
-
-    /// Drains `added` once the database's elements are exhausted.
-    remaining_added: Option<std::collections::hash_set::IntoIter<T>>,
-}
-
-impl<T: Eq + Hash> StagingShapshotIntoIter<T> {
-    /// Returns whether an element read from the database should be yielded.
-    ///
-    /// Elements staged for removal are dropped. Elements staged for insertion
-    /// are dropped as well, since [`Self::next_added`] yields them; the
-    /// database can already contain them when their write batch has been
-    /// committed but not yet flushed from the staging area.
-    fn keeps(&self, element: &T) -> bool {
-        self.removed.contains(element).not()
-            && self.added.contains(element).not()
-    }
-
-    /// Yields the staged insertions, after the database's elements.
-    fn next_added(&mut self) -> Option<T> {
-        self.remaining_added
-            .get_or_insert_with(|| std::mem::take(&mut self.added).into_iter())
-            .next()
-    }
-}
-
-impl<
-    K: KeyOfSetColumn,
-    C: ConcurrentSet<Element = K::Element> + Send + Sync + 'static,
-    Db: KvDatabase,
-> CacheKeyOfSetMap<K, C, Db>
-{
-    fn apply_op(
-        &self,
-        key: &K::Key,
-        op: Operation<K::Element>,
-        epoch: Epoch,
-        updated: bool,
-    ) {
-        // Step 1: Write to Staging (The Anchor)
-        // We ensure the log exists and push the op.
-        let log = {
-            self.repr
-                .staging
-                .get_map(key, |x| {
-                    if updated {
-                        x.dirty.fetch_add(1, Ordering::SeqCst);
+            match std::mem::replace(&mut set.stored, Stored::Absent) {
+                Stored::Loading(flushed) => {
+                    if too_large.not() {
+                        for (element, operation) in flushed {
+                            apply(&scanned, element, operation);
+                        }
                     }
 
-                    x.log.clone()
-                })
-                .unwrap_or_else(|| {
-                    let tracked_log = TrackedConcurrentLog {
-                        log: Arc::new(ConcurrentLog::new()),
-                        dirty: AtomicUsize::new(usize::from(updated)),
-                    };
+                    if too_large || scanned.len() > limit {
+                        set.stored = Stored::TooLarge;
 
-                    self.repr.staging.entry(key.clone(), |entry| match entry {
-                        tiny_lfu::Entry::Vacant(vacant_entry) => {
-                            let log = tracked_log.log.clone();
-                            vacant_entry.insert(tracked_log);
+                        Some(Read::TooLarge(set.overlay()))
+                    } else {
+                        let members = set.members(&scanned);
+                        set.stored = Stored::Loaded(scanned);
 
-                            log
-                        }
-
-                        tiny_lfu::Entry::Occupied(occupied_entry) => {
-                            // REVIEW: Don't we need to check if the `unpdated`
-                            // flag is true first?
-                            occupied_entry
-                                .get()
-                                .dirty
-                                .fetch_add(1, Ordering::SeqCst);
-
-                            occupied_entry.get().log.clone()
-                        }
-                    })
-                })
-        };
-
-        // apply the operation to the log
-        {
-            log.apply_message(ConcurrentLogMessage::AppendOperation(
-                VersionedOperation { op: op.clone(), epoch },
-            ));
-        }
-
-        // Tell the loads that are in flight that the log has moved. This must
-        // come after the append and before the cache lookup below: a load
-        // whose snapshot misses the operation then sees the new version, and
-        // a load that publishes its set later is seen by the lookup.
-        self.repr.staging_version(key).fetch_add(1, Ordering::SeqCst);
-
-        // Step 2: Update Cache (Optimization)
-        // We DO NOT load from DB if missing. We only update if present.
-        let Some(entry) = self.repr.cache.get(key) else {
-            return;
-        };
-
-        let read_entry = entry.read();
-        match &*read_entry {
-            Entry::InMemory(set) => {
-                let new_set = set;
-
-                match op {
-                    Operation::Insert(v) => {
-                        new_set.insert_element(v);
-                    }
-                    Operation::Remove(v) => {
-                        new_set.remove_element(&v);
+                        Some(Read::Members(members))
                     }
                 }
 
-                // Step 3: Threshold Check
-                // If it grew too big, downgrade to TooLarge
-                if new_set.len() > 1024 {
-                    drop(read_entry);
+                stored => {
+                    set.stored = stored;
 
-                    let mut write_entry = entry.write();
-                    *write_entry = Entry::TooLarge;
+                    None
                 }
             }
-
-            Entry::TooLarge => {}
-        }
-    }
-
-    fn get_staging_snapshot(
-        &self,
-        key: &K::Key,
-    ) -> StagingShapshot<K::Element> {
-        let log = self.repr.staging.get_map(key, |x| x.log.clone());
-
-        log.map_or_else(
-            || StagingShapshot {
-                added: HashSet::with_hasher(FxBuildHasher::default()),
-                removed: HashSet::with_hasher(FxBuildHasher::default()),
-            },
-            |log| log.get_snapshot(),
-        )
+        })
     }
 }
 
-/// An iterator that merges database results with staged operations.
-///
-/// This iterator handles three scenarios:
-/// - `Spilled`: Set exceeded in-memory threshold; streams from partially loaded
-///   data
-/// - `OwnedIterator`: Full set is cached in memory
-/// - `Streaming`: Set is too large; streams directly from database
-pub enum MergeIterator<C: ConcurrentSet + 'static, I, E, J> {
-    /// Set data was partially loaded before exceeding the size threshold.
-    Spilled(Spilled<C, I>, StagingShapshotIntoIter<E>),
-    /// Full set data is available in memory.
-    OwnedIterator(J),
-    /// Set data is streamed directly from the database.
-    Streaming(I, StagingShapshotIntoIter<E>),
+/// The members of a set.
+enum Members<E, I> {
+    /// The stored members were in memory.
+    Loaded(std::vec::IntoIter<E>),
+
+    /// The stored members are streamed from the database.
+    Streaming {
+        stored: I,
+        overridden: HashSet<E, FxBuildHasher>,
+        pending_members: std::vec::IntoIter<E>,
+    },
 }
 
-impl<C: ConcurrentSet + 'static, I, E, J> std::fmt::Debug
-    for MergeIterator<C, I, E, J>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Spilled(_, _) => f.debug_tuple("Spilled").finish(),
-            Self::OwnedIterator(_) => f.debug_tuple("OwnedIterator").finish(),
-            Self::Streaming(_, _) => f.debug_tuple("Streaming").finish(),
-        }
-    }
-}
-
-impl<
-    C: ConcurrentSet<Element = E>,
-    I: Iterator<Item = E>,
-    E: Eq + Hash + Send + Sync + 'static,
-    J: Iterator<Item = E>,
-> Iterator for MergeIterator<C, I, E, J>
-{
+impl<E: Eq + Hash, I: Iterator<Item = E>> Iterator for Members<E, I> {
     type Item = E;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Spilled(spilled, snapshot) => {
-                // First drain from half_constructed
-                for item in spilled.half_constructed.by_ref() {
-                    if snapshot.keeps(&item) {
-                        return Some(item);
-                    }
-                }
+            Self::Loaded(members) => members.next(),
 
-                // Then drain from rest_iterator
-                for item in spilled.rest_iterator.by_ref() {
-                    if snapshot.keeps(&item) {
-                        return Some(item);
-                    }
-                }
-
-                // Finally drain from snapshot.added
-                snapshot.next_added()
-            }
-
-            Self::OwnedIterator(iter) => iter.next(),
-
-            Self::Streaming(db_iter, snapshot) => {
-                // First drain from db_iter
-                for item in db_iter.by_ref() {
-                    if snapshot.keeps(&item) {
-                        return Some(item);
-                    }
-                }
-
-                // Finally drain from snapshot.added
-                snapshot.next_added()
-            }
+            Self::Streaming { stored, overridden, pending_members } => stored
+                .find(|element| overridden.contains(element).not())
+                .or_else(|| pending_members.next()),
         }
-    }
-}
-
-impl<
-    K: KeyOfSetColumn,
-    C: ConcurrentSet<Element = K::Element> + 'static,
-    Db: KvDatabase,
-> KeyOfSetCache<K, Db> for Repr<K, C>
-{
-    fn flush(
-        &self,
-        epoch: Epoch,
-        keys: &mut (dyn Iterator<Item = <K as KeyOfSetColumn>::Key> + Send),
-    ) {
-        self.flush_staging(epoch, keys);
     }
 }
 
