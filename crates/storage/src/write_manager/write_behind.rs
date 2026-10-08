@@ -546,6 +546,15 @@ impl<Db: KvDatabase> std::fmt::Debug for WriteBehind<Db> {
     }
 }
 
+/// The most write buffers that wait to be serialized at a time.
+///
+/// A write buffer holds what it writes until it has been serialized, and
+/// every cache that it wrote to holds it until it has been committed. When
+/// the buffers are submitted faster than they are serialized, a queue without
+/// a limit grows for as long as that lasts, and all of it is memory. With a
+/// limit, whoever submits to a full queue waits for room instead.
+const SERIALIZE_QUEUE_CAPACITY: usize = 4096;
+
 struct CurrentBatch<Db: KvDatabase> {
     db_write_batch: Db::WriteBatch,
     expected_epoch: Epoch,
@@ -624,7 +633,9 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         let (commit_sender, commit_receiver) =
             crossbeam_channel::bounded::<CommitTask<Db>>(1);
         let (serialize_sender, serialize_receiver) =
-            crossbeam_channel::unbounded::<SerializeTask<Db>>();
+            crossbeam_channel::bounded::<SerializeTask<Db>>(
+                SERIALIZE_QUEUE_CAPACITY,
+            );
 
         let committed = CommittedEpochs::default();
 
@@ -686,6 +697,10 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     }
 
     /// Submits a write buffer to be processed by the background writer.
+    ///
+    /// This blocks while as many write buffers as the serialization queue
+    /// holds are waiting to be serialized. The serialization workers wait for
+    /// nobody, so room is made no matter what the caller holds on to.
     pub fn submit_write_batch(&self, write_buffer: WriteBatch<Db>) {
         let write_task = SerializeTask { write_buffer };
 
