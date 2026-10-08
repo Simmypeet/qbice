@@ -1,14 +1,8 @@
 use bon::Builder;
 
 use crate::{
-    dynamic_map::cache::CacheDynamicMap,
-    key_of_set_map::{ConcurrentSet, cache::CacheKeyOfSetMap},
-    kv_database::{
-        KeyOfSetColumn, KvDatabase, KvDatabaseFactory, WideColumn,
-        WideColumnValue,
-    },
+    kv_database::{KvDatabase, KvDatabaseFactory},
     sharded::default_shard_amount,
-    single_map::cache::CacheSingleMap,
     storage_engine::{StorageEngine, StorageEngineFactory},
     write_manager::write_behind,
 };
@@ -63,7 +57,8 @@ pub struct Configuration {
 ///
 /// // Create storage engine with a RocksDB backend
 /// let engine = DbBacked::new(rocksdb_instance, config);
-/// let map = engine.new_single_map::<MyColumn, MyValue>();
+/// let write_manager = engine.new_write_manager();
+/// let map = write_manager.new_single_map::<MyColumn, MyValue>();
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DbBacked<Db> {
@@ -89,48 +84,11 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
 
     type WriteManager = write_behind::WriteBehind<Db>;
 
-    type SingleMap<K: WideColumn, V: WideColumnValue<K>> =
-        CacheSingleMap<K, V, Db>;
-
-    type DynamicMap<K: WideColumn> = CacheDynamicMap<K, Db>;
-
-    type KeyOfSetMap<
-        K: KeyOfSetColumn,
-        C: ConcurrentSet<Element = K::Element>,
-    > = CacheKeyOfSetMap<K, C, Db>;
-
     fn new_write_manager(&self) -> Self::WriteManager {
         write_behind::WriteBehind::new(
             &self.backing_db,
             self.configuration.serialization_workers,
-        )
-    }
-
-    fn new_single_map<K: WideColumn, V: WideColumnValue<K>>(
-        &self,
-    ) -> Self::SingleMap<K, V> {
-        CacheSingleMap::new(
             self.configuration.cache_capacity,
-            self.backing_db.clone(),
-        )
-    }
-
-    fn new_dynamic_map<K: WideColumn>(&self) -> Self::DynamicMap<K> {
-        CacheDynamicMap::new(
-            self.configuration.cache_capacity,
-            self.backing_db.clone(),
-        )
-    }
-
-    fn new_key_of_set_map<
-        K: KeyOfSetColumn,
-        C: ConcurrentSet<Element = K::Element>,
-    >(
-        &self,
-    ) -> Self::KeyOfSetMap<K, C> {
-        CacheKeyOfSetMap::new(
-            self.configuration.cache_capacity,
-            self.backing_db.clone(),
         )
     }
 }

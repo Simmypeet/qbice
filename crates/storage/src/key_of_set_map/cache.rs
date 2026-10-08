@@ -6,26 +6,47 @@
 //! # How a set is represented
 //!
 //! The members of a set are whatever the database holds, with the writes that
-//! the database has not confirmed yet laid over it. Every key that is in
-//! memory has one [`KeySet`] that holds both parts:
+//! the database does not hold yet laid over it. Every key that is in memory
+//! has one [`KeySet`] that holds both parts:
 //!
-//! - `pending` records, for each element with an unconfirmed write, whether the
-//!   element will be a member once every write batch is committed.
+//! - `pending` records, for each element that has been written, the last
+//!   operation on it and the epoch of the write batch that staged the
+//!   operation.
 //! - `stored` is a copy of the members in the database, if it has been loaded
 //!   and is small enough to keep.
 //!
-//! A write only touches `pending`. `stored` only changes when the write-behind
-//! reports that a write batch has been committed, which is also when the
-//! entries of that batch leave `pending`. A read lays `pending` over `stored`.
+//! A write only touches `pending`. A read lays `pending` over `stored`.
 //!
 //! Both parts live in one cache entry and are only changed under that entry's
 //! exclusive lock, so they cannot disagree with each other.
+//!
+//! # How a set finds out about a commit
+//!
+//! It is not told. The write manager only publishes which epochs have been
+//! committed, and a pending operation is in the database once its epoch is
+//! one of them.
+//!
+//! A read does not have to know whether that has happened. An element with a
+//! pending operation reads as what the operation makes it, and that is also
+//! what the database holds for the element once the operation has been
+//! committed: write batches are committed in the order of their epochs, and
+//! `pending` keeps the operation of the newest epoch.
+//!
+//! What a committed operation still takes up is memory. A set is therefore
+//! *settled* from time to time: the pending operations that have been
+//! committed are folded into `stored`, if that is a copy of the members, and
+//! dropped. Without a copy there is nothing to fold them into and nothing is
+//! lost by dropping them, because the next scan of the database sees them.
+//! The one scan that may not see them is a scan that is already running, so a
+//! set is not settled while it is being loaded.
+//!
+//! A set whose operations have all been committed holds nothing that the
+//! database cannot give back, and the cache may evict it.
 
 use std::{
     collections::{HashMap, HashSet, hash_map},
     hash::Hash,
     ops::Not,
-    sync::Arc,
 };
 
 use fxhash::FxBuildHasher;
@@ -36,9 +57,7 @@ use crate::{
     sharded::default_shard_amount,
     single_flight,
     tiny_lfu::{self, LifecycleListener, TinyLFU},
-    write_manager::write_behind::{
-        self, CommittedSetWrites, Epoch, KeyOfSetCache, Operation,
-    },
+    write_manager::write_behind::{self, CommittedEpochs, Epoch, Operation},
 };
 
 /// A cached implementation of [`KeyOfSetMap`] backed by a
@@ -59,7 +78,7 @@ pub struct CacheKeyOfSetMap<
     C: ConcurrentSet<Element = K::Element> + 'static,
     Db: KvDatabase,
 > {
-    repr: Arc<Repr<K, C>>,
+    repr: Repr<K, C>,
     db: Db,
 }
 
@@ -69,14 +88,10 @@ impl<
     Db: KvDatabase,
 > CacheKeyOfSetMap<K, C, Db>
 {
-    /// Creates a new cached key-of-set map with the specified capacity.
-    ///
-    /// # Returns
-    ///
-    /// A new `CacheKeyOfSetMap` instance.
-    #[must_use]
-    pub fn new(cap: u64, db: Db) -> Self {
-        Self { repr: Arc::new(Repr::new(cap, LOADED_SET_LIMIT)), db }
+    /// Creates a new cached key-of-set map with the specified capacity, for
+    /// the write manager whose committed epochs are `committed`.
+    pub(crate) fn new(cap: u64, db: Db, committed: CommittedEpochs) -> Self {
+        Self { repr: Repr::new(cap, LOADED_SET_LIMIT, committed), db }
     }
 
     /// Creates a map that only keeps the members of sets with at most
@@ -86,14 +101,18 @@ impl<
         cap: u64,
         db: Db,
         loaded_set_limit: usize,
+        committed: CommittedEpochs,
     ) -> Self {
-        Self { repr: Arc::new(Repr::new(cap, loaded_set_limit)), db }
+        Self { repr: Repr::new(cap, loaded_set_limit, committed), db }
     }
 }
 
 /// The largest set whose members are kept in memory by default. The members of
 /// a larger set are streamed from the database on every read.
 const LOADED_SET_LIMIT: usize = 1024;
+
+/// The fewest pending operations a set has when their number makes it settle.
+const SETTLE_AT_LEAST: usize = 4;
 
 /// The last operation staged for an element and the write batch that staged
 /// it.
@@ -104,19 +123,19 @@ struct Pending {
 }
 
 /// The copy of a set's members as the database holds them.
-enum Stored<E, C> {
+enum Stored<C> {
     /// The members have not been read from the database.
-    Absent,
+    NotLoaded,
 
     /// The members are being read from the database.
     ///
-    /// The scan does not see a write batch that is committed after it has
-    /// started. The operations of the batches that are flushed in the meantime
-    /// are therefore recorded here, in order, and replayed onto the scanned
-    /// members.
-    Loading(Vec<(E, Operation)>),
+    /// The scan may or may not see a write batch that is committed after it
+    /// has started. Every pending operation is therefore kept until the scan
+    /// is done, when all of them are laid over the scanned members.
+    Loading,
 
-    /// The members, kept up to date with every flushed write batch.
+    /// The members as the scan that loaded them found them, with the pending
+    /// operations folded in that have been settled since.
     Loaded(C),
 
     /// The set has too many members for them to be kept in memory.
@@ -145,16 +164,19 @@ struct Overlay<E> {
 
 /// Everything that is known in memory about the set of one key.
 struct KeySet<E, C> {
-    /// The last operation staged for each element that has an operation the
-    /// database has not confirmed.
+    /// The last operation staged for each element, until the operation is
+    /// settled.
     pending: HashMap<E, Pending, FxBuildHasher>,
 
-    stored: Stored<E, C>,
+    stored: Stored<C>,
 
-    /// The number of write batches that have staged an operation on this set
-    /// and have not been flushed. The entry is not evicted while there is
-    /// one, since `pending` cannot be recovered from the database.
-    unflushed_batches: usize,
+    /// The newest epoch that has staged an operation on this set. Until it
+    /// has been committed, `pending` holds operations that the database
+    /// cannot give back, and the entry is not evicted.
+    last_staged: Option<Epoch>,
+
+    /// The number of pending operations at which the set is settled next.
+    settle_at: usize,
 }
 
 fn apply<C: ConcurrentSet>(
@@ -176,25 +198,15 @@ impl<E: Eq + Hash + Clone, C: ConcurrentSet<Element = E>> KeySet<E, C> {
     fn new() -> Self {
         Self {
             pending: HashMap::default(),
-            stored: Stored::Absent,
-            unflushed_batches: 0,
+            stored: Stored::NotLoaded,
+            last_staged: None,
+            settle_at: SETTLE_AT_LEAST,
         }
     }
 
     /// Stages an operation of the write batch of `epoch`.
-    ///
-    /// `first_in_batch` tells whether this is the first operation the batch
-    /// stages on this set.
-    fn stage(
-        &mut self,
-        element: E,
-        operation: Operation,
-        epoch: Epoch,
-        first_in_batch: bool,
-    ) {
-        if first_in_batch {
-            self.unflushed_batches += 1;
-        }
+    fn stage(&mut self, element: E, operation: Operation, epoch: Epoch) {
+        self.last_staged = self.last_staged.max(Some(epoch));
 
         match self.pending.entry(element) {
             hash_map::Entry::Vacant(vacant) => {
@@ -212,35 +224,36 @@ impl<E: Eq + Hash + Clone, C: ConcurrentSet<Element = E>> KeySet<E, C> {
         }
     }
 
-    /// Takes in the operations of the write batch of `epoch`, which has been
-    /// committed to the database.
+    /// Returns whether enough operations are pending for it to be worth
+    /// looking for the ones that have been committed.
+    fn is_due(&self) -> bool { self.pending.len() >= self.settle_at }
+
+    /// Folds the pending operations that have been committed into the stored
+    /// members and drops them.
     ///
     /// The stored members are dropped from memory if there are more than
     /// `loaded_set_limit` of them afterwards.
-    fn flush(
-        &mut self,
-        epoch: Epoch,
-        operations: impl IntoIterator<Item = (E, Operation)>,
-        loaded_set_limit: usize,
-    ) {
-        for (element, operation) in operations {
-            // a newer write batch may have staged the element again, in which
-            // case the element stays pending until that batch is flushed
-            let confirmed = self
-                .pending
-                .get(&element)
-                .is_some_and(|pending| pending.epoch <= epoch);
-
-            if confirmed {
-                self.pending.remove(&element);
-            }
-
-            match &mut self.stored {
-                Stored::Loaded(members) => apply(members, element, operation),
-                Stored::Loading(flushed) => flushed.push((element, operation)),
-                Stored::Absent | Stored::TooLarge => {}
-            }
+    fn settle(&mut self, committed: &CommittedEpochs, loaded_set_limit: usize) {
+        // the scan may have missed what has been committed since it started
+        if matches!(self.stored, Stored::Loading) {
+            return;
         }
+
+        let stored = &self.stored;
+
+        self.pending.retain(|element, pending| {
+            if committed.contains(pending.epoch).not() {
+                return true;
+            }
+
+            // Without a copy of the members, the operation is just dropped:
+            // it is in the database, where the next scan finds it.
+            if let Stored::Loaded(members) = stored {
+                apply(members, element.clone(), pending.operation);
+            }
+
+            false
+        });
 
         let outgrown = matches!(
             &self.stored,
@@ -251,16 +264,15 @@ impl<E: Eq + Hash + Clone, C: ConcurrentSet<Element = E>> KeySet<E, C> {
             self.stored = Stored::TooLarge;
         }
 
-        debug_assert!(self.unflushed_batches > 0);
-        self.unflushed_batches = self.unflushed_batches.saturating_sub(1);
-    }
+        // Looking through the pending operations takes as long as there are
+        // of them, so the next look waits until there are twice as many. A
+        // set that is written to over and over then spends a constant amount
+        // of time on this per write.
+        self.settle_at = (self.pending.len() * 2).max(SETTLE_AT_LEAST);
 
-    /// Returns whether there is nothing in this entry that is worth keeping
-    /// in the cache.
-    fn is_empty(&self) -> bool {
-        self.unflushed_batches == 0
-            && self.pending.is_empty()
-            && matches!(self.stored, Stored::Absent)
+        if self.pending.capacity() > self.settle_at * 4 {
+            self.pending.shrink_to(self.settle_at);
+        }
     }
 
     /// The elements that the pending writes make members.
@@ -299,20 +311,29 @@ impl<E: Eq + Hash + Clone, C: ConcurrentSet<Element = E>> KeySet<E, C> {
         match &self.stored {
             Stored::Loaded(stored) => Some(Read::Members(self.members(stored))),
             Stored::TooLarge => Some(Read::TooLarge(self.overlay())),
-            Stored::Absent | Stored::Loading(_) => None,
+            Stored::NotLoaded | Stored::Loading => None,
         }
     }
 }
 
 /// Keeps the sets that hold something the database cannot give back in the
-/// cache: writes that have not been flushed, and the flushes recorded by a
-/// load that is still running.
-#[derive(Debug, Default)]
-struct Irreplaceable;
+/// cache: operations that have not been committed, and the pending
+/// operations of a set that is being loaded.
+#[derive(Debug)]
+struct Irreplaceable {
+    /// The committed epochs of the write manager that writes to the cache.
+    committed: CommittedEpochs,
+}
 
 impl<K, E, C> LifecycleListener<K, KeySet<E, C>> for Irreplaceable {
     fn is_pinned(&self, _key: &K, set: &KeySet<E, C>) -> bool {
-        set.unflushed_batches != 0 || matches!(set.stored, Stored::Loading(_))
+        // write batches are committed in the order of their epochs, so the
+        // newest one is the last whose operations reach the database
+        let uncommitted = set
+            .last_staged
+            .is_some_and(|epoch| self.committed.contains(epoch).not());
+
+        uncommitted || matches!(set.stored, Stored::Loading)
     }
 }
 
@@ -335,18 +356,28 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
     Repr<K, C>
 {
     #[allow(clippy::cast_possible_truncation)]
-    fn new(cap: u64, loaded_set_limit: usize) -> Self {
+    fn new(
+        cap: u64,
+        loaded_set_limit: usize,
+        committed: CommittedEpochs,
+    ) -> Self {
         Self {
-            sets: TinyLFU::new(
+            sets: TinyLFU::with_lifecycle_listener(
                 cap as usize,
                 tiny_lfu::UnpinStrategy::Poll,
                 tiny_lfu::MaintenanceMode::Piggyback,
+                Irreplaceable { committed },
             ),
             single_flight: single_flight::SingleFlight::new(
                 default_shard_amount(),
             ),
             loaded_set_limit,
         }
+    }
+
+    /// The committed epochs of the write manager that writes to the cache.
+    fn committed(&self) -> &CommittedEpochs {
+        &self.sets.lifecycle_listener().committed
     }
 
     /// Stages an operation of the write batch of `epoch` on the set of `key`.
@@ -359,53 +390,24 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
         element: K::Element,
         operation: Operation,
         epoch: Epoch,
-        first_in_batch: bool,
     ) {
         self.sets.entry(key, |entry| match entry {
             tiny_lfu::Entry::Vacant(vacant) => {
                 let mut set = KeySet::new();
-                set.stage(element, operation, epoch, first_in_batch);
+                set.stage(element, operation, epoch);
 
                 vacant.insert(set);
             }
 
             tiny_lfu::Entry::Occupied(mut occupied) => {
-                occupied.get_mut().stage(
-                    element,
-                    operation,
-                    epoch,
-                    first_in_batch,
-                );
+                let set = occupied.get_mut();
+                set.stage(element, operation, epoch);
+
+                if set.is_due() {
+                    set.settle(self.committed(), self.loaded_set_limit);
+                }
             }
         });
-    }
-}
-
-impl<
-    K: KeyOfSetColumn,
-    C: ConcurrentSet<Element = K::Element> + 'static,
-    Db: KvDatabase,
-> KeyOfSetCache<K, Db> for Repr<K, C>
-{
-    fn flush(&self, epoch: Epoch, writes: &mut CommittedSetWrites<'_, K>) {
-        for (key, operations) in writes {
-            self.sets.entry(key, |entry| {
-                // the entry cannot have been evicted: it has had an unflushed
-                // write batch since that batch's first operation on it
-                let tiny_lfu::Entry::Occupied(mut occupied) = entry else {
-                    panic!("entry for flushed write batch was evicted");
-                };
-
-                let set = occupied.get_mut();
-                set.flush(epoch, operations, self.loaded_set_limit);
-
-                // an entry with nothing pending and nothing loaded would only
-                // take up room in the cache
-                if set.is_empty() {
-                    drop(occupied.remove());
-                }
-            });
-        }
     }
 }
 
@@ -445,8 +447,9 @@ impl<
             Read::Members(members) => Members::Loaded(members.into_iter()),
 
             // The overlay was taken before this scan starts. A write batch
-            // that is flushed in between is then in both, which is harmless,
-            // and never in neither.
+            // that is committed in between is then in both, which is
+            // harmless, and never in neither: an operation only leaves the
+            // pending ones after it has been committed.
             Read::TooLarge(overlay) => Members::Streaming {
                 stored: self.db.scan_members::<K>(key),
                 overridden: overlay.overridden,
@@ -461,20 +464,13 @@ impl<
         element: <K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
-        let first_in_batch = write_batch.put_set::<K>(
+        write_batch.put_set::<K>(
             key.clone(),
             element.clone(),
             Operation::Insert,
-            Arc::downgrade(&(self.repr.clone() as _)),
         );
 
-        self.repr.stage(
-            key,
-            element,
-            Operation::Insert,
-            write_batch.epoch(),
-            first_in_batch,
-        );
+        self.repr.stage(key, element, Operation::Insert, write_batch.epoch());
     }
 
     async fn remove(
@@ -483,11 +479,10 @@ impl<
         element: &<K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
-        let first_in_batch = write_batch.put_set::<K>(
+        write_batch.put_set::<K>(
             key.clone(),
             element.clone(),
             Operation::Remove,
-            Arc::downgrade(&(self.repr.clone() as _)),
         );
 
         self.repr.stage(
@@ -495,7 +490,6 @@ impl<
             element.clone(),
             Operation::Remove,
             write_batch.epoch(),
-            first_in_batch,
         );
     }
 }
@@ -511,43 +505,35 @@ impl<
     ///
     /// Only one load of a key may run at a time.
     fn load(&self, key: &K::Key) -> Read<K::Element> {
-        loop {
-            if let Some(read) = self.start_load(key) {
-                return read;
-            }
-
-            let scanned = C::default();
-            let mut too_large = false;
-
-            for (count, element) in self.db.scan_members::<K>(key).enumerate() {
-                if count == self.repr.loaded_set_limit {
-                    too_large = true;
-                    break;
-                }
-
-                scanned.insert_element(element);
-            }
-
-            if let Some(read) = self.finish_load(key, scanned, too_large) {
-                return read;
-            }
-
-            // The entry that was recording the flushes of this load is gone.
-            // The scanned members cannot be trusted without them, so the load
-            // starts over.
+        if let Some(read) = self.start_load(key) {
+            return read;
         }
+
+        let scanned = C::default();
+        let mut too_large = false;
+
+        for (count, element) in self.db.scan_members::<K>(key).enumerate() {
+            if count == self.repr.loaded_set_limit {
+                too_large = true;
+                break;
+            }
+
+            scanned.insert_element(element);
+        }
+
+        self.finish_load(key, scanned, too_large)
     }
 
-    /// Marks the set of `key` as being loaded, so that every write batch the
-    /// scan can miss is recorded when it is flushed. This has to happen
-    /// before the scan starts.
+    /// Marks the set of `key` as being loaded, so that it keeps every
+    /// operation the scan can miss. This has to happen before the scan
+    /// starts.
     ///
     /// Returns what the set reads as if it turns out not to need loading.
     fn start_load(&self, key: &K::Key) -> Option<Read<K::Element>> {
         self.repr.sets.entry(key.clone(), |entry| match entry {
             tiny_lfu::Entry::Vacant(vacant) => {
                 let mut set = KeySet::new();
-                set.stored = Stored::Loading(Vec::new());
+                set.stored = Stored::Loading;
 
                 vacant.insert(set);
 
@@ -558,10 +544,26 @@ impl<
                 let set = occupied.get_mut();
                 let read = set.read();
 
-                // `Loading` can only be what a load that never finished has
-                // left behind, since the loads of a key do not overlap.
-                if read.is_none() {
-                    set.stored = Stored::Loading(Vec::new());
+                match set.stored {
+                    Stored::NotLoaded => {
+                        // The scan has not started, so it sees whatever has
+                        // been committed by now.
+                        set.settle(
+                            self.repr.committed(),
+                            self.repr.loaded_set_limit,
+                        );
+
+                        set.stored = Stored::Loading;
+                    }
+
+                    Stored::Loaded(_) | Stored::TooLarge => assert!(
+                        read.is_some(),
+                        "the set is loaded, so it must read as something"
+                    ),
+
+                    Stored::Loading => unreachable!(
+                        "there should be only one 'load' of a key at a time"
+                    ),
                 }
 
                 read
@@ -571,50 +573,37 @@ impl<
 
     /// Completes a load with the members that were scanned from the database
     /// and reads the set.
-    ///
-    /// Returns `None` if the entry is no longer the one [`Self::start_load`]
-    /// marked. That entry is not evicted, so this is not expected to happen.
     fn finish_load(
         &self,
         key: &K::Key,
         scanned: C,
         too_large: bool,
-    ) -> Option<Read<K::Element>> {
-        let limit = self.repr.loaded_set_limit;
-
+    ) -> Read<K::Element> {
         self.repr.sets.entry(key.clone(), |entry| {
             let tiny_lfu::Entry::Occupied(mut occupied) = entry else {
-                return None;
+                panic!("the entry should've been pinned and not evicted");
             };
 
             let set = occupied.get_mut();
 
-            match std::mem::replace(&mut set.stored, Stored::Absent) {
-                Stored::Loading(flushed) => {
-                    if too_large.not() {
-                        for (element, operation) in flushed {
-                            apply(&scanned, element, operation);
-                        }
-                    }
+            assert!(
+                matches!(set.stored, Stored::Loading),
+                "the set should be loading while the scan is running"
+            );
 
-                    if too_large || scanned.len() > limit {
-                        set.stored = Stored::TooLarge;
+            // Every operation that the scan can have missed is still
+            // pending, since the set has not been settled during the scan.
+            // The scan having seen one of them changes nothing: the element
+            // reads as what its last operation makes it either way.
+            set.stored = if too_large {
+                Stored::TooLarge
+            } else {
+                Stored::Loaded(scanned)
+            };
 
-                        Some(Read::TooLarge(set.overlay()))
-                    } else {
-                        let members = set.members(&scanned);
-                        set.stored = Stored::Loaded(scanned);
+            set.settle(self.repr.committed(), self.repr.loaded_set_limit);
 
-                        Some(Read::Members(members))
-                    }
-                }
-
-                stored => {
-                    set.stored = stored;
-
-                    None
-                }
-            }
+            set.read().expect("should've ready to have a read")
         })
     }
 }

@@ -31,6 +31,11 @@ name = "shutdown"
 path = "benches/shutdown.rs"
 harness = false
 
+[[bench]]
+name = "clean_build"
+path = "benches/clean_build.rs"
+harness = false
+
 
 [lints]
 workspace = true

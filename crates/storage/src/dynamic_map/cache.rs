@@ -6,14 +6,13 @@
 use std::{
     any::{Any, TypeId},
     fmt::Debug,
-    sync::Arc,
 };
 
 use crate::{
     dynamic_map::DynamicMap,
     kv_database::{KvDatabase, WideColumn, WideColumnValue},
-    wide_column_cache::{DynamicMapTag, WideColumnCache},
-    write_manager::write_behind,
+    wide_column_cache::WideColumnCache,
+    write_manager::write_behind::{self, CommittedEpochs},
 };
 
 /// A cached implementation of [`DynamicMap`] backed by a
@@ -30,26 +29,15 @@ use crate::{
 #[derive(Debug)]
 #[allow(clippy::type_complexity)]
 pub struct CacheDynamicMap<K: WideColumn, Db: KvDatabase> {
-    cache: Arc<
-        WideColumnCache<
-            (K::Key, TypeId),
-            Box<dyn Any + Send + Sync>,
-            DynamicMapTag,
-        >,
-    >,
+    cache: WideColumnCache<(K::Key, TypeId), Box<dyn Any + Send + Sync>>,
     db: Db,
 }
 
 impl<K: WideColumn, Db: KvDatabase> CacheDynamicMap<K, Db> {
-    /// Creates a new cached dynamic map with the specified capacity.
-    ///
-    ///
-    /// # Returns
-    ///
-    /// A new `CacheDynamicMap` instance.
-    #[must_use]
-    pub fn new(cap: u64, db: Db) -> Self {
-        Self { cache: Arc::new(WideColumnCache::new(cap)), db }
+    /// Creates a new cached dynamic map with the specified capacity, for the
+    /// write manager whose committed epochs are `committed`.
+    pub(crate) fn new(cap: u64, db: Db, committed: CommittedEpochs) -> Self {
+        Self { cache: WideColumnCache::new(cap, committed), db }
     }
 }
 
@@ -82,17 +70,14 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         value: V,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        let updated = write_transaction.put_wide_column::<K, V>(
-            key.clone(),
-            Some(value.clone()),
-            Arc::downgrade(&(self.cache.clone() as _)),
-        );
+        write_transaction
+            .put_wide_column::<K, V>(key.clone(), Some(value.clone()));
 
         let cache_key = (key, std::any::TypeId::of::<V>());
         self.cache.insert(
             cache_key,
             Box::new(value) as Box<dyn Any + Send + Sync>,
-            updated,
+            write_transaction.epoch(),
         );
     }
 
@@ -101,13 +86,9 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         key: &K::Key,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        let updated = write_transaction.put_wide_column::<K, V>(
-            key.clone(),
-            None,
-            Arc::downgrade(&(self.cache.clone() as _)),
-        );
+        write_transaction.put_wide_column::<K, V>(key.clone(), None);
 
         let cache_key = (key.clone(), std::any::TypeId::of::<V>());
-        self.cache.remove(&cache_key, updated);
+        self.cache.remove(&cache_key, write_transaction.epoch());
     }
 }

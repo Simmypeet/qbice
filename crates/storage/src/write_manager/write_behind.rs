@@ -20,14 +20,17 @@
 //! 5. Batch thread puts the transactions back in epoch order and groups them
 //!    into database write batches
 //! 6. Commit thread applies the write batches to the database, one at a time
+//! 7. Commit thread publishes which epochs the database now holds. That is all
+//!    the caches are told: an entry that holds a write of an epoch stays in its
+//!    cache until that epoch has been published
 
 use std::{
     any::{Any, TypeId},
     collections::{BinaryHeap, HashMap},
     ops::Not,
     sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+        atomic::{AtomicU64, Ordering},
     },
     thread,
 };
@@ -35,43 +38,15 @@ use std::{
 use fxhash::FxBuildHasher;
 
 use crate::{
+    dynamic_map::cache::CacheDynamicMap,
+    key_of_set_map::{ConcurrentSet, cache::CacheKeyOfSetMap},
     kv_database::{
         KeyOfSetColumn, KvDatabase, SerializationBuffer as _, WideColumn,
         WideColumnValue, WriteBatch as _,
     },
+    single_map::cache::CacheSingleMap,
     write_batch, write_manager,
 };
-
-pub(crate) trait WideColumnCache<
-    K: WideColumn,
-    W: WideColumnValue<K>,
-    Db: KvDatabase,
->: Send + Sync
-{
-    fn flush(
-        &self,
-        epoch: Epoch,
-        keys: &mut (dyn Iterator<Item = K::Key> + Send),
-    );
-}
-
-/// What a committed write batch has done to the sets of a key-of-set column:
-/// for every key it has written to, the last operation on each element.
-pub(crate) type CommittedSetWrites<'a, K> = dyn Iterator<
-        Item = (
-            <K as KeyOfSetColumn>::Key,
-            HashMap<<K as KeyOfSetColumn>::Element, Operation>,
-        ),
-    > + Send
-    + 'a;
-
-pub(crate) trait KeyOfSetCache<K: KeyOfSetColumn, Db: KvDatabase>:
-    Send + Sync
-{
-    /// Called once the write batch of `epoch` has been committed to the
-    /// database.
-    fn flush(&self, epoch: Epoch, writes: &mut CommittedSetWrites<'_, K>);
-}
 
 /// A monotonically increasing identifier for write transactions.
 ///
@@ -81,29 +56,51 @@ pub(crate) trait KeyOfSetCache<K: KeyOfSetColumn, Db: KvDatabase>:
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Epoch(pub u64);
 
-struct TypedWideColumnWrites<
-    C: WideColumn,
-    V: WideColumnValue<C>,
-    Db: KvDatabase,
-> {
+/// The epochs whose write batches have been committed to the database.
+///
+/// Write batches are committed in the order of their epochs, so one number
+/// says which of them are in the database: every epoch below it. A cache
+/// compares the epoch of a write it holds with this to tell whether the
+/// database has that write, instead of being told about every key of every
+/// committed batch.
+///
+/// A [`WriteBehind`] gives its committed epochs to every map it creates.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CommittedEpochs(Arc<AtomicU64>);
+
+impl CommittedEpochs {
+    /// Returns whether the write batch of `epoch` has been committed.
+    pub(crate) fn contains(&self, epoch: Epoch) -> bool {
+        self.0.load(Ordering::Acquire) > epoch.0
+    }
+
+    /// Records that every write batch with an epoch below `end` has been
+    /// committed.
+    pub(crate) fn advance_to(&self, end: Epoch) {
+        self.0.fetch_max(end.0, Ordering::AcqRel);
+    }
+}
+
+struct TypedWideColumnWrites<C: WideColumn, V: WideColumnValue<C>> {
     /// Map of keys to their corresponding values to write.
     ///
     /// `None` indicates a deletion for that key. `Some(value)` indicates
     /// an insertion or update.
     writes: HashMap<C::Key, Option<V>, FxBuildHasher>,
-    original_cache: Weak<dyn WideColumnCache<C, V, Db>>,
 }
 
 trait WriteEntry<Db: KvDatabase>: Any + Send + Sync + 'static {
-    fn write_to_db(&self, tx: &mut Db::SerializationBuffer);
-    fn after_commit(&mut self, epoch: Epoch);
+    fn write_to_buffer(&self, tx: &mut Db::SerializationBuffer);
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync);
 }
 
 impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase> WriteEntry<Db>
-    for TypedWideColumnWrites<C, V, Db>
+    for TypedWideColumnWrites<C, V>
 {
-    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::SerializationBuffer) {
+    fn write_to_buffer(
+        &self,
+        tx: &mut <Db as KvDatabase>::SerializationBuffer,
+    ) {
         for (key, value_opt) in &self.writes {
             match value_opt {
                 Some(value) => tx.put(key, value),
@@ -114,24 +111,12 @@ impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase> WriteEntry<Db>
         }
     }
 
-    fn after_commit(&mut self, epoch: Epoch) {
-        let mut drained = self.writes.drain().map(|x| x.0);
-
-        let Some(original_cache) = self.original_cache.clone().upgrade() else {
-            return;
-        };
-
-        original_cache.flush(epoch, &mut drained);
-    }
-
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync) { self }
 }
 
-impl<C: WideColumn, V: WideColumnValue<C>, Db: KvDatabase>
-    TypedWideColumnWrites<C, V, Db>
-{
-    fn insert(&mut self, key: C::Key, value: Option<V>) -> bool {
-        self.writes.insert(key, value).is_none()
+impl<C: WideColumn, V: WideColumnValue<C>> TypedWideColumnWrites<C, V> {
+    fn insert(&mut self, key: C::Key, value: Option<V>) {
+        self.writes.insert(key, value);
     }
 }
 
@@ -159,8 +144,7 @@ impl<Db: KvDatabase> WideColumnWrites<Db> {
         &mut self,
         key: C::Key,
         value: Option<V>,
-        original_cache: Weak<dyn WideColumnCache<C, V, Db>>,
-    ) -> bool {
+    ) {
         let id = WideColumnWritesID::of::<C, V>();
 
         match self.writes.entry(id) {
@@ -168,45 +152,30 @@ impl<Db: KvDatabase> WideColumnWrites<Db> {
                 let typed_writes = occupied_entry
                     .get_mut()
                     .as_any_mut()
-                    .downcast_mut::<TypedWideColumnWrites<C, V, Db>>()
+                    .downcast_mut::<TypedWideColumnWrites<C, V>>()
                     .expect("type mismatch in WideColumnWrites map");
 
-                assert!(
-                    Weak::ptr_eq(&typed_writes.original_cache, &original_cache),
-                    "original_cache mismatch for existing WideColumnWrites \
-                     entry"
-                );
-
-                typed_writes.insert(key, value)
+                typed_writes.insert(key, value);
             }
 
             std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                let mut typed_writes = TypedWideColumnWrites::<C, V, Db> {
+                let mut typed_writes = TypedWideColumnWrites::<C, V> {
                     writes: HashMap::default(),
-                    original_cache,
                 };
 
-                let result = typed_writes.insert(key, value);
+                typed_writes.insert(key, value);
 
                 vacant_entry.insert(Box::new(typed_writes));
-
-                result
             }
         }
     }
 
-    pub(super) fn write_to_db(
+    pub(super) fn write_to_buffer(
         &self,
         tx: &mut <Db as KvDatabase>::SerializationBuffer,
     ) {
         for write_entry in self.writes.values() {
-            write_entry.write_to_db(tx);
-        }
-    }
-
-    pub(super) fn after_commit(&mut self, epoch: Epoch) {
-        for write_entry in self.writes.values_mut() {
-            write_entry.after_commit(epoch);
+            write_entry.write_to_buffer(tx);
         }
     }
 }
@@ -220,15 +189,17 @@ pub enum Operation {
     Remove,
 }
 
-struct TypedKeyOfSetWrites<C: KeyOfSetColumn, Db: KvDatabase> {
+struct TypedKeyOfSetWrites<C: KeyOfSetColumn> {
     writes: HashMap<C::Key, HashMap<C::Element, Operation>, FxBuildHasher>,
-    original_cache: Weak<dyn KeyOfSetCache<C, Db>>,
 }
 
 impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
-    for TypedKeyOfSetWrites<C, Db>
+    for TypedKeyOfSetWrites<C>
 {
-    fn write_to_db(&self, tx: &mut <Db as KvDatabase>::SerializationBuffer) {
+    fn write_to_buffer(
+        &self,
+        tx: &mut <Db as KvDatabase>::SerializationBuffer,
+    ) {
         for (key, element_map) in &self.writes {
             for (element, op) in element_map {
                 match op {
@@ -243,39 +214,12 @@ impl<C: KeyOfSetColumn, Db: KvDatabase> WriteEntry<Db>
         }
     }
 
-    fn after_commit(&mut self, epoch: Epoch) {
-        let mut writes = self.writes.drain();
-
-        let Some(original_cache) = self.original_cache.clone().upgrade() else {
-            return;
-        };
-
-        original_cache.flush(epoch, &mut writes);
-    }
-
     fn as_any_mut(&mut self) -> &mut (dyn Any + Send + Sync) { self }
 }
 
-impl<C: KeyOfSetColumn, Db: KvDatabase> TypedKeyOfSetWrites<C, Db> {
-    fn insert(
-        &mut self,
-        key: C::Key,
-        element: C::Element,
-        op: Operation,
-    ) -> bool {
-        match self.writes.entry(key) {
-            std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
-                occupied_entry.get_mut().insert(element, op);
-                false
-            }
-
-            std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                let mut element_map = HashMap::default();
-                element_map.insert(element, op);
-                vacant_entry.insert(element_map);
-                true
-            }
-        }
+impl<C: KeyOfSetColumn> TypedKeyOfSetWrites<C> {
+    fn insert(&mut self, key: C::Key, element: C::Element, op: Operation) {
+        self.writes.entry(key).or_default().insert(element, op);
     }
 }
 
@@ -292,35 +236,25 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
         key: C::Key,
         element: C::Element,
         op: Operation,
-        original_cache: Weak<dyn KeyOfSetCache<C, Db>>,
-    ) -> bool {
+    ) {
         match self.writes.entry(TypeId::of::<C>()) {
             std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
                 let typed_writes = occupied_entry
                     .get_mut()
                     .as_any_mut()
-                    .downcast_mut::<TypedKeyOfSetWrites<C, Db>>()
+                    .downcast_mut::<TypedKeyOfSetWrites<C>>()
                     .expect("type mismatch in KeyOfSetWrites map");
 
-                assert!(
-                    Weak::ptr_eq(&typed_writes.original_cache, &original_cache),
-                    "original_cache mismatch for existing KeyOfSetWrites entry"
-                );
-
-                typed_writes.insert(key, element, op)
+                typed_writes.insert(key, element, op);
             }
 
             std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                let mut typed_writes = TypedKeyOfSetWrites::<C, Db> {
-                    writes: HashMap::default(),
-                    original_cache,
-                };
+                let mut typed_writes =
+                    TypedKeyOfSetWrites::<C> { writes: HashMap::default() };
 
-                let result = typed_writes.insert(key, element, op);
+                typed_writes.insert(key, element, op);
 
                 vacant_entry.insert(Box::new(typed_writes));
-
-                result
             }
         }
     }
@@ -330,13 +264,7 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
         tx: &mut <Db as KvDatabase>::SerializationBuffer,
     ) {
         for write_entry in self.writes.values() {
-            write_entry.write_to_db(tx);
-        }
-    }
-
-    pub(super) fn after_commit(&mut self, epoch: Epoch) {
-        for write_entry in self.writes.values_mut() {
-            write_entry.after_commit(epoch);
+            write_entry.write_to_buffer(tx);
         }
     }
 }
@@ -361,7 +289,8 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
 ///    `remove_set_element` methods
 /// 3. **Submission**: Buffer is submitted to [`WriteBehind`] for async flushing
 /// 4. **Processing**: Background thread writes to database and commits
-/// 5. **Release**: Buffer is dropped once the caches have been notified
+/// 5. **Release**: Buffer is dropped once its writes have been serialized. The
+///    caches hold what it wrote until the database holds it too
 ///
 /// # Epoch Ordering
 ///
@@ -384,14 +313,14 @@ impl<Db: KvDatabase> KeyOfSetWrites<Db> {
 ///
 /// The buffer has an "active" flag:
 /// - Set when created
-/// - Cleared once the background writer has finished with it
+/// - Cleared once the background writer has serialized it
 /// - **Panics** if dropped while still active (indicates programming error)
 ///
 /// # Example
 ///
 /// ```ignore
-/// let writer = WriteBehind::new(4, db.clone());
-/// let cache = engine.new_single_map::<Column, Value>();
+/// let writer = engine.new_write_manager();
+/// let cache = writer.new_single_map::<Column, Value>();
 ///
 /// // Create buffer
 /// let mut buffer = writer.new_write_transaction();
@@ -408,16 +337,9 @@ pub struct WriteBatch<Db: KvDatabase> {
     pub(super) wide_column_writes: WideColumnWrites<Db>,
     pub(super) key_of_set_writes: KeyOfSetWrites<Db>,
     epoch: Epoch,
-    active: bool,
 }
 
 impl<Db: KvDatabase> write_batch::WriteBatch for WriteBatch<Db> {}
-
-impl<Db: KvDatabase> Drop for WriteBatch<Db> {
-    fn drop(&mut self) {
-        assert!(!self.active, "WriteBuffer dropped while still active");
-    }
-}
 
 impl<Db: KvDatabase> std::fmt::Debug for WriteBatch<Db> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -427,22 +349,16 @@ impl<Db: KvDatabase> std::fmt::Debug for WriteBatch<Db> {
 
 impl<Db: KvDatabase> WriteBatch<Db> {
     fn write_to_db(&self, tx: &mut <Db as KvDatabase>::SerializationBuffer) {
-        self.wide_column_writes.write_to_db(tx);
+        self.wide_column_writes.write_to_buffer(tx);
         self.key_of_set_writes.write_to_db(tx);
-    }
-
-    fn after_commit(&mut self, epoch: Epoch) {
-        self.wide_column_writes.after_commit(epoch);
-        self.key_of_set_writes.after_commit(epoch);
     }
 
     pub(crate) fn put_wide_column<C: WideColumn, V: WideColumnValue<C>>(
         &mut self,
         key: C::Key,
         value: Option<V>,
-        original_cache: Weak<dyn WideColumnCache<C, V, Db>>,
-    ) -> bool {
-        self.wide_column_writes.put::<C, V>(key, value, original_cache)
+    ) {
+        self.wide_column_writes.put::<C, V>(key, value);
     }
 
     pub(crate) fn put_set<C: KeyOfSetColumn>(
@@ -450,9 +366,8 @@ impl<Db: KvDatabase> WriteBatch<Db> {
         key: C::Key,
         element: C::Element,
         op: Operation,
-        original_cache: Weak<dyn KeyOfSetCache<C, Db>>,
-    ) -> bool {
-        self.key_of_set_writes.put::<C>(key, element, op, original_cache)
+    ) {
+        self.key_of_set_writes.put::<C>(key, element, op);
     }
 
     #[must_use]
@@ -460,11 +375,10 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 }
 
 impl<Db: KvDatabase> WriteBatch<Db> {
-    fn new(epoch: Epoch, active: bool) -> Self {
+    fn new(epoch: Epoch) -> Self {
         Self {
             wide_column_writes: WideColumnWrites::new(),
             key_of_set_writes: KeyOfSetWrites::new(),
-            active,
             epoch,
         }
     }
@@ -510,13 +424,14 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 /// 1. **Buffer Creation**: Application creates a buffer
 /// 2. **Accumulation**: Writes accumulate in buffer (fast, in-memory)
 /// 3. **Submission**: Buffer submitted to global work queue
-/// 4. **Worker Processing**: Worker picks up buffer, serializes its writes
+/// 4. **Worker Processing**: Worker picks up buffer, serializes its writes and
+///    drops it
 /// 5. **Batching**: Batch thread collects the buffers in epoch order into a
 ///    database write batch and prepares it
 /// 6. **Commit**: Commit thread applies the write batches in that order, while
 ///    the batch thread is already preparing the next one
-/// 7. **Notification**: Cache is notified to decrement pending write counts
-/// 8. **Buffer Release**: Buffer is dropped
+/// 7. **Publication**: Commit thread publishes that the epochs of the batch are
+///    in the database, which lets the caches evict what those epochs wrote
 ///
 /// # Epoch-Based Ordering
 ///
@@ -536,7 +451,7 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 /// // Create storage engine with database backend
 /// let engine = DbBacked::new(database, config);
 /// let write_manager = engine.new_write_manager();
-/// let map = engine.new_single_map::<MyColumn, MyValue>();
+/// let map = write_manager.new_single_map::<MyColumn, MyValue>();
 ///
 /// // Application loop
 /// loop {
@@ -562,14 +477,28 @@ pub struct WriteBehind<Db: KvDatabase> {
     serialize_sender: Option<crossbeam_channel::Sender<SerializeTask<Db>>>,
     serialize_handles: Vec<thread::JoinHandle<()>>,
 
-    after_commit_handle: Option<thread::JoinHandle<()>>,
-    shutting_down: Arc<AtomicBool>,
-
     epoch: AtomicU64,
+    committed: CommittedEpochs,
+
+    /// The database the maps of this writer read from.
+    db: Db,
+
+    /// The number of entries each map of this writer keeps in memory.
+    cache_capacity: u64,
 }
 
 impl<Db: KvDatabase> write_manager::WriteManager for WriteBehind<Db> {
     type WriteBatch = WriteBatch<Db>;
+
+    type SingleMap<K: WideColumn, V: WideColumnValue<K>> =
+        CacheSingleMap<K, V, Db>;
+
+    type DynamicMap<K: WideColumn> = CacheDynamicMap<K, Db>;
+
+    type KeyOfSetMap<
+        K: KeyOfSetColumn,
+        C: ConcurrentSet<Element = K::Element>,
+    > = CacheKeyOfSetMap<K, C, Db>;
 
     fn new_write_batch(&self) -> Self::WriteBatch {
         Self::new_write_batch(self)
@@ -577,6 +506,37 @@ impl<Db: KvDatabase> write_manager::WriteManager for WriteBehind<Db> {
 
     fn submit_write_batch(&self, write_transaction: Self::WriteBatch) {
         Self::submit_write_batch(self, write_transaction);
+    }
+
+    fn new_single_map<K: WideColumn, V: WideColumnValue<K>>(
+        &self,
+    ) -> Self::SingleMap<K, V> {
+        CacheSingleMap::new(
+            self.cache_capacity,
+            self.db.clone(),
+            self.committed.clone(),
+        )
+    }
+
+    fn new_dynamic_map<K: WideColumn>(&self) -> Self::DynamicMap<K> {
+        CacheDynamicMap::new(
+            self.cache_capacity,
+            self.db.clone(),
+            self.committed.clone(),
+        )
+    }
+
+    fn new_key_of_set_map<
+        K: KeyOfSetColumn,
+        C: ConcurrentSet<Element = K::Element>,
+    >(
+        &self,
+    ) -> Self::KeyOfSetMap<K, C> {
+        CacheKeyOfSetMap::new(
+            self.cache_capacity,
+            self.db.clone(),
+            self.committed.clone(),
+        )
     }
 }
 
@@ -587,7 +547,6 @@ impl<Db: KvDatabase> std::fmt::Debug for WriteBehind<Db> {
 }
 
 struct CurrentBatch<Db: KvDatabase> {
-    processed_logical_batch: Vec<WriteBatch<Db>>,
     db_write_batch: Db::WriteBatch,
     expected_epoch: Epoch,
 }
@@ -602,13 +561,12 @@ impl<Db: KvDatabase> CurrentBatch<Db> {
     ) {
         let mut db_write_batch =
             std::mem::replace(&mut self.db_write_batch, db.write_batch());
-        let logical_batches = std::mem::take(&mut self.processed_logical_batch);
 
         // done on this thread so that the commit thread only has to write
         db_write_batch.prepare();
 
         commit_sender
-            .send(CommitTask { db_write_batch, logical_batches })
+            .send(CommitTask { db_write_batch, end: self.expected_epoch })
             .unwrap();
     }
 }
@@ -628,14 +586,16 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     /// * `db` - The database instance to write to. Must be wrapped in `Arc` for
     ///   sharing across worker threads.
     ///
+    /// * `cache_capacity` - The number of entries that each map created by this
+    ///   writer keeps in memory.
+    ///
     /// # Thread Spawning
     ///
-    /// This method spawns `num_threads + 3` threads:
+    /// This method spawns `num_threads + 2` threads:
     /// - `num_threads` worker threads (named "`bg_writer_ser_0`",
     ///   "`bg_writer_ser_1`", ...)
     /// - 1 batch thread (named "`bg_writer_batch`")
     /// - 1 commit thread (named "`bg_writer_commit`")
-    /// - 1 after-commit thread (named "`bg_writer_after_commit`")
     ///
     /// All threads start immediately and begin waiting for work.
     ///
@@ -652,7 +612,11 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     /// // Shutdown gracefully on drop
     /// drop(writer);
     /// ```
-    pub fn new(db: &Db, serialize_worker_count: usize) -> Self {
+    pub fn new(
+        db: &Db,
+        serialize_worker_count: usize,
+        cache_capacity: u64,
+    ) -> Self {
         let (batch_sender, batch_receiver) =
             crossbeam_channel::unbounded::<WriteTask<Db>>();
         // The batch thread prepares one batch ahead of the commit thread and
@@ -661,10 +625,8 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             crossbeam_channel::bounded::<CommitTask<Db>>(1);
         let (serialize_sender, serialize_receiver) =
             crossbeam_channel::unbounded::<SerializeTask<Db>>();
-        let (after_commit_sender, after_commit_receiver) =
-            crossbeam_channel::unbounded::<AfterCommitTask<Db>>();
 
-        let shutting_down = Arc::new(AtomicBool::new(false));
+        let committed = CommittedEpochs::default();
 
         Self {
             batch_handle: Some({
@@ -679,16 +641,12 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             }),
 
             commit_handle: Some({
-                let shutting_down = shutting_down.clone();
+                let committed = committed.clone();
 
                 thread::Builder::new()
                     .name("bg_writer_commit".to_string())
                     .spawn(move || {
-                        Self::commit_worker(
-                            &commit_receiver,
-                            after_commit_sender,
-                            &shutting_down,
-                        );
+                        Self::commit_worker(&commit_receiver, &committed);
                     })
                     .unwrap()
             }),
@@ -713,30 +671,18 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                 })
                 .collect(),
 
-            after_commit_handle: Some({
-                let after_commit_receiver = after_commit_receiver;
-                let shutting_down = shutting_down.clone();
-
-                thread::Builder::new()
-                    .name("bg_writer_after_commit".to_string())
-                    .spawn(move || {
-                        Self::after_commit_worker(
-                            &after_commit_receiver,
-                            &shutting_down,
-                        );
-                    })
-                    .unwrap()
-            }),
-
-            shutting_down,
             epoch: AtomicU64::new(0),
+            committed,
+
+            db: db.clone(),
+            cache_capacity,
         }
     }
 
     /// Creates a new write buffer for accumulating write operations.
     #[must_use]
     pub fn new_write_batch(&self) -> WriteBatch<Db> {
-        WriteBatch::new(Epoch(self.epoch.fetch_add(1, Ordering::SeqCst)), true)
+        WriteBatch::new(Epoch(self.epoch.fetch_add(1, Ordering::SeqCst)))
     }
 
     /// Submits a write buffer to be processed by the background writer.
@@ -746,38 +692,17 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         self.serialize_sender.as_ref().unwrap().send(write_task).unwrap();
     }
 
-    fn after_commit_worker(
-        receiver: &crossbeam_channel::Receiver<AfterCommitTask<Db>>,
-        shutting_down: &Arc<AtomicBool>,
-    ) {
-        while let Ok(mut task) = receiver.recv() {
-            let epoch = task.write_buffer.epoch();
-
-            if shutting_down.load(Ordering::SeqCst) {
-                task.write_buffer.active = false;
-                continue;
-            }
-
-            task.write_buffer.after_commit(epoch);
-            task.write_buffer.active = false;
-        }
-    }
-
     fn serialize_worker(
         receiver: &crossbeam_channel::Receiver<SerializeTask<Db>>,
         sender: &crossbeam_channel::Sender<WriteTask<Db>>,
         db: &Db,
     ) {
-        while let Ok(task) = receiver.recv() {
-            let mut serialization_buffer = db.serialization_buffer();
-            task.write_buffer.write_to_db(&mut serialization_buffer);
+        while let Ok(SerializeTask { write_buffer }) = receiver.recv() {
+            let mut serialize_buffer = db.serialization_buffer();
+            write_buffer.write_to_db(&mut serialize_buffer);
+            let epoch = write_buffer.epoch;
 
-            sender
-                .send(WriteTask {
-                    write_buffer: task.write_buffer,
-                    serialize_buffer: serialization_buffer,
-                })
-                .unwrap();
+            sender.send(WriteTask { epoch, serialize_buffer }).unwrap();
         }
     }
 
@@ -791,7 +716,6 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         let mut holdback_queues = BinaryHeap::new();
 
         let mut current_batch = CurrentBatch {
-            processed_logical_batch: Vec::new(),
             db_write_batch: db.write_batch(),
             expected_epoch: Epoch(0),
         };
@@ -799,7 +723,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         while let Ok(task) = receiver.recv() {
             holdback_queues.push(task);
 
-            Self::process_pending_commits(
+            Self::process_pending_writes(
                 &mut holdback_queues,
                 &mut current_batch,
                 &commit_sender,
@@ -808,7 +732,7 @@ impl<Db: KvDatabase> WriteBehind<Db> {
         }
 
         // Process remaining commits
-        Self::process_pending_commits(
+        Self::process_pending_writes(
             &mut holdback_queues,
             &mut current_batch,
             &commit_sender,
@@ -829,45 +753,32 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     /// thread made them.
     fn commit_worker(
         receiver: &crossbeam_channel::Receiver<CommitTask<Db>>,
-        after_commit_sender: crossbeam_channel::Sender<AfterCommitTask<Db>>,
-        shutting_down: &Arc<AtomicBool>,
+        committed: &CommittedEpochs,
     ) {
         while let Ok(task) = receiver.recv() {
             // commit physical batch
             task.db_write_batch.commit();
 
-            // after commit actions
-            for mut logical_batch in task.logical_batches {
-                if shutting_down.load(Ordering::SeqCst).not() {
-                    after_commit_sender
-                        .send(AfterCommitTask { write_buffer: logical_batch })
-                        .unwrap();
-                } else {
-                    logical_batch.active = false;
-                }
-            }
+            // Not before the commit: a cache may evict an entry as soon as
+            // the epoch that wrote it is published, and the next read of
+            // that entry then has to find the write in the database.
+            committed.advance_to(task.end);
         }
-
-        // close after commit sender
-        drop(after_commit_sender);
     }
 
-    fn process_pending_commits(
-        pending_commits: &mut BinaryHeap<WriteTask<Db>>,
+    fn process_pending_writes(
+        pending_writes: &mut BinaryHeap<WriteTask<Db>>,
         current_batch: &mut CurrentBatch<Db>,
         commit_sender: &crossbeam_channel::Sender<CommitTask<Db>>,
         db: &Db,
     ) {
-        while let Some(top) = pending_commits.peek() {
-            if top.write_buffer.epoch == current_batch.expected_epoch {
-                let task = pending_commits.pop().unwrap();
+        while let Some(top) = pending_writes.peek() {
+            if top.epoch == current_batch.expected_epoch {
+                let task = pending_writes.pop().unwrap();
 
                 current_batch
                     .db_write_batch
                     .consume_serialization_buffer(task.serialize_buffer);
-
-                // push into current batch
-                current_batch.processed_logical_batch.push(task.write_buffer);
 
                 current_batch.expected_epoch.0 += 1;
 
@@ -884,8 +795,6 @@ impl<Db: KvDatabase> WriteBehind<Db> {
 
 impl<Db: KvDatabase> Drop for WriteBehind<Db> {
     fn drop(&mut self) {
-        self.shutting_down.store(true, Ordering::SeqCst);
-
         // close serialize sender
         drop(self.serialize_sender.take());
 
@@ -899,38 +808,29 @@ impl<Db: KvDatabase> Drop for WriteBehind<Db> {
         let _ = self.batch_handle.take().unwrap().join();
 
         // commit sender should be closed now, wait for commit thread to exit
-        // this will also close after commit sender
         let _ = self.commit_handle.take().unwrap().join();
-
-        // after commit thread should exit now
-        let _ = self.after_commit_handle.take().unwrap().join();
     }
-}
-
-struct AfterCommitTask<Db: KvDatabase> {
-    write_buffer: WriteBatch<Db>,
 }
 
 struct SerializeTask<Db: KvDatabase> {
     write_buffer: WriteBatch<Db>,
 }
 
+/// The serialized writes of the write buffer of `epoch`.
 struct WriteTask<Db: KvDatabase> {
-    write_buffer: WriteBatch<Db>,
+    epoch: Epoch,
     serialize_buffer: Db::SerializationBuffer,
 }
 
-/// A physical batch that is ready to be committed, and the write buffers
-/// whose writes it holds.
+/// A physical batch that is ready to be committed. It completes the writes
+/// of every epoch below `end`.
 struct CommitTask<Db: KvDatabase> {
     db_write_batch: Db::WriteBatch,
-    logical_batches: Vec<WriteBatch<Db>>,
+    end: Epoch,
 }
 
 impl<Db: KvDatabase> PartialEq for WriteTask<Db> {
-    fn eq(&self, other: &Self) -> bool {
-        self.write_buffer.epoch == other.write_buffer.epoch
-    }
+    fn eq(&self, other: &Self) -> bool { self.epoch == other.epoch }
 }
 
 impl<Db: KvDatabase> Eq for WriteTask<Db> {}
@@ -944,6 +844,9 @@ impl<Db: KvDatabase> PartialOrd for WriteTask<Db> {
 impl<Db: KvDatabase> Ord for WriteTask<Db> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse order for min-heap behavior
-        other.write_buffer.epoch.cmp(&self.write_buffer.epoch)
+        other.epoch.cmp(&self.epoch)
     }
 }
+
+#[cfg(test)]
+mod test;

@@ -56,9 +56,11 @@ pub struct ActiveInputSessionGuard(
 );
 
 impl<C: Config> Sync<C> {
-    pub async fn new(db: &C::StorageEngine) -> Self {
-        let write_manager = db.new_write_manager();
-        let timestamp_map = db.new_single_map::<TimestampColumn, Timestamp>();
+    pub async fn new(
+        write_manager: <C::StorageEngine as StorageEngine>::WriteManager,
+    ) -> Self {
+        let timestamp_map =
+            write_manager.new_single_map::<TimestampColumn, Timestamp>();
 
         let timestamp = timestamp_map.get(&()).await;
 

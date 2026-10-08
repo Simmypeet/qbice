@@ -24,6 +24,7 @@ use qbice_storage::{
     },
     single_map::SingleMap as _,
     storage_engine::StorageEngine,
+    write_manager::WriteManager,
 };
 pub use snapshot::Snapshot;
 pub(super) use sync::ActiveComputationGuard;
@@ -506,14 +507,16 @@ impl<Q: Query> WideColumnValue<QueryStoreColumn> for QueryResult<Q> {
     }
 }
 
-type SingleMap<C, K, V> =
-    <<C as Config>::StorageEngine as StorageEngine>::SingleMap<K, V>;
+/// The write manager of the storage engine, which creates the maps.
+type WriteManagerOf<C> =
+    <<C as Config>::StorageEngine as StorageEngine>::WriteManager;
 
-type DynamicMap<C, K> =
-    <<C as Config>::StorageEngine as StorageEngine>::DynamicMap<K>;
+type SingleMap<C, K, V> = <WriteManagerOf<C> as WriteManager>::SingleMap<K, V>;
+
+type DynamicMap<C, K> = <WriteManagerOf<C> as WriteManager>::DynamicMap<K>;
 
 type KeyOfSetMap<C, K, Con> =
-    <<C as Config>::StorageEngine as StorageEngine>::KeyOfSetMap<K, Con>;
+    <WriteManagerOf<C> as WriteManager>::KeyOfSetMap<K, Con>;
 
 type WriteTransaction<C> =
     <<C as Config>::StorageEngine as StorageEngine>::WriteTransaction;
@@ -556,32 +559,36 @@ pub struct Database<C: Config> {
 
 impl<C: Config> Database<C> {
     pub async fn new(db: &C::StorageEngine) -> Self {
+        // every map is created by the write manager that its writes go
+        // through
+        let write_manager = db.new_write_manager();
+
         Self {
-            last_verified: ManuallyDrop::new(db.new_single_map::<QueryNodeColumn, LastVerified>()),
+            last_verified: ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, LastVerified>()),
             forward_edge_order:
-                ManuallyDrop::new(db.new_single_map::<QueryNodeColumn, ForwardEdgeOrder>()),
-            forward_edge_observation: ManuallyDrop::new(db
+                ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, ForwardEdgeOrder>()),
+            forward_edge_observation: ManuallyDrop::new(write_manager
                 .new_single_map::<QueryNodeColumn, ForwardEdgeObservation<C>>()),
-            query_kind: ManuallyDrop::new(db.new_single_map::<QueryNodeColumn, QueryKind>()),
-            node_info: ManuallyDrop::new(db.new_single_map::<QueryNodeColumn, NodeInfo>()),
-            pending_backward_projection: ManuallyDrop::new(db
+            query_kind: ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, QueryKind>()),
+            node_info: ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, NodeInfo>()),
+            pending_backward_projection: ManuallyDrop::new(write_manager
                 .new_single_map::<QueryNodeColumn, PendingBackwardProjection>()),
 
-            dirty_edge_set: ManuallyDrop::new(db.new_single_map::<DirtySetColumn, Unit>()),
+            dirty_edge_set: ManuallyDrop::new(write_manager.new_single_map::<DirtySetColumn, Unit>()),
 
-            query_store: ManuallyDrop::new(db.new_dynamic_map::<QueryStoreColumn>()),
+            query_store: ManuallyDrop::new(write_manager.new_dynamic_map::<QueryStoreColumn>()),
 
-            backward_edges: ManuallyDrop::new(db.new_key_of_set_map::<
+            backward_edges: ManuallyDrop::new(write_manager.new_key_of_set_map::<
                 BackwardEdgeColumn<C>,
                 CompressedBackwardEdgeSet<C::BuildHasher>,
             >()),
 
-            external_input_queries: ManuallyDrop::new(db.new_key_of_set_map::<
+            external_input_queries: ManuallyDrop::new(write_manager.new_key_of_set_map::<
                 ExternalInputColumn<C>,
                 Arc<DashSet<Compact128, C::BuildHasher>>,
             >()),
 
-            sync: ManuallyDrop::new(sync::Sync::new(db).await),
+            sync: ManuallyDrop::new(sync::Sync::new(write_manager).await),
         }
     }
 }

@@ -43,7 +43,7 @@ pub enum MaintenanceMode {
 const MAINTENANCE_BATCH_SIZE: usize = 32;
 
 /// A listener trait for cache entry lifecycle events.
-pub trait LifecycleListener<K, V>: Default {
+pub trait LifecycleListener<K, V> {
     /// Determines if the given entry is currently pinned.
     ///
     /// If "pinned", the entry will not be evicted from the cache.
@@ -102,8 +102,32 @@ impl<
         capacity: usize,
         unpin_strategy: UnpinStrategy,
         maintenance_mode: MaintenanceMode,
+    ) -> Self
+    where
+        L: Default,
+    {
+        Self::with_lifecycle_listener(
+            capacity,
+            unpin_strategy,
+            maintenance_mode,
+            L::default(),
+        )
+    }
+
+    /// Creates a new TinyLFU cache that asks `lifecycle_listener` whether an
+    /// entry is pinned.
+    #[must_use]
+    pub fn with_lifecycle_listener(
+        capacity: usize,
+        unpin_strategy: UnpinStrategy,
+        maintenance_mode: MaintenanceMode,
+        lifecycle_listener: L,
     ) -> Self {
-        let inner = Arc::new(TinyLFUInner::new(capacity, unpin_strategy));
+        let inner = Arc::new(TinyLFUInner::new(
+            capacity,
+            unpin_strategy,
+            lifecycle_listener,
+        ));
 
         let (sender, join_handle) = match maintenance_mode {
             MaintenanceMode::Piggyback => (None, None),
@@ -241,11 +265,15 @@ impl<K, V, L> std::fmt::Debug for TinyLFUInner<K, V, L> {
     }
 }
 
-impl<K: Eq + Hash + Clone, V, L: Default> TinyLFUInner<K, V, L> {
+impl<K: Eq + Hash + Clone, V, L> TinyLFUInner<K, V, L> {
     /// Creates a new TinyLFUInner cache with the specified capacity and shard
     /// count.
     #[must_use]
-    pub fn new(capacity: usize, unpin_strategy: UnpinStrategy) -> Self {
+    pub fn new(
+        capacity: usize,
+        unpin_strategy: UnpinStrategy,
+        lifecycle_listener: L,
+    ) -> Self {
         #[cfg(feature = "tracing_resource")]
         let resource_span = {
             let location = std::panic::Location::caller();
@@ -283,7 +311,7 @@ impl<K: Eq + Hash + Clone, V, L: Default> TinyLFUInner<K, V, L> {
             policy: CachePadded::new(parking_lot::Mutex::new(Policy::new(
                 capacity,
             ))),
-            lifecycle_listener: L::default(),
+            lifecycle_listener,
             unpin_strategy,
             build_hasher: FxBuildHasher::default(),
             maintenance_flag: AtomicBool::new(false),
@@ -448,6 +476,10 @@ impl<
 
         t
     }
+
+    /// Returns the lifecycle listener of the cache.
+    #[must_use]
+    pub fn lifecycle_listener(&self) -> &L { &self.inner.lifecycle_listener }
 
     /// Notifies the cache that a key has been unpinned and should be removed or
     /// reinserted into the cache.

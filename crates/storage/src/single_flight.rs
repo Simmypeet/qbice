@@ -37,6 +37,14 @@ impl<K> SingleFlight<K> {
 }
 
 impl<K: Eq + Hash + Clone> SingleFlight<K> {
+    /// Returns whether the work for the given key is being performed.
+    pub fn is_in_flight(&self, key: &K) -> bool {
+        let hash = self.build_hasher.hash_one(key);
+        let shard_index = self.map.shard_index(hash);
+
+        self.map.read_shard(shard_index).contains_key(key)
+    }
+
     /// Waits for an ongoing operation for the given key to complete, or
     /// performs the work if no operation is ongoing.
     pub async fn wait_or_work<T>(
