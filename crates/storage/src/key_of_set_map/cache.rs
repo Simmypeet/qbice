@@ -7,7 +7,7 @@
 //!
 //! The members of a set are whatever the database holds, with the writes that
 //! the database does not hold yet laid over it. Every key that is in memory
-//! has one [`KeySet`] that holds both parts:
+//! has one `KeySet` that holds both parts:
 //!
 //! - `pending` records, for each element that has been written, the last
 //!   operation on it and the epoch of the write batch that staged the
