@@ -465,12 +465,12 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     ) -> Option<(Self, ComputingLockGuard<C>)> {
         // we have to double check if we still really need to compute
 
-        let last_verified = self.last_verified().await;
+        let last_verified = self.last_verified().await.map(|x| x.0);
 
         let (mode, query_kind) = if let Some(last_verified) = last_verified {
             let kind = self.query_kind().await.unwrap();
 
-            if last_verified.0 == caller_information.timestamp() {
+            if last_verified == caller_information.timestamp() {
                 // no need to repair
                 return None;
             }
