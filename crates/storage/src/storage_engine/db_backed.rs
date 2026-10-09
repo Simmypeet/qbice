@@ -20,13 +20,6 @@ pub struct Configuration {
     #[builder(default = 2u64.pow(18))]
     pub cache_capacity: u64,
 
-    /// The number of worker threads for serialization and write processing.
-    ///
-    /// More workers can increase throughput for write-heavy workloads,
-    /// but returns diminish beyond the database's I/O capacity.
-    #[builder(default = 2)]
-    pub serialization_workers: usize,
-
     /// The default number of shards to use for caches.
     ///
     /// More shards can improve concurrency but increase memory overhead.
@@ -50,10 +43,7 @@ pub struct Configuration {
 /// ```ignore
 /// use qbice_storage::storage_engine::db_backed::{DbBacked, Configuration};
 ///
-/// let config = Configuration::builder()
-///     .cache_capacity(10_000)
-///     .serialization_workers(4)
-///     .build();
+/// let config = Configuration::builder().cache_capacity(10_000).build();
 ///
 /// // Create storage engine with a RocksDB backend
 /// let engine = DbBacked::new(rocksdb_instance, config);
@@ -87,7 +77,6 @@ impl<Db: KvDatabase> StorageEngine for DbBacked<Db> {
     fn new_write_manager(&self) -> Self::WriteManager {
         write_behind::WriteBehind::new(
             &self.backing_db,
-            self.configuration.serialization_workers,
             self.configuration.cache_capacity,
         )
     }

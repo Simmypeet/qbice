@@ -1,9 +1,9 @@
 use std::hash::Hash;
 
 use crate::{
+    s3_fifo::{self, LifecycleListener, S3Fifo},
     sharded::default_shard_amount,
     single_flight,
-    tiny_lfu::{self, LifecycleListener, TinyLFU},
     write_manager::write_behind::{CommittedEpochs, Epoch},
 };
 
@@ -61,7 +61,7 @@ pub struct WideColumnCache<
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 > {
-    tiny_lfu: TinyLFU<K, Entry<V>, PinnedLifecycleListener<K>>,
+    entries: S3Fifo<K, Entry<V>, PinnedLifecycleListener<K>>,
 }
 
 impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static>
@@ -72,12 +72,8 @@ impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static>
     #[allow(clippy::cast_possible_truncation)]
     pub fn new(capacity: u64, committed: CommittedEpochs) -> Self {
         Self {
-            tiny_lfu: TinyLFU::with_lifecycle_listener(
+            entries: S3Fifo::with_lifecycle_listener(
                 capacity as usize,
-                // nobody reports that an entry has been unpinned: the cache
-                // finds out by asking again
-                tiny_lfu::UnpinStrategy::Poll,
-                tiny_lfu::MaintenanceMode::Piggyback,
                 PinnedLifecycleListener {
                     committed,
                     reads: single_flight::SingleFlight::new(
@@ -102,25 +98,25 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static>
             // FAST PATH: Check if the value is already cached, return it  if
             // found.
             if let Some(entry) =
-                self.tiny_lfu.get_map(key, |e| e.value.as_ref().map(&map))
+                self.entries.get_map(key, |e| e.value.as_ref().map(&map))
             {
                 return entry;
             }
 
             // obtain the single-flight for fetching the value
-            self.tiny_lfu
+            self.entries
                 .lifecycle_listener()
                 .reads
                 .wait_or_work(key, || {
                     let value = init();
 
-                    self.tiny_lfu.entry(key.clone(), |entry| match entry {
-                        tiny_lfu::Entry::Vacant(vaccant_entry) => {
+                    self.entries.entry(key.clone(), |entry| match entry {
+                        s3_fifo::Entry::Vacant(vaccant_entry) => {
                             vaccant_entry
                                 .insert(Entry { value, last_write: None });
                         }
 
-                        tiny_lfu::Entry::Occupied(_) => {
+                        s3_fifo::Entry::Occupied(_) => {
                             // Do nothing as there's an another thread inserted
                             // an explicit value
                         }
@@ -132,9 +128,9 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static>
 
     /// Stores a value that the write batch of `epoch` writes.
     pub fn insert(&self, key: K, value: V, epoch: Epoch) {
-        let old_value = self.tiny_lfu.entry(key, |e| {
+        let old_value = self.entries.entry(key, |e| {
             match e {
-                tiny_lfu::Entry::Vacant(vaccant_entry) => {
+                s3_fifo::Entry::Vacant(vaccant_entry) => {
                     vaccant_entry.insert(Entry {
                         value: Some(value),
                         last_write: Some(epoch),
@@ -143,7 +139,7 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static>
                     None
                 }
 
-                tiny_lfu::Entry::Occupied(mut entry) => {
+                s3_fifo::Entry::Occupied(mut entry) => {
                     // update the existing value and take the value to drop
                     // outside
                     let entry = entry.get_mut();
@@ -164,14 +160,14 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static>
     /// committed the database still holds the value, and a read must not
     /// fall back to it.
     pub fn remove(&self, key: &K, epoch: Epoch) {
-        let old_value = self.tiny_lfu.entry(key.clone(), |x| match x {
-            tiny_lfu::Entry::Vacant(vaccant_entry) => {
+        let old_value = self.entries.entry(key.clone(), |x| match x {
+            s3_fifo::Entry::Vacant(vaccant_entry) => {
                 vaccant_entry
                     .insert(Entry { value: None, last_write: Some(epoch) });
 
                 None
             }
-            tiny_lfu::Entry::Occupied(mut occupied_entry) => {
+            s3_fifo::Entry::Occupied(mut occupied_entry) => {
                 let entry = occupied_entry.get_mut();
 
                 entry.last_write = entry.last_write.max(Some(epoch));

@@ -15,7 +15,7 @@ use crate::{
         KeyOfSetColumn, KvDatabase, SerializationBuffer, WideColumn,
         WideColumnValue, WriteBatch,
     },
-    tiny_lfu::{self, LifecycleListener},
+    s3_fifo::{self, LifecycleListener},
     write_manager::write_behind::{CommittedEpochs, Epoch, Operation},
 };
 
@@ -82,6 +82,8 @@ impl SerializationBuffer for Unused {
     fn delete_member<C: KeyOfSetColumn>(&mut self, _: &C::Key, _: &C::Element) {
         unreachable!()
     }
+
+    fn size(&self) -> usize { unreachable!() }
 }
 
 impl WriteBatch for Unused {
@@ -264,7 +266,7 @@ fn is_pinned(map: &Map, key: i32) -> bool {
 /// Settles the set of `key`, which the map otherwise does when it sees fit.
 fn settle(map: &Map, key: i32) {
     map.repr.sets.entry(key, |entry| {
-        if let tiny_lfu::Entry::Occupied(mut occupied) = entry {
+        if let s3_fifo::Entry::Occupied(mut occupied) = entry {
             occupied
                 .get_mut()
                 .settle(map.repr.committed(), map.repr.loaded_set_limit);

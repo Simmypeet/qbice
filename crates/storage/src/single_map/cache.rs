@@ -58,8 +58,7 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
         value: V,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        write_transaction
-            .put_wide_column::<K, V>(key.clone(), Some(value.clone()));
+        write_transaction.put_wide_column::<K, V>(&key, Some(&value));
 
         self.cache.insert(key, value, write_transaction.epoch());
     }
@@ -69,7 +68,7 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
         key: &K::Key,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        write_transaction.put_wide_column::<K, V>(key.clone(), None);
+        write_transaction.put_wide_column::<K, V>(key, None);
 
         self.cache.remove(key, write_transaction.epoch());
     }

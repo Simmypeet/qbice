@@ -47,6 +47,12 @@ pub trait SerializationBuffer {
         key: &C::Key,
         value: &C::Element,
     );
+
+    /// Returns the number of bytes that the buffered operations take up.
+    ///
+    /// This is what the write-behind goes by to limit how much it holds in
+    /// memory before the database has caught up.
+    fn size(&self) -> usize;
 }
 
 /// A write batch for accumulating multiple write operations that are committed

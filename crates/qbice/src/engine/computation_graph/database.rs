@@ -407,6 +407,14 @@ implements_wide_column_value_new_type!(
     QueryNodeDiscriminant::ForwardEdgeOrder
 );
 
+/// The queries that the dependencies name, in the order they are listed.
+fn callees(dependencies: &[NodeDependency]) -> impl Iterator<Item = &QueryID> {
+    dependencies.iter().flat_map(|dependency| match dependency {
+        NodeDependency::Single(callee) => std::slice::from_ref(callee),
+        NodeDependency::Unordered(callees) => callees.as_slice(),
+    })
+}
+
 impl ForwardEdgeOrder {
     pub fn iter_all_callees(&self) -> impl Iterator<Item = QueryID> + '_ {
         self.0.iter().flat_map(|dep| match dep {
@@ -895,54 +903,48 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         let query_result = QueryResult::<Q>(query_value);
 
         {
+            // The callees that the query read when it was last computed, and
+            // the ones it has read now. A callee that is in both has its
+            // backward edge to this query in place already: taking the edge
+            // out and putting it back in would be two writes that change
+            // nothing, to a set that every other caller of that callee
+            // writes to as well.
+            let previous_callees: HashSet<QueryID, C::BuildHasher> =
+                existing_forward_edges
+                    .map(|edges| callees(edges).copied().collect())
+                    .unwrap_or_default();
+
             // remove prior backward edges
             if let Some(forward_edges) = existing_forward_edges {
-                for dep in forward_edges {
-                    match dep {
-                        NodeDependency::Single(edge) => {
-                            self.engine()
-                                .computation_graph
-                                .database
-                                .backward_edges
-                                .remove(edge, self.query_id(), &mut tx)
-                                .await;
+                // set of callees to maintain backward edges for
+                let maintaining_callees: HashSet<QueryID, C::BuildHasher> =
+                    // if there's no previous callees, then there are no backward 
+                    // edges to remove
+                    if previous_callees.is_empty() {
+                        HashSet::default()
+                    } else {
+                        callees(&forward_edge_order.0).copied().collect()
+                    };
 
-                            if clean_existing_forward_edges {
-                                let edge =
-                                    Edge { from: *self.query_id(), to: *edge };
+                for callee in callees(forward_edges) {
+                    if !maintaining_callees.contains(callee) {
+                        self.engine()
+                            .computation_graph
+                            .database
+                            .backward_edges
+                            .remove(callee, self.query_id(), &mut tx)
+                            .await;
+                    }
 
-                                self.engine()
-                                    .computation_graph
-                                    .database
-                                    .dirty_edge_set
-                                    .remove(&edge, &mut tx)
-                                    .await;
-                            }
-                        }
-                        NodeDependency::Unordered(unordered) => {
-                            for edge in unordered {
-                                self.engine()
-                                    .computation_graph
-                                    .database
-                                    .backward_edges
-                                    .remove(edge, self.query_id(), &mut tx)
-                                    .await;
+                    if clean_existing_forward_edges {
+                        let edge = Edge { from: *self.query_id(), to: *callee };
 
-                                if clean_existing_forward_edges {
-                                    let edge = Edge {
-                                        from: *self.query_id(),
-                                        to: *edge,
-                                    };
-
-                                    self.engine()
-                                        .computation_graph
-                                        .database
-                                        .dirty_edge_set
-                                        .remove(&edge, &mut tx)
-                                        .await;
-                                }
-                            }
-                        }
+                        self.engine()
+                            .computation_graph
+                            .database
+                            .dirty_edge_set
+                            .remove(&edge, &mut tx)
+                            .await;
                     }
                 }
             }
@@ -986,26 +988,14 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 )
                 .await;
 
-            for edge in forward_edge_order.0.iter() {
-                match edge {
-                    NodeDependency::Single(query_id) => {
-                        self.engine()
-                            .computation_graph
-                            .database
-                            .backward_edges
-                            .insert(*query_id, *self.query_id(), &mut tx)
-                            .await;
-                    }
-                    NodeDependency::Unordered(query_ids) => {
-                        for edge in query_ids {
-                            self.engine()
-                                .computation_graph
-                                .database
-                                .backward_edges
-                                .insert(*edge, *self.query_id(), &mut tx)
-                                .await;
-                        }
-                    }
+            for callee in callees(&forward_edge_order.0) {
+                if !previous_callees.contains(callee) {
+                    self.engine()
+                        .computation_graph
+                        .database
+                        .backward_edges
+                        .insert(*callee, *self.query_id(), &mut tx)
+                        .await;
                 }
             }
 

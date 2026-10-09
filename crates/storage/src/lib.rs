@@ -109,9 +109,9 @@ pub mod dynamic_map;
 pub mod intern;
 pub mod key_of_set_map;
 pub mod kv_database;
+pub mod s3_fifo;
 pub mod single_map;
 pub mod storage_engine;
-pub mod tiny_lfu;
 pub mod write_batch;
 pub mod write_manager;
 

@@ -43,7 +43,7 @@ mod pinning {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::{
-        tiny_lfu::LifecycleListener,
+        s3_fifo::LifecycleListener,
         wide_column_cache::WideColumnCache,
         write_manager::write_behind::{CommittedEpochs, Epoch},
     };
@@ -74,15 +74,15 @@ mod pinning {
     }
 
     fn is_cached(cache: &Cache, key: i32) -> bool {
-        cache.tiny_lfu.get_map(&key, |_| ()).is_some()
+        cache.entries.get_map(&key, |_| ()).is_some()
     }
 
     /// Whether the cache has to keep the entry of `key`.
     fn is_pinned(cache: &Cache, key: i32) -> bool {
         cache
-            .tiny_lfu
+            .entries
             .get_map(&key, |entry| {
-                cache.tiny_lfu.lifecycle_listener().is_pinned(&key, entry)
+                cache.entries.lifecycle_listener().is_pinned(&key, entry)
             })
             .unwrap_or(false)
     }
@@ -213,6 +213,17 @@ mod pinning {
         }
     }
 
+    /// Presses a full cache for room like [`press`], with entries that are
+    /// read often enough for the cache to want to keep them.
+    fn press_with_entries_in_use(cache: &Cache, others: std::ops::Range<i32>) {
+        for other in others {
+            cache.insert(other, 0, Epoch(0));
+
+            assert!(is_cached(cache, other));
+            assert!(is_cached(cache, other));
+        }
+    }
+
     /// A read of the database takes time, and nothing stops the key from
     /// being written in the meantime. If that write were also committed and
     /// its entry evicted before the read comes back, the cache would have no
@@ -256,8 +267,10 @@ mod pinning {
         assert_eq!(read(&cache, 1, Some(10)).await.0, Some(10));
 
         // Nothing is reading the key anymore, so the cache does not have to
-        // keep the entry any longer.
-        press(&cache, 2_000..3_000);
+        // keep the entry any longer. The entry was read while the cache had
+        // to keep it, which makes it an entry in use like any other: it goes
+        // when entries in use need the room.
+        press_with_entries_in_use(&cache, 2_000..3_000);
 
         assert!(!is_cached(&cache, 1));
         assert_eq!(read(&cache, 1, Some(10)).await, (Some(10), true));

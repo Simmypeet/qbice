@@ -4,7 +4,7 @@
 //! trait using [`RocksDB`] as the underlying storage engine. It supports
 //! dynamic column families, efficient buffer reuse, and full thread safety.
 
-use std::{path::Path, sync::Arc};
+use std::{ops::Range, path::Path, sync::Arc};
 
 use dashmap::DashMap;
 use ouroboros::self_referencing;
@@ -378,72 +378,6 @@ impl Impl {
         }
     }
 
-    /// The operation that stores a value of a wide column.
-    fn put_operation<W: WideColumn, C: WideColumnValue<W>>(
-        &self,
-        key: &W::Key,
-        value: &C,
-    ) -> Operation {
-        let mut key_buffer = Vec::new();
-        let mut value_buffer = Vec::new();
-
-        self.encode_wide_column_key::<W, C>(key, &mut key_buffer);
-        self.encode_value(value, &mut value_buffer);
-
-        Operation {
-            cf: CfIdentifier {
-                stable_type_id: W::STABLE_TYPE_ID,
-                kind: ColumnKind::WideColumn,
-            },
-            key: key_buffer,
-            value: Some(value_buffer),
-        }
-    }
-
-    /// The operation that deletes a value of a wide column.
-    fn delete_operation<W: WideColumn, C: WideColumnValue<W>>(
-        &self,
-        key: &W::Key,
-    ) -> Operation {
-        let mut key_buffer = Vec::new();
-
-        self.encode_wide_column_key::<W, C>(key, &mut key_buffer);
-
-        Operation {
-            cf: CfIdentifier {
-                stable_type_id: W::STABLE_TYPE_ID,
-                kind: ColumnKind::WideColumn,
-            },
-            key: key_buffer,
-            value: None,
-        }
-    }
-
-    /// The operation that makes `element` a member of the set of `key`, or
-    /// that makes it not a member anymore.
-    fn member_operation<C: KeyOfSetColumn>(
-        &self,
-        key: &C::Key,
-        element: &C::Element,
-        member: bool,
-    ) -> Operation {
-        let mut buffer = Vec::new();
-
-        self.encode_value_length_prefixed(key, &mut buffer);
-        self.encode_value(element, &mut buffer);
-
-        Operation {
-            cf: CfIdentifier {
-                stable_type_id: C::STABLE_TYPE_ID,
-                kind: ColumnKind::KeyOfSet,
-            },
-            key: buffer,
-            // For set membership, the value is empty (presence indicates
-            // membership)
-            value: member.then(Vec::new),
-        }
-    }
-
     fn apply_optimized_opts(opts: &mut Options) {
         // 1. Switch to LZ4 (Faster decompression)
         opts.set_compression_type(DBCompressionType::Lz4);
@@ -539,8 +473,9 @@ pub struct RocksDBWriteBatch {
     db: Arc<Impl>,
 
     /// The operations added since the batch was last prepared, in the order
-    /// they were added.
-    operations: Vec<Operation>,
+    /// they were added: the chunks one after another, and the operations of
+    /// a chunk one after another.
+    chunks: Vec<Chunk>,
 
     /// The operations that have been prepared, the way `RocksDB` takes them.
     batch: rust_rocksdb::WriteBatch,
@@ -566,15 +501,25 @@ impl RocksDBWriteBatch {
     fn new(db: Arc<Impl>) -> Self {
         Self {
             db,
-            operations: Vec::new(),
+            chunks: Vec::new(),
             batch: rust_rocksdb::WriteBatch::default(),
             estimated_size: 0,
         }
     }
 
-    fn push(&mut self, operation: Operation) {
-        self.estimated_size += operation.size();
-        self.operations.push(operation);
+    /// Adds operations to the batch directly. They go to the end of the last
+    /// chunk, which is after every operation that the batch already holds.
+    fn write(&mut self, write: impl FnOnce(&mut Chunk, &Impl)) {
+        if self.chunks.is_empty() {
+            self.chunks.push(Chunk::default());
+        }
+
+        let chunk = self.chunks.last_mut().expect("has just been checked");
+        let size_before = chunk.bytes.len();
+
+        write(chunk, &self.db);
+
+        self.estimated_size += chunk.bytes.len() - size_before;
     }
 }
 
@@ -584,13 +529,18 @@ const PREFERRED_WRITE_BATCH_SIZE: usize = 16 * 1024 * 1024; // 16MB
 /// write batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Position<'a> {
-    /// A number that the operations of one column family share.
+    /// The index of the column family in the list that comes with the
+    /// positions.
     column_family: usize,
 
     key: &'a [u8],
 
     /// The index of the operation in the order the operations were added.
     index: usize,
+
+    /// The value to store under the key, or `None` to delete the key. No two
+    /// operations have the same index, so this never decides the order.
+    value: Option<&'a [u8]>,
 }
 
 /// Returns the order in which `RocksDB` is given the operations of a write
@@ -607,13 +557,21 @@ struct Position<'a> {
 /// Operations on the same key keep the order they were added in. That is the
 /// order `RocksDB` applies them in, so the last one still decides what the key
 /// holds.
-fn sorted_positions(operations: &[Operation]) -> Vec<Position<'_>> {
+///
+/// Returns the column families that are written to, and the operations with
+/// the index of their column family in that list.
+fn sorted_positions(
+    chunks: &[Chunk],
+) -> (Vec<CfIdentifier>, Vec<Position<'_>>) {
     let mut column_families = Vec::new();
 
-    let mut positions = operations
+    let mut positions = chunks
         .iter()
+        .flat_map(|chunk| {
+            chunk.operations.iter().map(move |operation| (chunk, operation))
+        })
         .enumerate()
-        .map(|(index, operation)| {
+        .map(|(index, (chunk, operation))| {
             let column_family = column_families
                 .iter()
                 .position(|cf| *cf == operation.cf)
@@ -622,14 +580,19 @@ fn sorted_positions(operations: &[Operation]) -> Vec<Position<'_>> {
                     column_families.len() - 1
                 });
 
-            Position { column_family, key: &operation.key, index }
+            Position {
+                column_family,
+                key: &chunk.bytes[operation.key.clone()],
+                index,
+                value: operation.value.clone().map(|value| &chunk.bytes[value]),
+            }
         })
         .collect::<Vec<_>>();
 
     // no two positions are equal, so an unstable sort has one result
     positions.sort_unstable();
 
-    positions
+    (column_families, positions)
 }
 
 impl WriteBatch for RocksDBWriteBatch {
@@ -640,15 +603,11 @@ impl WriteBatch for RocksDBWriteBatch {
         key: &W::Key,
         value: &C,
     ) {
-        let operation = self.db.put_operation::<W, C>(key, value);
-
-        self.push(operation);
+        self.write(|chunk, db| chunk.put::<W, C>(db, key, value));
     }
 
     fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key) {
-        let operation = self.db.delete_operation::<W, C>(key);
-
-        self.push(operation);
+        self.write(|chunk, db| chunk.delete::<W, C>(db, key));
     }
 
     fn insert_member<C: KeyOfSetColumn>(
@@ -656,9 +615,7 @@ impl WriteBatch for RocksDBWriteBatch {
         key: &C::Key,
         value: &C::Element,
     ) {
-        let operation = self.db.member_operation::<C>(key, value, true);
-
-        self.push(operation);
+        self.write(|chunk, db| chunk.set_member::<C>(db, key, value, true));
     }
 
     fn delete_member<C: KeyOfSetColumn>(
@@ -666,40 +623,51 @@ impl WriteBatch for RocksDBWriteBatch {
         key: &C::Key,
         value: &C::Element,
     ) {
-        let operation = self.db.member_operation::<C>(key, value, false);
-
-        self.push(operation);
+        self.write(|chunk, db| chunk.set_member::<C>(db, key, value, false));
     }
 
     fn consume_serialization_buffer(
         &mut self,
-        mut buffer: Self::SerializationBuffer,
+        buffer: Self::SerializationBuffer,
     ) {
-        self.estimated_size += buffer.size;
-        self.operations.append(&mut buffer.operations);
+        if buffer.chunk.operations.is_empty() {
+            return;
+        }
+
+        self.estimated_size += buffer.chunk.bytes.len();
+        self.chunks.push(buffer.chunk);
     }
 
     fn prepare(&mut self) {
-        let operations = std::mem::take(&mut self.operations);
-        let positions = sorted_positions(&operations);
+        let chunks = std::mem::take(&mut self.chunks);
+        let (column_families, positions) = sorted_positions(&chunks);
 
         for column_family in
             positions.chunk_by(|a, b| a.column_family == b.column_family)
         {
-            let cf = operations[column_family[0].index].cf;
+            let cf = column_families[column_family[0].column_family];
             let cf_handle = self.db.get_or_create_cf_from_cf_identifier(
                 cf.stable_type_id,
                 cf.kind,
             );
 
-            for position in column_family {
-                let operation = &operations[position.index];
+            for (index, position) in column_family.iter().enumerate() {
+                // An operation that is followed by another one on the same
+                // key decides nothing about what the key holds, so only the
+                // last of them is written. A query that is computed again
+                // removes what it wrote before and writes most of it anew.
+                if column_family
+                    .get(index + 1)
+                    .is_some_and(|next| next.key == position.key)
+                {
+                    continue;
+                }
 
-                match &operation.value {
+                match position.value {
                     Some(value) => {
-                        self.batch.put_cf(&cf_handle, &operation.key, value);
+                        self.batch.put_cf(&cf_handle, position.key, value);
                     }
-                    None => self.batch.delete_cf(&cf_handle, &operation.key),
+                    None => self.batch.delete_cf(&cf_handle, position.key),
                 }
             }
         }
@@ -801,8 +769,7 @@ impl KvDatabase for RocksDB {
 
     fn serialization_buffer(&self) -> Self::SerializationBuffer {
         RocksDBSerializationBuffer {
-            operations: Vec::new(),
-            size: 0,
+            chunk: Chunk::default(),
             db: self.0.clone(),
         }
     }
@@ -872,38 +839,113 @@ struct CfIdentifier {
     kind: ColumnKind,
 }
 
-/// A write to one key of a column family, serialized.
+/// A write to one key of a column family. The key and the value are in the
+/// bytes of the [`Chunk`] that the operation belongs to.
 #[derive(Debug)]
 struct Operation {
     cf: CfIdentifier,
-    key: Vec<u8>,
 
-    /// The value to store under the key, or `None` to delete the key.
-    value: Option<Vec<u8>>,
+    /// Where the key is.
+    key: Range<usize>,
+
+    /// Where the value to store under the key is, or `None` to delete the
+    /// key.
+    value: Option<Range<usize>>,
 }
 
-impl Operation {
-    fn size(&self) -> usize {
-        self.key.len() + self.value.as_ref().map_or(0, Vec::len)
+/// Operations that were serialized one after another, in the order they were
+/// added.
+///
+/// The keys and the values of all of them are in one buffer. An operation
+/// with a buffer of its own for its key and another for its value costs two
+/// allocations, and more for each time one of them outgrows what it was
+/// given, and that for every one of the ten or so operations that a computed
+/// query writes.
+#[derive(Debug, Default)]
+struct Chunk {
+    /// The keys and the values of the operations, one after another.
+    bytes: Vec<u8>,
+
+    operations: Vec<Operation>,
+}
+
+impl Chunk {
+    /// Adds the operation that stores a value of a wide column.
+    fn put<W: WideColumn, C: WideColumnValue<W>>(
+        &mut self,
+        db: &Impl,
+        key: &W::Key,
+        value: &C,
+    ) {
+        let start = self.bytes.len();
+        db.encode_wide_column_key::<W, C>(key, &mut self.bytes);
+
+        let key_end = self.bytes.len();
+        db.encode_value(value, &mut self.bytes);
+
+        self.operations.push(Operation {
+            cf: CfIdentifier {
+                stable_type_id: W::STABLE_TYPE_ID,
+                kind: ColumnKind::WideColumn,
+            },
+            key: start..key_end,
+            value: Some(key_end..self.bytes.len()),
+        });
+    }
+
+    /// Adds the operation that deletes a value of a wide column.
+    fn delete<W: WideColumn, C: WideColumnValue<W>>(
+        &mut self,
+        db: &Impl,
+        key: &W::Key,
+    ) {
+        let start = self.bytes.len();
+        db.encode_wide_column_key::<W, C>(key, &mut self.bytes);
+
+        self.operations.push(Operation {
+            cf: CfIdentifier {
+                stable_type_id: W::STABLE_TYPE_ID,
+                kind: ColumnKind::WideColumn,
+            },
+            key: start..self.bytes.len(),
+            value: None,
+        });
+    }
+
+    /// Adds the operation that makes `element` a member of the set of `key`,
+    /// or that makes it not a member anymore.
+    fn set_member<C: KeyOfSetColumn>(
+        &mut self,
+        db: &Impl,
+        key: &C::Key,
+        element: &C::Element,
+        member: bool,
+    ) {
+        let start = self.bytes.len();
+        db.encode_value_length_prefixed(key, &mut self.bytes);
+        db.encode_value(element, &mut self.bytes);
+
+        let end = self.bytes.len();
+
+        self.operations.push(Operation {
+            cf: CfIdentifier {
+                stable_type_id: C::STABLE_TYPE_ID,
+                kind: ColumnKind::KeyOfSet,
+            },
+            key: start..end,
+            // For set membership, the value is empty (presence indicates
+            // membership)
+            value: member.then_some(end..end),
+        });
     }
 }
 
 /// Serialization buffer for batching RocksDB operations.
 #[derive(Debug)]
 pub struct RocksDBSerializationBuffer {
-    operations: Vec<Operation>,
-
-    /// Estimated size of the operations.
-    size: usize,
+    chunk: Chunk,
 
     db: Arc<Impl>,
-}
-
-impl RocksDBSerializationBuffer {
-    fn push(&mut self, operation: Operation) {
-        self.size += operation.size();
-        self.operations.push(operation);
-    }
 }
 
 impl SerializationBuffer for RocksDBSerializationBuffer {
@@ -912,15 +954,11 @@ impl SerializationBuffer for RocksDBSerializationBuffer {
         key: &W::Key,
         value: &C,
     ) {
-        let operation = self.db.put_operation::<W, C>(key, value);
-
-        self.push(operation);
+        self.chunk.put::<W, C>(&self.db, key, value);
     }
 
     fn delete<W: WideColumn, C: WideColumnValue<W>>(&mut self, key: &W::Key) {
-        let operation = self.db.delete_operation::<W, C>(key);
-
-        self.push(operation);
+        self.chunk.delete::<W, C>(&self.db, key);
     }
 
     fn insert_member<C: KeyOfSetColumn>(
@@ -928,9 +966,7 @@ impl SerializationBuffer for RocksDBSerializationBuffer {
         key: &C::Key,
         value: &C::Element,
     ) {
-        let operation = self.db.member_operation::<C>(key, value, true);
-
-        self.push(operation);
+        self.chunk.set_member::<C>(&self.db, key, value, true);
     }
 
     fn delete_member<C: KeyOfSetColumn>(
@@ -938,10 +974,10 @@ impl SerializationBuffer for RocksDBSerializationBuffer {
         key: &C::Key,
         value: &C::Element,
     ) {
-        let operation = self.db.member_operation::<C>(key, value, false);
-
-        self.push(operation);
+        self.chunk.set_member::<C>(&self.db, key, value, false);
     }
+
+    fn size(&self) -> usize { self.chunk.bytes.len() }
 }
 
 #[cfg(test)]

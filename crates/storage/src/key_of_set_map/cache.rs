@@ -54,9 +54,9 @@ use fxhash::FxBuildHasher;
 use crate::{
     key_of_set_map::{ConcurrentSet, KeyOfSetMap},
     kv_database::{KeyOfSetColumn, KvDatabase},
+    s3_fifo::{self, LifecycleListener, S3Fifo},
     sharded::default_shard_amount,
     single_flight,
-    tiny_lfu::{self, LifecycleListener, TinyLFU},
     write_manager::write_behind::{self, CommittedEpochs, Epoch, Operation},
 };
 
@@ -343,7 +343,7 @@ struct Repr<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
 {
     /// A set is read under the shared lock of its entry and changed under
     /// the exclusive one.
-    sets: TinyLFU<K::Key, KeySet<K::Element, C>, Irreplaceable>,
+    sets: S3Fifo<K::Key, KeySet<K::Element, C>, Irreplaceable>,
 
     /// Makes sure that a set is loaded by one task at a time.
     single_flight: single_flight::SingleFlight<K::Key>,
@@ -362,10 +362,8 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
         committed: CommittedEpochs,
     ) -> Self {
         Self {
-            sets: TinyLFU::with_lifecycle_listener(
+            sets: S3Fifo::with_lifecycle_listener(
                 cap as usize,
-                tiny_lfu::UnpinStrategy::Poll,
-                tiny_lfu::MaintenanceMode::Piggyback,
                 Irreplaceable { committed },
             ),
             single_flight: single_flight::SingleFlight::new(
@@ -376,7 +374,7 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
     }
 
     /// The committed epochs of the write manager that writes to the cache.
-    fn committed(&self) -> &CommittedEpochs {
+    const fn committed(&self) -> &CommittedEpochs {
         &self.sets.lifecycle_listener().committed
     }
 
@@ -392,14 +390,14 @@ impl<K: KeyOfSetColumn, C: ConcurrentSet<Element = K::Element> + 'static>
         epoch: Epoch,
     ) {
         self.sets.entry(key, |entry| match entry {
-            tiny_lfu::Entry::Vacant(vacant) => {
+            s3_fifo::Entry::Vacant(vacant) => {
                 let mut set = KeySet::new();
                 set.stage(element, operation, epoch);
 
                 vacant.insert(set);
             }
 
-            tiny_lfu::Entry::Occupied(mut occupied) => {
+            s3_fifo::Entry::Occupied(mut occupied) => {
                 let set = occupied.get_mut();
                 set.stage(element, operation, epoch);
 
@@ -464,11 +462,7 @@ impl<
         element: <K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
-        write_batch.put_set::<K>(
-            key.clone(),
-            element.clone(),
-            Operation::Insert,
-        );
+        write_batch.put_set::<K>(&key, &element, Operation::Insert);
 
         self.repr.stage(key, element, Operation::Insert, write_batch.epoch());
     }
@@ -479,11 +473,7 @@ impl<
         element: &<K as KeyOfSetColumn>::Element,
         write_batch: &mut Self::WriteBatch,
     ) {
-        write_batch.put_set::<K>(
-            key.clone(),
-            element.clone(),
-            Operation::Remove,
-        );
+        write_batch.put_set::<K>(key, element, Operation::Remove);
 
         self.repr.stage(
             key.clone(),
@@ -531,7 +521,7 @@ impl<
     /// Returns what the set reads as if it turns out not to need loading.
     fn start_load(&self, key: &K::Key) -> Option<Read<K::Element>> {
         self.repr.sets.entry(key.clone(), |entry| match entry {
-            tiny_lfu::Entry::Vacant(vacant) => {
+            s3_fifo::Entry::Vacant(vacant) => {
                 let mut set = KeySet::new();
                 set.stored = Stored::Loading;
 
@@ -540,7 +530,7 @@ impl<
                 None
             }
 
-            tiny_lfu::Entry::Occupied(mut occupied) => {
+            s3_fifo::Entry::Occupied(mut occupied) => {
                 let set = occupied.get_mut();
                 let read = set.read();
 
@@ -580,7 +570,7 @@ impl<
         too_large: bool,
     ) -> Read<K::Element> {
         self.repr.sets.entry(key.clone(), |entry| {
-            let tiny_lfu::Entry::Occupied(mut occupied) = entry else {
+            let s3_fifo::Entry::Occupied(mut occupied) = entry else {
                 panic!("the entry should've been pinned and not evicted");
             };
 

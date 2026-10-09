@@ -70,8 +70,7 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         value: V,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        write_transaction
-            .put_wide_column::<K, V>(key.clone(), Some(value.clone()));
+        write_transaction.put_wide_column::<K, V>(&key, Some(&value));
 
         let cache_key = (key, std::any::TypeId::of::<V>());
         self.cache.insert(
@@ -86,7 +85,7 @@ impl<K: WideColumn, Db: KvDatabase> DynamicMap<K> for CacheDynamicMap<K, Db> {
         key: &K::Key,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        write_transaction.put_wide_column::<K, V>(key.clone(), None);
+        write_transaction.put_wide_column::<K, V>(key, None);
 
         let cache_key = (key.clone(), std::any::TypeId::of::<V>());
         self.cache.remove(&cache_key, write_transaction.epoch());
