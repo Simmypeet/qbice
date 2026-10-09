@@ -261,6 +261,23 @@ impl<Db: KvDatabase> WriteBatch<Db> {
 /// a buffer that is larger than the limit waits until it has been committed.
 const MAX_UNCOMMITTED_BYTES: usize = 1024 * 1024 * 1024;
 
+/// How long the batch thread sleeps when it finds nothing submitted, before
+/// it looks again.
+///
+/// The batch thread does not wait for a write buffer the way a receiver of a
+/// channel usually does. A thread that waits has to be woken by whoever
+/// submits, with a system call and a lock that all the submitters share, and
+/// a batch thread that keeps up with the submitters goes back to waiting
+/// after every write buffer. Nothing needs the write buffers to be collected
+/// as they arrive: they are handed on once enough of them have come together.
+const POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_micros(500);
+
+/// The number of times in a row the batch thread finds nothing submitted
+/// before it waits to be woken instead, so that a writer nobody writes to
+/// does not keep waking up.
+const MAX_IDLE_POLLS: usize = 20;
+
 /// How far the database is behind what has been submitted.
 ///
 /// A write buffer is counted from the moment it is submitted until it has
@@ -763,7 +780,38 @@ impl<Db: KvDatabase> WriteBehind<Db> {
             bytes: 0,
         };
 
-        while let Ok(mut task) = receiver.recv() {
+        // The number of times in a row that nothing had been submitted when
+        // the thread looked.
+        let mut idle_polls = 0;
+
+        loop {
+            let mut task = match receiver.try_recv() {
+                Ok(task) => task,
+
+                Err(crossbeam_channel::TryRecvError::Empty)
+                    if idle_polls < MAX_IDLE_POLLS =>
+                {
+                    idle_polls += 1;
+                    thread::sleep(POLL_INTERVAL);
+
+                    continue;
+                }
+
+                // nothing has been submitted for a while, so the thread
+                // sleeps until something is
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    let Ok(task) = receiver.recv() else {
+                        break;
+                    };
+
+                    task
+                }
+
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            };
+
+            idle_polls = 0;
+
             if task.epoch != current_batch.expected_epoch {
                 // The buffer cannot be committed before every buffer with an
                 // earlier epoch has been submitted. Nobody is to wait for
