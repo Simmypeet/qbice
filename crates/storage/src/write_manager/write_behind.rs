@@ -45,7 +45,7 @@ use std::{
     ops::Not,
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
 };
@@ -275,6 +275,15 @@ const MAX_UNCOMMITTED_BYTES: usize = 1024 * 1024 * 1024;
 /// before the one it waits for has been submitted, and whoever is going to
 /// submit that one may need one of the threads that would be waiting here in
 /// order to get that far.
+///
+/// # When a background thread dies
+///
+/// The count only goes down as long as the background threads are running.
+/// One of them that panics, like the commit thread on a write that the
+/// database refuses, takes the others with it, and nothing that is counted
+/// is ever committed. Whoever waits for that is told instead of being left
+/// waiting: the backlog is marked as failed, and every wait panics from then
+/// on.
 struct Backlog {
     /// The bytes of the write buffers that have been submitted and not
     /// committed yet, without the ones that are held back.
@@ -283,8 +292,24 @@ struct Backlog {
     /// The number of uncommitted bytes above which a submitter waits.
     limit: usize,
 
+    /// Whether a background thread has panicked, so that nothing more is
+    /// going to be committed.
+    failed: AtomicBool,
+
     lock: parking_lot::Mutex<()>,
     committed: parking_lot::Condvar,
+}
+
+/// Marks a [`Backlog`] as failed if it is dropped while its thread is
+/// panicking. Every background thread holds one for as long as it runs.
+struct FailOnPanic<'a>(&'a Backlog);
+
+impl Drop for FailOnPanic<'_> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            self.0.fail();
+        }
+    }
 }
 
 impl Backlog {
@@ -292,6 +317,7 @@ impl Backlog {
         Self {
             uncommitted: AtomicUsize::new(0),
             limit,
+            failed: AtomicBool::new(false),
             lock: parking_lot::Mutex::new(()),
             committed: parking_lot::Condvar::new(),
         }
@@ -317,7 +343,27 @@ impl Backlog {
         self.committed.notify_all();
     }
 
+    /// Returns what marks the backlog as failed if the calling thread
+    /// panics before it is dropped.
+    const fn fail_on_panic(&self) -> FailOnPanic<'_> { FailOnPanic(self) }
+
+    /// Records that nothing more is going to be committed, and wakes whoever
+    /// is waiting for the count to go down.
+    fn fail(&self) {
+        self.failed.store(true, Ordering::SeqCst);
+
+        // as in `remove`, so that the notification is not missed
+        drop(self.lock.lock());
+
+        self.committed.notify_all();
+    }
+
     /// Waits until the database is no further behind than the limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a background thread has panicked: what this would wait for
+    /// is not going to happen.
     fn wait(&self) {
         if self.uncommitted.load(Ordering::SeqCst) <= self.limit {
             return;
@@ -326,6 +372,12 @@ impl Backlog {
         let mut guard = self.lock.lock();
 
         while self.uncommitted.load(Ordering::SeqCst) > self.limit {
+            assert!(
+                !self.failed.load(Ordering::SeqCst),
+                "a background thread of the write-behind has panicked, so \
+                 the writes that were submitted are not going to be committed"
+            );
+
             self.committed.wait(&mut guard);
         }
     }
@@ -585,6 +637,8 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                 thread::Builder::new()
                     .name("bg_writer_batch".to_string())
                     .spawn(move || {
+                        let _fail_on_panic = backlog.fail_on_panic();
+
                         Self::batch_worker(
                             &batch_receiver,
                             prepare_sender,
@@ -595,14 +649,18 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                     .unwrap()
             }),
 
-            prepare_handle: Some(
+            prepare_handle: Some({
+                let backlog = backlog.clone();
+
                 thread::Builder::new()
                     .name("bg_writer_prepare".to_string())
                     .spawn(move || {
+                        let _fail_on_panic = backlog.fail_on_panic();
+
                         Self::prepare_worker(&prepare_receiver, &commit_sender);
                     })
-                    .unwrap(),
-            ),
+                    .unwrap()
+            }),
 
             commit_handle: Some({
                 let committed = committed.clone();
@@ -611,6 +669,8 @@ impl<Db: KvDatabase> WriteBehind<Db> {
                 thread::Builder::new()
                     .name("bg_writer_commit".to_string())
                     .spawn(move || {
+                        let _fail_on_panic = backlog.fail_on_panic();
+
                         Self::commit_worker(
                             &commit_receiver,
                             &committed,
@@ -653,6 +713,12 @@ impl<Db: KvDatabase> WriteBehind<Db> {
     /// submitted. What it waits for is writes that are ready to be committed
     /// being committed, which the background threads do on their own, so the
     /// wait ends no matter what the caller or anybody else holds on to.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a background thread has panicked, which is what a write
+    /// that the database refuses makes the commit thread do. Nothing that is
+    /// submitted is committed anymore after that.
     pub fn submit_write_batch(&self, write_buffer: WriteBatch<Db>) {
         let WriteBatch { buffer, epoch, unsubmitted } = write_buffer;
 

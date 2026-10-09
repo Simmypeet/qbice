@@ -43,6 +43,9 @@ impl WideColumnValue<Column> for u64 {
 struct SlowDb {
     keys: Arc<Mutex<Vec<u64>>>,
     gate: Arc<Gate>,
+
+    /// Whether the database refuses what it is asked to commit.
+    broken: Arc<AtomicBool>,
 }
 
 /// Lets the commits of a [`SlowDb`] through, unless it is closed.
@@ -130,6 +133,11 @@ impl WriteBatch for SlowBatch {
                 self.db.gate.opened.wait(&mut closed);
             }
         }
+
+        assert!(
+            !self.db.broken.load(Ordering::SeqCst),
+            "the database refuses the write"
+        );
 
         std::thread::sleep(Duration::from_millis(2));
 
@@ -338,4 +346,59 @@ fn write_batch_dropped_without_being_submitted_panics() {
     let writer = WriteBehind::new(&db, 16);
 
     drop(writer.new_write_batch());
+}
+
+/// A write that the database refuses kills the commit thread, and nothing is
+/// committed after that. A submitter that waits for the database to catch up
+/// must be told, instead of waiting for what is never going to happen.
+#[test]
+fn submitter_that_waits_panics_once_the_commit_thread_has_died() {
+    const LIMIT: usize = 8;
+
+    let db = SlowDb::default();
+    db.hold();
+
+    let writer = WriteBehind::with_backlog_limit(&db, 16, LIMIT);
+    let (done_sender, done_receiver) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let writer = &writer;
+
+        scope.spawn(move || {
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    loop {
+                        let mut batch = writer.new_write_batch();
+                        let epoch = batch.epoch();
+
+                        batch.put_wide_column::<Column, u64>(
+                            &epoch.0,
+                            Some(&epoch.0),
+                        );
+                        writer.submit_write_batch(batch);
+                    }
+                }));
+
+            done_sender.send(outcome.is_err()).unwrap();
+        });
+
+        // the database commits nothing, so the submitter ends up waiting
+        while writer.backlog.uncommitted.load(Ordering::SeqCst) <= LIMIT {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+
+        db.broken.store(true, Ordering::SeqCst);
+        db.release();
+
+        let panicked = done_receiver.recv_timeout(Duration::from_secs(5));
+
+        if panicked.is_err() {
+            // lets the submitter out, so that the test fails instead of
+            // hanging
+            writer.backlog.fail();
+        }
+
+        assert_eq!(panicked, Ok(true), "the submitter is still waiting");
+    });
 }
