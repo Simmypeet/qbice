@@ -88,7 +88,7 @@ fn roundtrip_values_unordered<C: Debug + IntoIterator + Encode + Decode>(
 {
     let plugin = Plugin::new();
     let bytes = encode(&value, &plugin).unwrap();
-    assert!(!bytes.is_empty()); // Container should always produce bytes
+    assert_ne!(bytes, b""); // Container should always produce bytes
     let decoded: C = decode(&bytes, &plugin).unwrap();
     let mut value_as_vec: Vec<C::Item> = value.into_iter().collect();
     value_as_vec.sort();
@@ -107,7 +107,7 @@ fn roundtrip_values<C: Debug + IntoIterator + Encode + Decode + PartialEq>(
 {
     let plugin = Plugin::new();
     let bytes = encode(&value, &plugin).unwrap();
-    assert!(!bytes.is_empty()); // Container should always produce bytes
+    assert_ne!(bytes, b""); // Container should always produce bytes
     let decoded: C = decode(&bytes, &plugin).unwrap();
     assert_eq!(value, decoded);
 }
@@ -331,7 +331,7 @@ fn derive_unit_struct_roundtrip() {
     let value = UnitStruct;
 
     let bytes = encode(&value, &plugin).unwrap();
-    assert!(bytes.is_empty()); // Unit struct should produce no bytes
+    assert_eq!(bytes, b""); // Unit struct should produce no bytes
     let decoded: UnitStruct = decode(&bytes, &plugin).unwrap();
     assert_eq!(value, decoded);
 }
@@ -365,7 +365,7 @@ fn derive_struct_with_skip() {
     let decoded: StructWithSkip = decode(&bytes, &plugin).unwrap();
 
     assert_eq!(decoded.value, 123);
-    assert!(decoded.skipped.is_empty()); // Should be Default::default()
+    assert_eq!(decoded.skipped, b""); // Should be Default::default()
 }
 
 #[test]
@@ -422,7 +422,7 @@ fn derive_enum_with_skip() {
     match decoded {
         EnumWithSkip::Variant { value, skipped } => {
             assert_eq!(value, 999);
-            assert!(skipped.is_empty()); // Should be Default::default()
+            assert_eq!(skipped, ""); // Should be Default::default()
         }
     }
 }

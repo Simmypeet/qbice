@@ -76,7 +76,8 @@ broken_intra_doc_links = "deny"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 # this generates errors on enum-as-inner in nightly toolchain
-double-parens = "allow"
+double_parens = "allow"
+unused_async_trait_impl = "allow"
 missing_panics_doc = "allow"
 missing_errors_doc = "allow"
 doc_markdown = "allow"

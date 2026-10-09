@@ -826,7 +826,7 @@ fn interned_ord_compares_values() {
 
     assert!(a < b);
     assert!(b > a);
-    assert!(b == c);
+    assert_eq!(b, c);
     assert!(b <= c);
     assert!(b >= c);
 }
