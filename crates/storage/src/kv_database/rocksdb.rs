@@ -153,8 +153,7 @@ impl RocksDB {
         plugin: Plugin,
     ) -> Result<Self, rust_rocksdb::Error> {
         let opts = configure_rocksdb_for_small_kv_high_writes();
-        let block_cache =
-            Cache::new_hyper_clock_cache(BLOCK_CACHE_CAPACITY, 0);
+        let block_cache = Cache::new_hyper_clock_cache(BLOCK_CACHE_CAPACITY, 0);
 
         // List existing column families
         let existing_cfs =
@@ -266,9 +265,8 @@ impl Impl {
                     cf
                 } else {
                     // proceed to create new column family
-                    let Ok(()) = self
-                        .db
-                        .create_cf(&cf_name, &self.get_cf_options(kind))
+                    let Ok(()) =
+                        self.db.create_cf(&cf_name, &self.get_cf_options(kind))
                     else {
                         panic!("failed to create column family");
                     };
@@ -394,8 +392,8 @@ impl Impl {
             DBCompressionType::Lz4,  // L6
         ]);
 
-        // 3. Bloom filter over the memtable, so that looking up a key that
-        //    was never written does not have to search the skiplist.
+        // 3. Bloom filter over the memtable, so that looking up a key that was
+        //    never written does not have to search the skiplist.
         opts.set_memtable_whole_key_filtering(true);
         opts.set_memtable_prefix_bloom_ratio(0.02);
     }

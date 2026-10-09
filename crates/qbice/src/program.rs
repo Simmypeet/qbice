@@ -120,10 +120,9 @@ impl<C: Config> Engine<C> {
     ///
     /// # Arguments
     ///
-    /// * `registrations` - A `DistributedSlice` containing all
-    ///   [`Registration`] entries to process. This is typically a static slice
-    ///   populated using `#[distributed_slice]` attributes throughout the
-    ///   codebase.
+    /// * `registrations` - A `DistributedSlice` containing all [`Registration`]
+    ///   entries to process. This is typically a static slice populated using
+    ///   `#[distributed_slice]` attributes throughout the codebase.
     pub fn register_program<'x>(
         &mut self,
         registrations: impl IntoIterator<Item = &'x Registration<C>>,

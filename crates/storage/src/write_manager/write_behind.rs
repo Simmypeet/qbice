@@ -200,9 +200,8 @@ impl Drop for Unsubmitted {
         }
 
         panic!(
-            "the write batch of epoch {} was dropped without being \
-             submitted, which keeps every write batch after it from being \
-             committed",
+            "the write batch of epoch {} was dropped without being submitted, \
+             which keeps every write batch after it from being committed",
             self.0.0
         );
     }
@@ -374,8 +373,8 @@ impl Backlog {
         while self.uncommitted.load(Ordering::SeqCst) > self.limit {
             assert!(
                 !self.failed.load(Ordering::SeqCst),
-                "a background thread of the write-behind has panicked, so \
-                 the writes that were submitted are not going to be committed"
+                "a background thread of the write-behind has panicked, so the \
+                 writes that were submitted are not going to be committed"
             );
 
             self.committed.wait(&mut guard);
@@ -419,8 +418,8 @@ impl Backlog {
 ///    added
 /// 3. **Submission**: Write batch is handed to the batch thread. Whoever
 ///    submits waits here if the database is too far behind
-/// 4. **Batching**: Batch thread collects the write batches in epoch order
-///    into database write batches
+/// 4. **Batching**: Batch thread collects the write batches in epoch order into
+///    database write batches
 /// 5. **Preparation**: Prepare thread gets a database write batch ready to be
 ///    written
 /// 6. **Commit**: Commit thread applies the database write batches in that
@@ -434,8 +433,8 @@ impl Backlog {
 /// they are created:
 /// - Ensures writes are committed in the order of their epochs, in whatever
 ///   order the write batches are submitted
-/// - A write batch waits until every earlier epoch has been submitted, so
-///   every write batch has to be submitted (see [`WriteBatch`])
+/// - A write batch waits until every earlier epoch has been submitted, so every
+///   write batch has to be submitted (see [`WriteBatch`])
 /// - Critical for maintaining cache coherency
 ///
 /// # Example

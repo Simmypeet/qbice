@@ -644,7 +644,10 @@ impl<T: Decode> Decode for Vec<T> {
 }
 
 #[cfg(feature = "smallvec")]
-impl<T: Array> Decode for SmallVec<T> where T::Item: Decode {
+impl<T: Array> Decode for SmallVec<T>
+where
+    T::Item: Decode,
+{
     fn decode<D: Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &Plugin,
@@ -669,8 +672,9 @@ where
         _plugin: &Plugin,
         _session: &mut Session,
     ) -> io::Result<Self> {
-        use bitvec::mem::bits_of;
         use std::io::Write;
+
+        use bitvec::mem::bits_of;
 
         let len = decoder.read_usize()?;
         let number_of_bytes = len.div_ceil(bits_of::<u8>());
@@ -679,7 +683,8 @@ where
         let written = vec.write(byte_vec.as_slice())?;
         assert!(
             written == number_of_bytes,
-            "Should write the same number of bytes ({written}) as had been stored ({number_of_bytes})"
+            "Should write the same number of bytes ({written}) as had been \
+             stored ({number_of_bytes})"
         );
         vec.truncate(len); // Ensure trailing bits aren't added.
         Ok(vec)

@@ -12,11 +12,11 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashMap;
-#[cfg(feature="smallvec")]
-use smallvec::{Array, SmallVec};
-#[cfg(feature="bitvec")]
+#[cfg(feature = "bitvec")]
 use bitvec::prelude::*;
+use dashmap::DashMap;
+#[cfg(feature = "smallvec")]
+use smallvec::{Array, SmallVec};
 
 use crate::{plugin::Plugin, session::Session};
 
@@ -535,8 +535,11 @@ impl<T: Encode> Encode for Vec<T> {
     }
 }
 
-#[cfg(feature="smallvec")]
-impl<T: Array> Encode for SmallVec<T> where T::Item: Encode {
+#[cfg(feature = "smallvec")]
+impl<T: Array> Encode for SmallVec<T>
+where
+    T::Item: Encode,
+{
     fn encode<E: Encoder + ?Sized>(
         &self,
         encoder: &mut E,
@@ -551,7 +554,7 @@ impl<T: Array> Encode for SmallVec<T> where T::Item: Encode {
     }
 }
 
-#[cfg(feature="bitvec")]
+#[cfg(feature = "bitvec")]
 impl<T: Encode + BitStore, O: BitOrder> Encode for BitVec<T, O> {
     fn encode<E: Encoder + ?Sized>(
         &self,
