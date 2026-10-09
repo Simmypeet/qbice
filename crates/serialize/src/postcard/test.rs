@@ -99,6 +99,7 @@ fn roundtrip_values_unordered<C: Debug + IntoIterator + Encode + Decode>(
     // `PartialEq`
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn roundtrip_values<C: Debug + IntoIterator + Encode + Decode + PartialEq>(
     value: C,
 ) where
@@ -241,6 +242,7 @@ fn dashmap_empty_roundtrip() {
 }
 
 #[test]
+#[allow(clippy::needless_collect)]
 fn dashmap_i32_to_str_roundtrip() {
     roundtrip_values_unordered::<DashMap<i32, String>>(
         [
