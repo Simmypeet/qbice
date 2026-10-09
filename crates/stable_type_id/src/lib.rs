@@ -1,15 +1,13 @@
 //! Contains the definition of the [`StableTypeID`] type and [`Identifiable`]
 //! trait.
 
+#[cfg(feature = "bitvec")]
+use bitvec::prelude::*;
 pub use qbice_identifiable_derive::Identifiable;
 use qbice_serialize::{Decode, Encode};
 pub use qbice_stable_hash::StableHash;
-
 #[cfg(feature = "smallvec")]
 use smallvec::{Array, SmallVec};
-
-#[cfg(feature = "bitvec")]
-use bitvec::prelude::*;
 
 /// A stable alternative to [`std::any::TypeId`] that is used to uniquely
 /// identify types in a way that is consistent across different runs of the
@@ -551,7 +549,9 @@ impl<T: Array + Identifiable> Identifiable for SmallVec<T> {
 }
 
 #[cfg(feature = "bitvec")]
-impl<T: BitStore + Identifiable, O: BitOrder + Identifiable> Identifiable for BitVec<T, O> {
+impl<T: BitStore + Identifiable, O: BitOrder + Identifiable> Identifiable
+    for BitVec<T, O>
+{
     const STABLE_TYPE_ID: StableTypeID = {
         let base = StableTypeID::from_unique_type_name("bitvec::BitVec");
         base.combine(T::STABLE_TYPE_ID).combine(O::STABLE_TYPE_ID)
@@ -560,12 +560,14 @@ impl<T: BitStore + Identifiable, O: BitOrder + Identifiable> Identifiable for Bi
 
 #[cfg(feature = "bitvec")]
 impl Identifiable for bitvec::order::Lsb0 {
-    const STABLE_TYPE_ID: StableTypeID = StableTypeID::from_unique_type_name("bitvec::order::Lsb0");
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("bitvec::order::Lsb0");
 }
 
 #[cfg(feature = "bitvec")]
 impl Identifiable for bitvec::order::Msb0 {
-    const STABLE_TYPE_ID: StableTypeID = StableTypeID::from_unique_type_name("bitvec::order::Msb0");
+    const STABLE_TYPE_ID: StableTypeID =
+        StableTypeID::from_unique_type_name("bitvec::order::Msb0");
 }
 
 impl Identifiable for str {

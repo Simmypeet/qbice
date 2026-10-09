@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// An in-memory implementation of [`SingleMap`] backed by a concurrent
-/// [`DashMap`].
+/// [`scc::HashMap`].
 ///
 /// This implementation stores all key-value pairs in memory and is suitable
 /// for testing, caching, or scenarios where persistence is not required.
@@ -18,7 +18,6 @@ use crate::{
 ///
 /// - `K`: The wide column type that defines the key type.
 /// - `V`: The value type to store.
-/// - `S`: The hash builder type for the underlying [`DashMap`].
 #[derive(Debug)]
 pub struct InMemorySingleMap<K: WideColumn, V> {
     map: scc::HashMap<K::Key, V, FxBuildHasher>,

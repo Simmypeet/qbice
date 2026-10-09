@@ -47,6 +47,12 @@ pub trait SerializationBuffer {
         key: &C::Key,
         value: &C::Element,
     );
+
+    /// Returns the number of bytes that the buffered operations take up.
+    ///
+    /// This is what the write-behind goes by to limit how much it holds in
+    /// memory before the database has caught up.
+    fn size(&self) -> usize;
 }
 
 /// A write batch for accumulating multiple write operations that are committed
@@ -115,6 +121,15 @@ pub trait WriteBatch {
         &mut self,
         buffer: Self::SerializationBuffer,
     );
+
+    /// Does the part of [`commit`](Self::commit) that does not write to the
+    /// database yet.
+    ///
+    /// Calling this is optional and changes nothing about what the batch
+    /// writes. It lets one thread get a batch ready while another thread is
+    /// still committing the batch before it. Operations may still be added to
+    /// the batch afterwards.
+    fn prepare(&mut self) {}
 
     /// Commits all pending write operations to the database.
     ///

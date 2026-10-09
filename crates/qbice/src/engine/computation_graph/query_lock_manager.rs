@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use qbice_storage::tiny_lfu::{LifecycleListener, TinyLFU};
+use qbice_storage::s3_fifo::{LifecycleListener, S3Fifo};
 use tokio::sync::RwLock;
 
 use crate::query::QueryID;
@@ -35,18 +35,14 @@ impl LifecycleListener<QueryID, OwnedLock> for ActiveLockLifecycleListener {
 /// - Shared locks: required for reading query data (e.g. reading a query value
 ///   for use in computing another query)
 pub struct QueryLockManager {
-    hot: TinyLFU<QueryID, OwnedLock, ActiveLockLifecycleListener>,
+    hot: S3Fifo<QueryID, OwnedLock, ActiveLockLifecycleListener>,
 }
 
 impl QueryLockManager {
     /// Create a new LockManager with the given capacity for the hot cache.
     #[allow(clippy::cast_possible_truncation)]
     pub fn new(capacity: u64) -> Self {
-        let cache = TinyLFU::new(
-            capacity as usize,
-            qbice_storage::tiny_lfu::UnpinStrategy::Poll,
-            qbice_storage::tiny_lfu::MaintenanceMode::Piggyback,
-        );
+        let cache = S3Fifo::new(capacity as usize);
 
         Self { hot: cache }
     }
@@ -61,11 +57,11 @@ impl QueryLockManager {
         let lock_instance = OwnedLock(Arc::new(RwLock::new(())));
 
         self.hot.entry(*query_id, |x| match x {
-            qbice_storage::tiny_lfu::Entry::Vacant(vacant_entry) => {
+            qbice_storage::s3_fifo::Entry::Vacant(vacant_entry) => {
                 vacant_entry.insert(lock_instance.clone());
                 lock_instance
             }
-            qbice_storage::tiny_lfu::Entry::Occupied(occupied_entry) => {
+            qbice_storage::s3_fifo::Entry::Occupied(occupied_entry) => {
                 occupied_entry.get().clone()
             }
         })

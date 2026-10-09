@@ -442,7 +442,11 @@ impl KvDatabase for Fjall {
     fn write_batch(&self) -> Self::WriteBatch { FjallWriteBatch::new(&self.0) }
 
     fn serialization_buffer(&self) -> Self::SerializationBuffer {
-        FjallSerializationBuffer { operations: Vec::new(), db: self.0.clone() }
+        FjallSerializationBuffer {
+            operations: Vec::new(),
+            size: 0,
+            db: self.0.clone(),
+        }
     }
 }
 
@@ -456,6 +460,10 @@ enum Operation {
 /// Serialization buffer for batching Fjall operations.
 pub struct FjallSerializationBuffer {
     operations: Vec<Operation>,
+
+    /// The bytes that the keys and the values of the operations take up.
+    size: usize,
+
     db: Arc<Impl>,
 }
 
@@ -477,6 +485,7 @@ impl SerializationBuffer for FjallSerializationBuffer {
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
         self.db.encode_value(value, &mut value_buffer, false);
 
+        self.size += key_buffer.len() + value_buffer.len();
         self.operations.push(Operation::WideColumnPut {
             cf: self.db.get_or_create_keyspace::<W>(ColumnKind::WideColumn),
             key: key_buffer,
@@ -489,6 +498,7 @@ impl SerializationBuffer for FjallSerializationBuffer {
 
         self.db.encode_wide_column_key::<W, C>(key, &mut key_buffer);
 
+        self.size += key_buffer.len();
         self.operations.push(Operation::WideColumnDelete {
             cf: self.db.get_or_create_keyspace::<W>(ColumnKind::WideColumn),
             key: key_buffer,
@@ -505,6 +515,7 @@ impl SerializationBuffer for FjallSerializationBuffer {
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer, false);
 
+        self.size += buffer.len();
         self.operations.push(Operation::InsertMember {
             cf: self.db.get_or_create_keyspace::<C>(ColumnKind::KeyOfSet),
             key: buffer,
@@ -521,11 +532,14 @@ impl SerializationBuffer for FjallSerializationBuffer {
         self.db.encode_value_length_prefixed(key, &mut buffer);
         self.db.encode_value(value, &mut buffer, false);
 
+        self.size += buffer.len();
         self.operations.push(Operation::DeleteMember {
             cf: self.db.get_or_create_keyspace::<C>(ColumnKind::KeyOfSet),
             key: buffer,
         });
     }
+
+    fn size(&self) -> usize { self.size }
 }
 
 /// Iterator created [`KvDatabase::scan_members`] for the Fjall backend.
@@ -568,3 +582,6 @@ impl<C: KeyOfSetColumn> Iterator for ScanMemberIterator<C> {
         )
     }
 }
+
+#[cfg(test)]
+mod test;

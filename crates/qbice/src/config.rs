@@ -19,7 +19,9 @@ use std::{
 
 use qbice_stable_hash::BuildStableHasher;
 use qbice_stable_type_id::Identifiable;
-use qbice_storage::storage_engine::StorageEngine;
+use qbice_storage::{
+    storage_engine::StorageEngine, write_manager::WriteManager,
+};
 
 /// Configuration trait for customizing engine behavior.
 ///
@@ -131,17 +133,21 @@ mod default_config {
 #[cfg(feature = "default-config")]
 pub use default_config::DefaultConfig;
 
+/// Type alias for the write manager of the storage engine, which creates the
+/// maps.
+type WriteManagerOf<C> =
+    <<C as Config>::StorageEngine as StorageEngine>::WriteManager;
+
 /// Type alias for a single map in the storage engine.
 pub type SingleMap<C, K, V> =
-    <<C as Config>::StorageEngine as StorageEngine>::SingleMap<K, V>;
+    <WriteManagerOf<C> as WriteManager>::SingleMap<K, V>;
 
 /// Type alias for a dynamic map in the storage engine.
-pub type DynamicMap<C, K> =
-    <<C as Config>::StorageEngine as StorageEngine>::DynamicMap<K>;
+pub type DynamicMap<C, K> = <WriteManagerOf<C> as WriteManager>::DynamicMap<K>;
 
 /// Type alias for a key-of-set map in the storage engine.
 pub type KeyOfSetMap<C, K, Con> =
-    <<C as Config>::StorageEngine as StorageEngine>::KeyOfSetMap<K, Con>;
+    <WriteManagerOf<C> as WriteManager>::KeyOfSetMap<K, Con>;
 
 /// Type alias for a write transaction in the storage engine.
 pub type WriteTransaction<C> =

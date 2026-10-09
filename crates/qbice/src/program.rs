@@ -47,6 +47,8 @@
 //! | Central point of failure | Yes | No |
 //! | Scalability | Poor | Good |
 //! | Code organization | Centralized | Decentralized |
+//!
+//! [`linkme`]: https://crates.io/crates/linkme
 
 use std::sync::Arc;
 
@@ -62,6 +64,8 @@ use crate::{Config, Engine, Executor, Query};
 /// # Type Parameters
 ///
 /// * `C` - The configuration type that implements [`Config`].
+///
+/// [`linkme`]: https://crates.io/crates/linkme
 #[derive(Debug, Clone, Copy, Hash)]
 pub struct Registration<C: Config> {
     register_executor_fn: fn(&mut Engine<C>),
@@ -116,10 +120,9 @@ impl<C: Config> Engine<C> {
     ///
     /// # Arguments
     ///
-    /// * `registrations` - A [`DistributedSlice`] containing all
-    ///   [`Registration`] entries to process. This is typically a static slice
-    ///   populated using `#[distributed_slice]` attributes throughout the
-    ///   codebase.
+    /// * `registrations` - A `DistributedSlice` containing all [`Registration`]
+    ///   entries to process. This is typically a static slice populated using
+    ///   `#[distributed_slice]` attributes throughout the codebase.
     pub fn register_program<'x>(
         &mut self,
         registrations: impl IntoIterator<Item = &'x Registration<C>>,

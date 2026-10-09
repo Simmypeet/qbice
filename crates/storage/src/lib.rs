@@ -56,6 +56,7 @@
 //! use qbice_storage::{
 //!     kv_database::{WideColumn, WideColumnValue, DiscriminantEncoding},
 //!     storage_engine::{StorageEngine, in_memory::InMemoryStorageEngine},
+//!     write_manager::WriteManager,
 //! };
 //! use qbice_stable_type_id::Identifiable;
 //! use qbice_serialize::{Encode, Decode};
@@ -81,9 +82,10 @@
 //! }
 //!
 //! # async fn example() {
-//! // Create a storage engine and maps
+//! // Create a storage engine, its write manager and maps
 //! let engine = InMemoryStorageEngine;
-//! let user_map = engine.new_single_map::<UserDataColumn, UserName>();
+//! let write_manager = engine.new_write_manager();
+//! let user_map = write_manager.new_single_map::<UserDataColumn, UserName>();
 //!
 //! // Retrieve values (automatically fetched from DB on miss)
 //! let user_id = 12345;
@@ -107,9 +109,9 @@ pub mod dynamic_map;
 pub mod intern;
 pub mod key_of_set_map;
 pub mod kv_database;
+pub mod s3_fifo;
 pub mod single_map;
 pub mod storage_engine;
-pub mod tiny_lfu;
 pub mod write_batch;
 pub mod write_manager;
 

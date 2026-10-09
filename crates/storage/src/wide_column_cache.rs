@@ -1,65 +1,92 @@
-use std::{
-    any::TypeId,
-    hash::Hash,
-    sync::atomic::{AtomicI32, Ordering},
-};
+use std::hash::Hash;
 
 use crate::{
-    kv_database::{KvDatabase, WideColumn, WideColumnValue},
+    s3_fifo::{self, LifecycleListener, S3Fifo},
     sharded::default_shard_amount,
     single_flight,
-    tiny_lfu::{self, LifecycleListener, TinyLFU},
-    write_manager::write_behind::{self, Epoch},
+    write_manager::write_behind::{CommittedEpochs, Epoch},
 };
 
-#[derive(Debug, Default)]
-struct PinnedLifecycleListener;
+/// Keeps an entry in the cache until the database holds its last write.
+/// Before that, a read that does not find the entry would fall back to a
+/// database that does not have the value yet.
+///
+/// Also keeps an entry for as long as its key is being read from the
+/// database. That read caches what it finds only if the key has no entry,
+/// so an entry that goes missing meanwhile takes the writes it stood for
+/// with it.
+#[derive(Debug)]
+struct PinnedLifecycleListener<K> {
+    /// The committed epochs of the write manager that writes to the cache.
+    committed: CommittedEpochs,
 
-impl<K, V> LifecycleListener<K, Entry<V>> for PinnedLifecycleListener {
-    fn is_pinned(&self, _key: &K, value: &Entry<V>) -> bool {
-        value.pin_count.load(Ordering::SeqCst) > 0
+    /// The reads of the database that are under way, by the key they read.
+    reads: single_flight::SingleFlight<K>,
+}
+
+impl<K: Eq + Hash + Clone, V> LifecycleListener<K, Entry<V>>
+    for PinnedLifecycleListener<K>
+{
+    fn is_pinned(&self, key: &K, value: &Entry<V>) -> bool {
+        if value.last_write.is_some_and(|epoch| !self.committed.contains(epoch))
+        {
+            return true;
+        }
+
+        // A read of the database that is under way may have looked before
+        // the write of this entry was committed. The entry is then all that
+        // tells the read, when it comes back, that what it found is out of
+        // date.
+        //
+        // This has to be asked after the epoch. A read that starts after
+        // the write was seen to be committed finds the write in the
+        // database. Asked first, a read could start and the write be
+        // committed between the two questions, and the entry would be let
+        // go while that read holds what the database held before the write.
+        self.reads.is_in_flight(key)
     }
 }
 
 #[derive(Debug)]
 struct Entry<V> {
     value: Option<V>,
-    pin_count: AtomicI32,
+
+    /// The epoch of the last write batch that wrote the entry, or `None` if
+    /// the entry is what was read from the database.
+    last_write: Option<Epoch>,
 }
 
 #[derive(Debug)]
 pub struct WideColumnCache<
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
-    T,
 > {
-    tiny_lfu: TinyLFU<K, Entry<V>, PinnedLifecycleListener>,
-    single_flight: single_flight::SingleFlight<K>,
-
-    _phantom: std::marker::PhantomData<T>,
+    entries: S3Fifo<K, Entry<V>, PinnedLifecycleListener<K>>,
 }
 
-impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static, T>
-    WideColumnCache<K, V, T>
+impl<K: Clone + Eq + Hash + Send + Sync + 'static, V: Send + Sync + 'static>
+    WideColumnCache<K, V>
 {
+    /// Creates a cache for what the write batches of one write manager
+    /// write. `committed` are the committed epochs of that write manager.
     #[allow(clippy::cast_possible_truncation)]
-    pub fn new(capacity: u64) -> Self {
+    pub fn new(capacity: u64, committed: CommittedEpochs) -> Self {
         Self {
-            tiny_lfu: TinyLFU::new(
+            entries: S3Fifo::with_lifecycle_listener(
                 capacity as usize,
-                tiny_lfu::UnpinStrategy::Notify,
-                tiny_lfu::MaintenanceMode::Piggyback,
+                PinnedLifecycleListener {
+                    committed,
+                    reads: single_flight::SingleFlight::new(
+                        default_shard_amount(),
+                    ),
+                },
             ),
-            single_flight: single_flight::SingleFlight::new(
-                default_shard_amount(),
-            ),
-            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static, T>
-    WideColumnCache<K, V, T>
+impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static>
+    WideColumnCache<K, V>
 {
     pub async fn get<U>(
         &self,
@@ -71,25 +98,25 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static, T>
             // FAST PATH: Check if the value is already cached, return it  if
             // found.
             if let Some(entry) =
-                self.tiny_lfu.get_map(key, |e| e.value.as_ref().map(&map))
+                self.entries.get_map(key, |e| e.value.as_ref().map(&map))
             {
                 return entry;
             }
 
             // obtain the single-flight for fetching the value
-            self.single_flight
+            self.entries
+                .lifecycle_listener()
+                .reads
                 .wait_or_work(key, || {
                     let value = init();
 
-                    self.tiny_lfu.entry(key.clone(), |entry| match entry {
-                        tiny_lfu::Entry::Vacant(vaccant_entry) => {
-                            vaccant_entry.insert(Entry {
-                                value,
-                                pin_count: AtomicI32::new(0),
-                            });
+                    self.entries.entry(key.clone(), |entry| match entry {
+                        s3_fifo::Entry::Vacant(vaccant_entry) => {
+                            vaccant_entry
+                                .insert(Entry { value, last_write: None });
                         }
 
-                        tiny_lfu::Entry::Occupied(_) => {
+                        s3_fifo::Entry::Occupied(_) => {
                             // Do nothing as there's an another thread inserted
                             // an explicit value
                         }
@@ -99,29 +126,26 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static, T>
         }
     }
 
-    pub fn insert(&self, key: K, value: V, updated: bool) {
-        let old_value = self.tiny_lfu.entry(key, |e| {
+    /// Stores a value that the write batch of `epoch` writes.
+    pub fn insert(&self, key: K, value: V, epoch: Epoch) {
+        let old_value = self.entries.entry(key, |e| {
             match e {
-                tiny_lfu::Entry::Vacant(vaccant_entry) => {
+                s3_fifo::Entry::Vacant(vaccant_entry) => {
                     vaccant_entry.insert(Entry {
                         value: Some(value),
-                        pin_count: AtomicI32::new(i32::from(updated)),
+                        last_write: Some(epoch),
                     });
 
                     None
                 }
 
-                tiny_lfu::Entry::Occupied(mut entry) => {
+                s3_fifo::Entry::Occupied(mut entry) => {
                     // update the existing value and take the value to drop
                     // outside
+                    let entry = entry.get_mut();
 
-                    let old_value = entry.get_mut().value.replace(value);
-
-                    if updated {
-                        *entry.get_mut().pin_count.get_mut() += 1;
-                    }
-
-                    old_value
+                    entry.last_write = entry.last_write.max(Some(epoch));
+                    entry.value.replace(value)
                 }
             }
         });
@@ -130,105 +154,28 @@ impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static, T>
         drop(old_value);
     }
 
-    pub fn remove(&self, key: &K, updated: bool) {
-        let old_value = self.tiny_lfu.entry(key.clone(), |x| match x {
-            tiny_lfu::Entry::Vacant(vaccant_entry) => {
-                // if ran with updated=true, with must create a negative
-                // cache entry that will use to prevent future `get_init`
-                // from database
-                if updated {
-                    vaccant_entry.insert(Entry {
-                        value: None,
-                        pin_count: AtomicI32::new(1),
-                    });
-                }
+    /// Removes the value, which is what the write batch of `epoch` does.
+    ///
+    /// The entry stays as a negative one: until the removal has been
+    /// committed the database still holds the value, and a read must not
+    /// fall back to it.
+    pub fn remove(&self, key: &K, epoch: Epoch) {
+        let old_value = self.entries.entry(key.clone(), |x| match x {
+            s3_fifo::Entry::Vacant(vaccant_entry) => {
+                vaccant_entry
+                    .insert(Entry { value: None, last_write: Some(epoch) });
 
                 None
             }
-            tiny_lfu::Entry::Occupied(mut occupied_entry) => {
-                if updated {
-                    let old_value = occupied_entry.get_mut().value.take();
+            s3_fifo::Entry::Occupied(mut occupied_entry) => {
+                let entry = occupied_entry.get_mut();
 
-                    *occupied_entry.get_mut().pin_count.get_mut() += 1;
-
-                    old_value
-                } else {
-                    // if no pin, we can safely remove the entry
-                    if *occupied_entry.get_mut().pin_count.get_mut() == 0 {
-                        occupied_entry.remove().value
-                    }
-                    // this entry is pinned, we'll just mark it as negative
-                    else {
-                        occupied_entry.get_mut().value.take()
-                    }
-                }
+                entry.last_write = entry.last_write.max(Some(epoch));
+                entry.value.take()
             }
         });
 
         drop(old_value);
-    }
-}
-
-impl<K: Eq + Hash + Clone + Send + Sync + 'static, V: Send + Sync + 'static, T>
-    WideColumnCache<K, V, T>
-{
-    pub(crate) fn flush_staging(
-        &self,
-        _epoch: Epoch,
-        keys: impl IntoIterator<Item = K>,
-    ) {
-        for key in keys {
-            let unpin = self.tiny_lfu.get_map(&key, |x| {
-                let count = x
-                    .pin_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-
-                count == 1 // unpin
-            });
-
-            if unpin == Some(true) {
-                self.tiny_lfu.unpin(key);
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct SingleMapTag;
-
-impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase>
-    write_behind::WideColumnCache<K, V, Db>
-    for WideColumnCache<K::Key, V, SingleMapTag>
-{
-    fn flush(
-        &self,
-        epoch: Epoch,
-        keys: &mut (dyn Iterator<Item = <K as WideColumn>::Key> + Send),
-    ) {
-        self.flush_staging(epoch, keys);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct DynamicMapTag;
-
-impl<
-    K: WideColumn,
-    V: WideColumnValue<K>,
-    X: Send + Sync + 'static,
-    Db: KvDatabase,
-> write_behind::WideColumnCache<K, V, Db>
-    for WideColumnCache<(K::Key, TypeId), X, DynamicMapTag>
-{
-    fn flush(
-        &self,
-        epoch: Epoch,
-        keys: &mut (dyn Iterator<Item = <K as WideColumn>::Key> + Send),
-    ) {
-        self.flush_staging(
-            epoch,
-            keys.map(|x| (x, std::any::TypeId::of::<V>())),
-        );
     }
 }
 

@@ -14,10 +14,26 @@ criterion.workspace = true
 fxhash.workspace = true
 tokio = { version = "1", features = ["full"] }
 mimalloc = "*"
+tempfile.workspace = true
 
 [[bench]]
 name = "firewall"
 path = "benches/firewall.rs"
+harness = false
+
+[[bench]]
+name = "rocksdb"
+path = "benches/rocksdb.rs"
+harness = false
+
+[[bench]]
+name = "shutdown"
+path = "benches/shutdown.rs"
+harness = false
+
+[[bench]]
+name = "clean_build"
+path = "benches/clean_build.rs"
 harness = false
 
 

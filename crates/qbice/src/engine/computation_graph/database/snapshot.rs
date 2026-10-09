@@ -22,6 +22,17 @@ use crate::{
 ///
 /// This allows us to minimize lock acquisition to the main database of the
 /// engine.
+///
+/// # Queries that have never been computed
+///
+/// Everything the engine records about a query node is first written by one
+/// write batch, under the exclusive lock of the query, and that batch always
+/// writes the last verified timestamp and the node info. A snapshot that
+/// finds either of the two missing therefore knows that none of the rest has
+/// been written, and answers for it without asking the database again. A
+/// query that is computed for the first time would otherwise ask the database
+/// once for every piece it reads, and every one of those reads comes back
+/// empty.
 #[allow(clippy::option_option)]
 pub struct Snapshot<C: Config, Q: Query> {
     engine: Arc<Engine<C>>,
@@ -97,6 +108,17 @@ impl<C: Config> Engine<C> {
 }
 
 impl<C: Config, Q: Query> Snapshot<C, Q> {
+    /// Records that nothing has been written about the query node, so that
+    /// none of it is looked up.
+    fn set_never_computed(&mut self) {
+        self.last_verified = Some(None);
+        self.query_kind = Some(None);
+        self.node_info = Some(None);
+        self.pending_backward_projection = Some(None);
+        self.forward_edge_order = Some(None);
+        self.forward_edge_observation = Some(None);
+    }
+
     pub async fn last_verified(&mut self) -> Option<LastVerified> {
         if let Some(opt) = &self.last_verified {
             return opt.clone();
@@ -110,7 +132,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             .get(&self.query_id)
             .await;
 
-        self.last_verified = Some(value.clone());
+        if value.is_none() {
+            self.set_never_computed();
+        } else {
+            self.last_verified = Some(value.clone());
+        }
 
         value
     }
@@ -146,7 +172,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             .get(&self.query_id)
             .await;
 
-        self.node_info = Some(value.clone());
+        if value.is_none() {
+            self.set_never_computed();
+        } else {
+            self.node_info = Some(value.clone());
+        }
 
         value
     }

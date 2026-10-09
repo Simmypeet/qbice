@@ -392,7 +392,9 @@ impl<C: Config> InputSession<C> {
     /// Refreshes all external input queries of type `Q`.
     ///
     /// This method re-executes all queries of type `Q` that were previously
-    /// computed with [`ExecutionStyle::ExternalInput`]. For each query:
+    /// computed with
+    /// [`ExecutionStyle::ExternalInput`](crate::ExecutionStyle::ExternalInput).
+    /// For each query:
     ///
     /// 1. The executor is re-invoked to fetch the latest external data
     /// 2. The new result is compared with the old result via fingerprints

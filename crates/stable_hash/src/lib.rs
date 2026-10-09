@@ -33,11 +33,10 @@ use qbice_serialize::{Decode, Encode};
 pub use siphasher::sip128::SipHasher as Sip128Hasher;
 
 extern crate self as qbice_stable_hash;
-pub use qbice_stable_hash_derive::StableHash;
-use siphasher::sip128::Hasher128;
-
 #[cfg(feature = "bitvec")]
 use bitvec::prelude::*;
+pub use qbice_stable_hash_derive::StableHash;
+use siphasher::sip128::Hasher128;
 #[cfg(feature = "smallvec")]
 use smallvec::{Array, SmallVec};
 

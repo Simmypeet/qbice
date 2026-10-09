@@ -302,9 +302,9 @@ impl<C: Config> Executor<SlowQuery, C> for SlowExecutor {
             loop {
                 tokio::task::yield_now().await;
             }
-        } else {
-            engine.query(&Variable(query.0)).await
         }
+
+        engine.query(&Variable(query.0)).await
     }
 }
 

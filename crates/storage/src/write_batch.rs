@@ -1,6 +1,6 @@
 //! Write transaction abstractions for atomic operations.
 //!
-//! This module provides the [`WriteTransaction`] trait for grouping
+//! This module provides the [`WriteBatch`] trait for grouping
 //! multiple write operations into atomic batches.
 
 /// A trait for grouping write operations into atomic batches.

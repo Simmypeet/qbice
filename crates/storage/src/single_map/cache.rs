@@ -3,13 +3,11 @@
 //! This module provides [`CacheSingleMap`], which wraps a database backend
 //! with a Moka-based cache for improved read performance.
 
-use std::sync::Arc;
-
 use crate::{
     kv_database::{KvDatabase, WideColumn, WideColumnValue},
     single_map::SingleMap,
-    wide_column_cache::{SingleMapTag, WideColumnCache},
-    write_manager::write_behind,
+    wide_column_cache::WideColumnCache,
+    write_manager::write_behind::{self, CommittedEpochs},
 };
 
 /// A cached implementation of [`SingleMap`] backed by a
@@ -27,21 +25,17 @@ use crate::{
 #[derive(Debug)]
 pub struct CacheSingleMap<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase>
 {
-    cache: Arc<WideColumnCache<K::Key, V, SingleMapTag>>,
+    cache: WideColumnCache<K::Key, V>,
     db: Db,
 }
 
 impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase>
     CacheSingleMap<K, V, Db>
 {
-    /// Creates a new cached single map with the specified capacity.
-    ///
-    /// # Returns
-    ///
-    /// A new `CacheSingleMap` instance.
-    #[must_use]
-    pub fn new(cap: u64, db: Db) -> Self {
-        Self { cache: Arc::new(WideColumnCache::new(cap)), db }
+    /// Creates a new cached single map with the specified capacity, for the
+    /// write manager whose committed epochs are `committed`.
+    pub(crate) fn new(cap: u64, db: Db, committed: CommittedEpochs) -> Self {
+        Self { cache: WideColumnCache::new(cap, committed), db }
     }
 }
 
@@ -64,13 +58,9 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
         value: V,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        let updated = write_transaction.put_wide_column::<K, V>(
-            key.clone(),
-            Some(value.clone()),
-            Arc::downgrade(&(self.cache.clone() as _)),
-        );
+        write_transaction.put_wide_column::<K, V>(&key, Some(&value));
 
-        self.cache.insert(key, value, updated);
+        self.cache.insert(key, value, write_transaction.epoch());
     }
 
     async fn remove(
@@ -78,12 +68,8 @@ impl<K: WideColumn, V: WideColumnValue<K>, Db: KvDatabase> SingleMap<K, V>
         key: &K::Key,
         write_transaction: &mut Self::WriteTransaction,
     ) {
-        let updated = write_transaction.put_wide_column::<K, V>(
-            key.clone(),
-            None,
-            Arc::downgrade(&(self.cache.clone() as _)),
-        );
+        write_transaction.put_wide_column::<K, V>(key, None);
 
-        self.cache.remove(key, updated);
+        self.cache.remove(key, write_transaction.epoch());
     }
 }

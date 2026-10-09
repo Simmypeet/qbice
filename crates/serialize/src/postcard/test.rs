@@ -1,5 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, LinkedList, VecDeque};
-use std::fmt::Debug;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, LinkedList, VecDeque},
+    fmt::Debug,
+};
+
 use dashmap::DashMap;
 
 use super::*;
@@ -78,36 +81,42 @@ fn float_roundtrip() {
 // Container tests
 // =============================================================================
 
-fn roundtrip_values_unordered<C: Debug + IntoIterator + Encode + Decode>(value: C) where C::Item: PartialEq + Debug + Ord {
+fn roundtrip_values_unordered<C: Debug + IntoIterator + Encode + Decode>(
+    value: C,
+) where
+    C::Item: PartialEq + Debug + Ord,
+{
     let plugin = Plugin::new();
     let bytes = encode(&value, &plugin).unwrap();
-    assert!(!bytes.is_empty()); // Container should always produce bytes
+    assert_ne!(bytes, b""); // Container should always produce bytes
     let decoded: C = decode(&bytes, &plugin).unwrap();
     let mut value_as_vec: Vec<C::Item> = value.into_iter().collect();
     value_as_vec.sort();
     let mut decoded_as_vec: Vec<C::Item> = decoded.into_iter().collect();
     decoded_as_vec.sort();
     assert_eq!(value_as_vec, decoded_as_vec);
-    // assert_eq!(value, decoded); // TODO: Use when `DashMap` implements `PartialEq`
+    // assert_eq!(value, decoded); // TODO: Use when `DashMap` implements
+    // `PartialEq`
 }
 
-fn roundtrip_values<C: Debug + IntoIterator + Encode + Decode + PartialEq>(value: C) where C::Item: PartialEq + Debug {
+#[allow(clippy::needless_pass_by_value)]
+fn roundtrip_values<C: Debug + IntoIterator + Encode + Decode + PartialEq>(
+    value: C,
+) where
+    C::Item: PartialEq + Debug,
+{
     let plugin = Plugin::new();
     let bytes = encode(&value, &plugin).unwrap();
-    assert!(!bytes.is_empty()); // Container should always produce bytes
+    assert_ne!(bytes, b""); // Container should always produce bytes
     let decoded: C = decode(&bytes, &plugin).unwrap();
     assert_eq!(value, decoded);
 }
 
 #[test]
-fn vec_empty_roundtrip() {
-    roundtrip_values::<Vec<i32>>(vec![]);
-}
+fn vec_empty_roundtrip() { roundtrip_values::<Vec<i32>>(vec![]); }
 
 #[test]
-fn vec_i32_roundtrip() {
-    roundtrip_values::<Vec<i32>>(vec![1, -2, 3]);
-}
+fn vec_i32_roundtrip() { roundtrip_values::<Vec<i32>>(vec![1, -2, 3]); }
 
 #[test]
 fn linkedlist_empty_roundtrip() {
@@ -131,7 +140,8 @@ fn vec_deque_i32_roundtrip() {
 
 #[cfg(feature = "smallvec")]
 mod test_smallvec {
-    use smallvec::{smallvec, SmallVec};
+    use smallvec::{SmallVec, smallvec};
+
     use super::*;
 
     #[test]
@@ -148,17 +158,14 @@ mod test_smallvec {
 #[cfg(feature = "bitvec")]
 mod test_bitvec {
     use bitvec::prelude::*;
+
     use super::*;
 
     #[test]
-    fn empty_roundtrip() {
-        roundtrip_values::<BitVec>(bitvec![]);
-    }
+    fn empty_roundtrip() { roundtrip_values::<BitVec>(bitvec![]); }
 
     #[test]
-    fn i32_roundtrip() {
-        roundtrip_values::<BitVec>(bitvec![1, 0, 1, 1]);
-    }
+    fn i32_roundtrip() { roundtrip_values::<BitVec>(bitvec![1, 0, 1, 1]); }
 }
 
 // =============================================================================
@@ -235,15 +242,17 @@ fn dashmap_empty_roundtrip() {
 }
 
 #[test]
+#[allow(clippy::needless_collect)]
 fn dashmap_i32_to_str_roundtrip() {
-    roundtrip_values_unordered::<DashMap<i32, String>>([
-        (1, "one".to_owned()),
-        (2, "two".to_owned()),
-        (3, "three".to_owned()),
-        (-3, "negative three".to_owned()),
+    roundtrip_values_unordered::<DashMap<i32, String>>(
+        [
+            (1, "one".to_owned()),
+            (2, "two".to_owned()),
+            (3, "three".to_owned()),
+            (-3, "negative three".to_owned()),
         ]
         .into_iter()
-        .collect()
+        .collect(),
     );
 }
 
@@ -322,7 +331,7 @@ fn derive_unit_struct_roundtrip() {
     let value = UnitStruct;
 
     let bytes = encode(&value, &plugin).unwrap();
-    assert!(bytes.is_empty()); // Unit struct should produce no bytes
+    assert_eq!(bytes, b""); // Unit struct should produce no bytes
     let decoded: UnitStruct = decode(&bytes, &plugin).unwrap();
     assert_eq!(value, decoded);
 }
@@ -356,7 +365,7 @@ fn derive_struct_with_skip() {
     let decoded: StructWithSkip = decode(&bytes, &plugin).unwrap();
 
     assert_eq!(decoded.value, 123);
-    assert!(decoded.skipped.is_empty()); // Should be Default::default()
+    assert_eq!(decoded.skipped, b""); // Should be Default::default()
 }
 
 #[test]
@@ -413,7 +422,7 @@ fn derive_enum_with_skip() {
     match decoded {
         EnumWithSkip::Variant { value, skipped } => {
             assert_eq!(value, 999);
-            assert!(skipped.is_empty()); // Should be Default::default()
+            assert_eq!(skipped, ""); // Should be Default::default()
         }
     }
 }

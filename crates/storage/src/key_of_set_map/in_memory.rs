@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// An in-memory implementation of [`KeyOfSetMap`] backed by a concurrent
-/// [`DashMap`].
+/// [`scc::HashMap`].
 ///
 /// This implementation stores all key-to-set mappings in memory and is
 /// suitable for testing, caching, or scenarios where persistence is not

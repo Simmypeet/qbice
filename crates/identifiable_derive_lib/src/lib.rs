@@ -17,14 +17,16 @@ pub fn implements_identifiable(
     if let Some(lt_param) = generics.lifetimes().next() {
         return syn::Error::new_spanned(
             lt_param,
-            "lifetime parameters are not allowed in key types for qbice::Identifiable",
+            "lifetime parameters are not allowed in key types for \
+             qbice::Identifiable",
         )
         .to_compile_error();
     }
     if let Some(const_param) = generics.const_params().next() {
         return syn::Error::new_spanned(
             const_param,
-            "constant parameters are not allowed in key types for qbice::Identifiable",
+            "constant parameters are not allowed in key types for \
+             qbice::Identifiable",
         )
         .to_compile_error();
     }

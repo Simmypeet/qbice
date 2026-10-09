@@ -61,7 +61,7 @@ bon = "3.8.2"
 quick_cache = "0.6.18"
 tracing-subscriber = "0.3.22"
 crossbeam-skiplist = "0.1.3"
-scc = "3.5.6"
+scc = "3.8.8"
 waitgroup = "0.1.2"
 
 [workspace.lints.rust]
@@ -76,7 +76,8 @@ broken_intra_doc_links = "deny"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 # this generates errors on enum-as-inner in nightly toolchain
-double-parens = "allow"
+double_parens = "allow"
+unused_async_trait_impl = "allow"
 missing_panics_doc = "allow"
 missing_errors_doc = "allow"
 doc_markdown = "allow"
