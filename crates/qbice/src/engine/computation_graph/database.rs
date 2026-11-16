@@ -197,6 +197,10 @@ impl<L: Iterator, R: Iterator<Item = L::Item>> Iterator for Either<L, R> {
     }
 }
 
+/// The most queries that [`TieredStorage::Small`] stores, beyond which they
+/// are stored in [`TieredStorage::Large`].
+const SMALL_STORAGE_CAPACITY: usize = 32;
+
 pub enum TieredStorage<S: BuildHasher + Clone> {
     /// 0-32 queries, stored as a small vec.
     Small(RwLock<Vec<QueryID>>),
@@ -253,39 +257,47 @@ impl<S: BuildHasher + Default + Clone + Send + Sync + 'static> ConcurrentSet
         Self: 'x;
 
     fn insert_element(&self, element: Self::Element) -> bool {
-        let read = self.0.read();
-        match &*read {
-            TieredStorage::Small(vec_lock) => {
-                let mut vec = vec_lock.write();
+        // insert under the shared lock, unless the small storage is full
+        {
+            let read = self.0.read();
+            match &*read {
+                TieredStorage::Small(vec_lock) => {
+                    let mut vec = vec_lock.write();
 
-                // Upgrade to large storage if exceed threshold
-                if vec.len() == 32 {
-                    let large_set = DashSet::with_hasher(S::default());
+                    if vec.len() < SMALL_STORAGE_CAPACITY {
+                        if vec.contains(&element) {
+                            return false;
+                        }
 
-                    for item in vec.drain(..) {
-                        large_set.insert(item);
+                        vec.push(element);
+
+                        return true;
                     }
-
-                    let result = large_set.insert(element);
-
-                    drop(vec);
-                    drop(read);
-
-                    *self.0.write() = TieredStorage::Large(large_set);
-
-                    result
-                } else {
-                    if vec.contains(&element) {
-                        return false;
-                    }
-
-                    vec.push(element);
-
-                    true
                 }
+
+                TieredStorage::Large(set) => return set.insert(element),
+            }
+        }
+
+        // Upgrade to the large storage under the exclusive lock. Draining the
+        // small storage under the shared lock and replacing it afterwards
+        // would lose what another thread inserts into the drained storage in
+        // between. Another thread may have upgraded it first.
+        let mut write = self.0.write();
+        if let TieredStorage::Small(vec_lock) = &mut *write {
+            let large_set = DashSet::with_hasher(S::default());
+            for item in vec_lock.get_mut().drain(..) {
+                large_set.insert(item);
             }
 
+            *write = TieredStorage::Large(large_set);
+        }
+
+        match &*write {
             TieredStorage::Large(set) => set.insert(element),
+            TieredStorage::Small(_) => {
+                unreachable!("the storage was upgraded to the large one")
+            }
         }
     }
 
@@ -1226,5 +1238,54 @@ impl<C: Config> Database<C> {
     /// query kind is immutable once created.
     pub(super) async fn get_query_kind(&self, query_id: &QueryID) -> QueryKind {
         self.query_kind.get(query_id).await.unwrap()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::{sync::Barrier, thread};
+
+    use fxhash::FxBuildHasher;
+    use qbice_stable_hash::Compact128;
+
+    use super::{
+        CompressedBackwardEdgeSet, ConcurrentSet, SMALL_STORAGE_CAPACITY,
+    };
+    use crate::query::QueryID;
+
+    /// A query ID told apart by `n`.
+    fn query_id(n: usize) -> QueryID {
+        QueryID::from_parts(Compact128::from(0), Compact128::from(n as u128))
+    }
+
+    // input: threads that insert distinct queries into one set at once
+    // premise: the inserts make the set upgrade from its small storage to its
+    // large one while the other threads keep inserting
+    // output: every query is in the set
+    #[test]
+    fn concurrent_inserts_survive_the_upgrade() {
+        const THREADS: usize = 8;
+
+        // the window of the race is small, so try many sets
+        for _ in 0..500 {
+            let set = CompressedBackwardEdgeSet::<FxBuildHasher>::default();
+            let barrier = Barrier::new(THREADS);
+
+            thread::scope(|scope| {
+                for thread in 0..THREADS {
+                    let (set, barrier) = (&set, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        for i in 0..SMALL_STORAGE_CAPACITY {
+                            set.insert_element(query_id(
+                                thread * SMALL_STORAGE_CAPACITY + i,
+                            ));
+                        }
+                    });
+                }
+            });
+
+            assert_eq!(set.len(), THREADS * SMALL_STORAGE_CAPACITY);
+        }
     }
 }
