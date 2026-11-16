@@ -14,6 +14,30 @@
 //! - with **changed inputs**: every input gets a new value first. A query that
 //!   was written without the edges that lead to it would not learn that its
 //!   inputs have changed and would keep its old value.
+//!
+//! # When the build is killed
+//!
+//! The build takes a fraction of a second, and from the moment RocksDB has
+//! written a few files to the moment the process is gone it is a few dozen
+//! milliseconds. A kill that is meant to come in between comes too early or
+//! too late whenever the machine is busy with something else. Too early, and
+//! nothing has reached the database; too late, and all of it has.
+//!
+//! The test therefore does not depend on a single kill coming at the right
+//! moment:
+//!
+//! - It first kills a child that keeps the engine open once the build is done
+//!   instead of shutting it down ([`AfterBuild::Waits`]). What that engine has
+//!   not written is never written, so no kill comes too late. A kill that came
+//!   too early is repeated with the build left running for longer, until one of
+//!   them leaves a part of the build in the database. Without one that does,
+//!   the test has not looked at what it is about, and fails.
+//! - It then kills at a few other points, among them while the first files are
+//!   written and while the engine shuts down. Whatever these leave behind, be
+//!   it nothing, a part or everything, has to pass the two checks.
+//!
+//! Set `QBICE_KILLED_BUILD_SOAK` to a number to kill that many more builds,
+//! each at a different point. The points are the same on every run.
 
 use std::{
     ops::Range,
@@ -43,6 +67,13 @@ use tempfile::tempdir;
 /// Set in the child process, to the directory of the database it builds.
 const CHILD_DIRECTORY: &str = "QBICE_KILLED_BUILD_DIRECTORY";
 
+/// Set in the child process if it is to shut the engine down once the build
+/// is done. See [`AfterBuild`].
+const CHILD_SHUTS_DOWN: &str = "QBICE_KILLED_BUILD_SHUTS_DOWN";
+
+/// The number of additional builds to kill, each at a different point.
+const SOAK: &str = "QBICE_KILLED_BUILD_SOAK";
+
 /// Number of queries in every layer.
 const WIDTH: u64 = 1_200;
 
@@ -66,9 +97,33 @@ const CACHE_CAPACITY: u64 = 1 << 16;
 /// Number of derived queries in the graph.
 const QUERIES: u64 = WIDTH * LAYERS as u64;
 
-/// The build is killed once RocksDB has written this many table files, which
-/// is more than its first flush writes.
+/// The number of table files RocksDB has started to write when the build is
+/// killed in order to leave a part of it in the database. It is more than the
+/// first flush writes, and as many as the build writes before it shuts the
+/// engine down.
 const KILL_AFTER_TABLE_FILES: usize = 6;
+
+/// More table files than the build writes before it shuts the engine down. A
+/// kill that waits for this many comes while the engine shuts down, or not at
+/// all.
+const SHUTDOWN_TABLE_FILES: usize = 8;
+
+/// The most table files that a kill waits for when it is picked at random.
+const MOST_TABLE_FILES: usize = 10;
+
+/// The longest that a build is left running, after the table files it waited
+/// for, when the kill is picked at random. The whole build takes a few times
+/// as long.
+const LONGEST_RANDOM_LINGER: Duration = Duration::from_millis(40);
+
+/// How often a kill that left nothing in the database is repeated with the
+/// build left running for longer.
+const PARTIAL_ATTEMPTS: u32 = 8;
+
+/// How long the table files that a kill waits for may take to appear before
+/// the test gives up. A child that keeps the engine open would otherwise be
+/// waited for forever.
+const TABLE_FILES_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(
     Debug,
@@ -307,14 +362,17 @@ fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
 }
 
-/// What the child process does until it is killed: a cold build and a clean
-/// shutdown. Does nothing when the tests are run the usual way.
+/// What the child process does until it is killed: a cold build, and after
+/// it what [`AfterBuild`] says. Does nothing when the tests are run the usual
+/// way.
 #[test]
 #[ignore = "the tests of this file run this in a child process"]
 fn build_until_killed() {
     let Some(directory) = std::env::var_os(CHILD_DIRECTORY) else {
         return;
     };
+
+    let shuts_down = std::env::var_os(CHILD_SHUTS_DOWN).is_some();
 
     runtime().block_on(async {
         let engine = open(Path::new(&directory), Arc::default()).await;
@@ -323,7 +381,15 @@ fn build_until_killed() {
         query_layers(&engine, LAYERS - 1..LAYERS, Arc::new(expected_seeds(0)))
             .await;
 
-        close(engine);
+        if shuts_down {
+            close(engine);
+        } else {
+            // The engine stays open, with whatever it has not written yet
+            // still in memory, until the process is killed.
+            loop {
+                std::thread::park();
+            }
+        }
     });
 }
 
@@ -353,29 +419,96 @@ fn copy_directory(from: &Path, to: &Path) {
     }
 }
 
-/// Builds the graph into `path` in a child process and kills that process
-/// while it is still building. Returns whether it was killed; `false` means
-/// that the build has finished first.
-fn build_and_kill(path: &Path, linger: Duration) -> bool {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+/// What the child process does once it has built the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterBuild {
+    /// Shuts the engine down and exits, the way an application does. A kill
+    /// that comes late finds the engine shutting down, or the process gone
+    /// and all of the build in the database.
+    ShutsDown,
+
+    /// Keeps the engine open and waits to be killed. What the engine has not
+    /// written by then is never written, so the kill leaves the build
+    /// incomplete however late it comes.
+    Waits,
+}
+
+/// When a build is killed.
+#[derive(Debug, Clone, Copy)]
+struct KillPoint {
+    /// The number of table files that RocksDB has to have started to write.
+    table_files: usize,
+
+    /// How long the build is left running after that.
+    linger: Duration,
+
+    after_build: AfterBuild,
+}
+
+/// Builds the graph into `path` in a child process and kills that process at
+/// the given point. Returns whether it was killed; `false` means that the
+/// child has shut the engine down and exited first.
+///
+/// # Panics
+///
+/// Panics if the child process ends in any other way than by being killed or
+/// by exiting after a clean shutdown, and if the table files that the kill
+/// waits for do not appear.
+fn build_and_kill(path: &Path, kill_point: KillPoint) -> bool {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+
+    command
         .args(["--exact", "build_until_killed", "--ignored", "--nocapture"])
         .env(CHILD_DIRECTORY, path)
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stdout(Stdio::null());
+
+    match kill_point.after_build {
+        AfterBuild::ShutsDown => command.env(CHILD_SHUTS_DOWN, "1"),
+        AfterBuild::Waits => command.env_remove(CHILD_SHUTS_DOWN),
+    };
+
+    let mut child = command.spawn().unwrap();
+    let started = Instant::now();
+
+    // Whether the child has ended on its own, which only a child that shuts
+    // the engine down does, and only successfully.
+    let has_exited = |child: &mut std::process::Child| {
+        let Some(status) = child.try_wait().unwrap() else {
+            return false;
+        };
+
+        assert!(
+            kill_point.after_build == AfterBuild::ShutsDown && status.success(),
+            "the build ended on its own with {status} before it was killed at \
+             {kill_point:?}"
+        );
+
+        true
+    };
 
     let killed = loop {
-        if child.try_wait().unwrap().is_some() {
+        if has_exited(&mut child) {
             break false;
         }
 
-        if table_files(path) >= KILL_AFTER_TABLE_FILES {
-            std::thread::sleep(linger);
+        if table_files(path) >= kill_point.table_files {
+            std::thread::sleep(kill_point.linger);
 
-            break child.try_wait().unwrap().is_none();
+            break !has_exited(&mut child);
         }
 
-        std::thread::sleep(Duration::from_millis(2));
+        if started.elapsed() > TABLE_FILES_TIMEOUT {
+            let _ = child.kill();
+
+            panic!(
+                "the build has written {} table files after {:?}, which is \
+                 fewer than {kill_point:?} waits for",
+                table_files(path),
+                started.elapsed(),
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(1));
     };
 
     // the child gets no chance to clean up
@@ -412,50 +545,167 @@ async fn check(path: &Path, revision: u64) -> Found {
     Found { wrong, executed: executor.0.load(Ordering::Relaxed) }
 }
 
+/// What a kill has left behind.
+#[derive(Debug, Clone, Copy)]
+struct Outcome {
+    #[allow(dead_code)] // read when the outcomes are printed
+    kill_point: KillPoint,
+
+    /// Whether the child was killed, rather than gone already.
+    #[allow(dead_code)] // read when the outcomes are printed
+    killed: bool,
+
+    /// The number of queries that the database still knew.
+    survived: u64,
+}
+
+impl Outcome {
+    /// Whether the database held a part of the build: more than nothing, and
+    /// not all of it.
+    const fn is_partial(&self) -> bool {
+        self.survived > 0 && self.survived < QUERIES
+    }
+}
+
+/// Kills a build at the given point and checks that the database it leaves
+/// behind is consistent, with unchanged inputs and with changed ones.
+fn kill_and_check(
+    runtime: &tokio::runtime::Runtime,
+    kill_point: KillPoint,
+) -> Outcome {
+    let killed_directory = tempdir().unwrap();
+    let copy = tempdir().unwrap();
+
+    let killed = build_and_kill(killed_directory.path(), kill_point);
+
+    copy_directory(killed_directory.path(), copy.path());
+
+    let unchanged = runtime.block_on(check(killed_directory.path(), 0));
+    let changed = runtime.block_on(check(copy.path(), 1));
+
+    assert_eq!(
+        unchanged.wrong, 0,
+        "queries read back with a wrong value after the kill at \
+         {kill_point:?} (killed = {killed})"
+    );
+    assert_eq!(
+        changed.wrong, 0,
+        "queries kept their old value after the kill at {kill_point:?} \
+         (killed = {killed}) and a change of the inputs"
+    );
+
+    // a query that survived the kill is not executed again
+    let outcome = Outcome {
+        kill_point,
+        killed,
+        survived: QUERIES.saturating_sub(unchanged.executed),
+    };
+
+    println!(
+        "{kill_point:?}: killed = {killed}, {} of {QUERIES} queries survived",
+        outcome.survived
+    );
+
+    outcome
+}
+
+/// One step of splitmix64.
+const fn next_random(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+
+    z ^ (z >> 31)
+}
+
+/// The kill points of a soak: as many as [`SOAK`] says, the same ones on
+/// every run.
+fn soak_kill_points() -> impl Iterator<Item = KillPoint> {
+    let count = std::env::var(SOAK).map_or(0, |count| {
+        count.parse::<u64>().unwrap_or_else(|_| {
+            panic!("{SOAK} must be a number of builds to kill")
+        })
+    });
+
+    let mut state = 0;
+
+    (0..count).map(move |index| {
+        // A child that keeps the engine open never writes more table files
+        // than the build itself does, so the kill must not wait for more.
+        let (after_build, most_table_files) = if index % 2 == 0 {
+            (AfterBuild::ShutsDown, MOST_TABLE_FILES)
+        } else {
+            (AfterBuild::Waits, KILL_AFTER_TABLE_FILES)
+        };
+
+        let table_files = 1 + usize::try_from(
+            next_random(&mut state) % most_table_files as u64,
+        )
+        .unwrap();
+
+        let linger = Duration::from_micros(
+            next_random(&mut state)
+                % u64::try_from(LONGEST_RANDOM_LINGER.as_micros()).unwrap(),
+        );
+
+        KillPoint { table_files, linger, after_build }
+    })
+}
+
 #[test]
 fn killed_build_leaves_a_consistent_database() {
     let runtime = runtime();
-    let start = Instant::now();
 
-    // Nothing can go wrong with a database that holds none of the queries or
-    // all of them, so a kill that came too early or too late is repeated. How
-    // long the build is left running after the first files appear differs
-    // from one attempt to the next.
-    for attempt in 0..8 {
-        let killed = tempdir().unwrap();
-        let copy = tempdir().unwrap();
+    // A kill that leaves a part of the build in the database. The child
+    // keeps the engine open, so the kill cannot come too late, and a kill
+    // that came before anything had reached the database is repeated with
+    // the build left running for longer.
+    let mut outcomes = Vec::new();
 
-        let was_killed =
-            build_and_kill(killed.path(), Duration::from_millis(40 * attempt));
+    for attempt in 0..PARTIAL_ATTEMPTS {
+        let linger = if attempt == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(25 << attempt)
+        };
 
-        copy_directory(killed.path(), copy.path());
+        outcomes.push(kill_and_check(&runtime, KillPoint {
+            table_files: KILL_AFTER_TABLE_FILES,
+            linger,
+            after_build: AfterBuild::Waits,
+        }));
 
-        let unchanged = runtime.block_on(check(killed.path(), 0));
-        let changed = runtime.block_on(check(copy.path(), 1));
-
-        assert_eq!(
-            unchanged.wrong, 0,
-            "queries read back with a wrong value after the kill"
-        );
-        assert_eq!(
-            changed.wrong, 0,
-            "queries kept their old value after the kill and a change of the \
-             inputs"
-        );
-
-        // a query that survived the kill is not executed again
-        let survived = QUERIES.saturating_sub(unchanged.executed);
-
-        println!(
-            "attempt {attempt}: killed = {was_killed}, {survived} of \
-             {QUERIES} queries survived ({:.1}s)",
-            start.elapsed().as_secs_f64()
-        );
-
-        if was_killed && survived > 0 && survived < QUERIES {
-            return;
+        if outcomes.last().is_some_and(Outcome::is_partial) {
+            break;
         }
     }
 
-    panic!("the build was never killed with only a part of it written");
+    assert!(
+        outcomes.last().is_some_and(Outcome::is_partial),
+        "no kill has left a part of the build in the database, so what such a \
+         database looks like has not been checked: {outcomes:#?}"
+    );
+
+    // Kills at other points. Whatever they leave behind has to be
+    // consistent.
+    let other_kill_points = [
+        // while the first table files are written
+        KillPoint {
+            table_files: 1,
+            linger: Duration::ZERO,
+            after_build: AfterBuild::ShutsDown,
+        },
+        // while the engine shuts down
+        KillPoint {
+            table_files: SHUTDOWN_TABLE_FILES,
+            linger: Duration::ZERO,
+            after_build: AfterBuild::ShutsDown,
+        },
+    ];
+
+    for kill_point in other_kill_points.into_iter().chain(soak_kill_points()) {
+        kill_and_check(&runtime, kill_point);
+    }
 }

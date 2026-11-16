@@ -117,7 +117,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         async move {
             let old_kind = self.query_kind().await;
-            let existing_forward_edges = self.forward_edge_order().await;
+            // owned, because the snapshot is given away below while the
+            // edges are still looked at
+            let existing_forward_edges =
+                self.forward_edge_order().await.cloned();
 
             // if the old node info is a firewall or projection node, we compare
             // the old and new value fingerprints to determine if we need to
@@ -130,12 +133,13 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 && (old_kind.is_firewall() || old_kind.is_projection())
                 && execute_query_for == ExecuteQueryFor::RecomputeQuery
             {
+                let fingerprint = self.engine().hash(&value);
+
                 let old_node_info = self.node_info().await.expect(
                     "old node info should exist for recomputed firewall or \
                      projection",
                 );
 
-                let fingerprint = self.engine().hash(&value);
                 let updated = old_node_info.value_fingerprint() != fingerprint;
 
                 self.record(if updated {

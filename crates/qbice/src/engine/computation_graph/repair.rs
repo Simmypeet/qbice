@@ -136,7 +136,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             )
             .await;
         } else {
-            let forward_edges = self.forward_edge_order().await.unwrap();
+            // owned, because the engine is asked about every callee while
+            // the edges are gone through
+            let forward_edges =
+                self.forward_edge_order().await.unwrap().clone();
 
             let mut new_tfcs = FxHashSet::default();
 
@@ -180,10 +183,14 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         mut self,
         caller_information: &CallerInformation,
     ) {
-        let node_info = self.node_info().await.unwrap();
-
-        let tfcs = node_info.transitive_firewall_callees();
-        let tfcs = tfcs.iter().copied().collect::<Vec<_>>();
+        let tfcs = self
+            .node_info()
+            .await
+            .unwrap()
+            .transitive_firewall_callees()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
 
         let chunk_size = std::cmp::max(
             tfcs.len()
@@ -423,9 +430,12 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         let mut repair_transitive_firewall_callees = false;
         let mut cleaned_edges = Vec::new();
 
-        let forward_edges = self.forward_edge_order().await.unwrap();
+        // owned, because the snapshot is used for every callee while the
+        // edges are gone through, and the observations are handed to the
+        // tasks that check the callees
+        let forward_edges = self.forward_edge_order().await.unwrap().clone();
         let forward_edge_observation =
-            self.forward_edge_observation().await.unwrap();
+            self.forward_edge_observation().await.unwrap().clone();
 
         for dep in forward_edges.0.iter() {
             match dep {

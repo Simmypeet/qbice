@@ -66,9 +66,7 @@ pub struct Timestamp(u64);
 )]
 pub enum QueryNodeDiscriminant {
     LastVerified,
-    ForwardEdgeOrder,
-    ForwardEdgeObservation,
-    QueryKind,
+    ForwardEdges,
     NodeInfo,
     PendingBackwardProjection,
 }
@@ -139,6 +137,10 @@ impl WideColumnValue<DirtySetColumn> for Unit {
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Identifiable)]
 pub struct NodeInfo {
+    /// The kind of the query. It is part of the node info because whoever
+    /// reads the one mostly reads the other, and both are written whenever
+    /// the query is computed.
+    kind: QueryKind,
     fingerprint: Compact128,
     transitive_firewall_callees_fingerprint: Compact128,
     transitive_firewall_callees: Interned<TransitiveFirewallCallees>,
@@ -146,16 +148,20 @@ pub struct NodeInfo {
 
 impl NodeInfo {
     pub const fn new(
+        kind: QueryKind,
         fingerprint: Compact128,
         transitive_firewall_callees_fingerprint: Compact128,
         transitive_firewall_callees: Interned<TransitiveFirewallCallees>,
     ) -> Self {
         Self {
+            kind,
             fingerprint,
             transitive_firewall_callees_fingerprint,
             transitive_firewall_callees,
         }
     }
+
+    pub const fn kind(&self) -> QueryKind { self.kind }
 
     pub const fn value_fingerprint(&self) -> Compact128 { self.fingerprint }
 
@@ -413,11 +419,10 @@ pub enum NodeDependency {
     Unordered(Vec<QueryID>),
 }
 
-implements_wide_column_value_new_type!(
-    ForwardEdgeOrder,
-    Arc<[NodeDependency]>,
-    QueryNodeDiscriminant::ForwardEdgeOrder
-);
+/// The queries that a query read when it was last computed, in the order it
+/// read them.
+#[derive(Debug, Clone)]
+pub struct ForwardEdgeOrder(pub Arc<[NodeDependency]>);
 
 /// The queries that the dependencies name, in the order they are listed.
 fn callees(dependencies: &[NodeDependency]) -> impl Iterator<Item = &QueryID> {
@@ -449,35 +454,158 @@ impl<C: Config> std::fmt::Debug for ForwardEdgeObservation<C> {
     }
 }
 
-impl<C: Config> WideColumnValue<QueryNodeColumn> for ForwardEdgeObservation<C> {
-    fn discriminant() -> QueryNodeDiscriminant {
-        QueryNodeDiscriminant::ForwardEdgeObservation
+/// What a query read when it was last computed: its dependencies in the
+/// order it read them, and what it saw of each of them.
+///
+/// The two are stored as one value. They are written together whenever the
+/// query is computed and read together when it is repaired, and stored apart
+/// every dependency would be written down twice, once for its place in the
+/// order and once for what was seen of it.
+#[derive(Clone)]
+pub struct ForwardEdges<C: Config> {
+    pub order: ForwardEdgeOrder,
+    pub observation: ForwardEdgeObservation<C>,
+}
+
+impl<C: Config> std::fmt::Debug for ForwardEdges<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForwardEdges")
+            .field("order", &self.order)
+            .field("observation", &self.observation)
+            .finish()
     }
 }
 
-impl<C: Config> Encode for ForwardEdgeObservation<C> {
+impl<C: Config> WideColumnValue<QueryNodeColumn> for ForwardEdges<C> {
+    fn discriminant() -> QueryNodeDiscriminant {
+        QueryNodeDiscriminant::ForwardEdges
+    }
+}
+
+/// Marks a dependency that was read on its own.
+const SINGLE_DEPENDENCY: u8 = 0;
+
+/// Marks a group of dependencies that were read in no particular order.
+const UNORDERED_DEPENDENCIES: u8 = 1;
+
+impl<C: Config> ForwardEdges<C> {
+    /// Encodes a dependency together with what was seen of it, which is
+    /// nothing for a dependency that was read without its value.
+    fn encode_callee<E: qbice_serialize::Encoder + ?Sized>(
+        &self,
+        callee: &QueryID,
+        encoder: &mut E,
+        plugin: &qbice_serialize::Plugin,
+        session: &mut qbice_serialize::session::Session,
+    ) -> std::io::Result<()> {
+        callee.encode(encoder, plugin, session)?;
+
+        self.observation.0.get(callee).copied().encode(encoder, plugin, session)
+    }
+
+    /// Decodes a dependency and records what was seen of it.
+    fn decode_callee<D: qbice_serialize::Decoder + ?Sized>(
+        observation: &mut HashMap<QueryID, Observation, C::BuildHasher>,
+        decoder: &mut D,
+        plugin: &qbice_serialize::Plugin,
+        session: &mut qbice_serialize::session::Session,
+    ) -> std::io::Result<QueryID> {
+        let callee = QueryID::decode(decoder, plugin, session)?;
+
+        if let Some(seen) =
+            Option::<Observation>::decode(decoder, plugin, session)?
+        {
+            observation.insert(callee, seen);
+        }
+
+        Ok(callee)
+    }
+}
+
+impl<C: Config> Encode for ForwardEdges<C> {
     fn encode<E: qbice_serialize::Encoder + ?Sized>(
         &self,
         encoder: &mut E,
         plugin: &qbice_serialize::Plugin,
         session: &mut qbice_serialize::session::Session,
     ) -> std::io::Result<()> {
-        (*self.0).encode(encoder, plugin, session)
+        encoder.emit_usize(self.order.0.len())?;
+
+        for dependency in self.order.0.iter() {
+            match dependency {
+                NodeDependency::Single(callee) => {
+                    encoder.emit_u8(SINGLE_DEPENDENCY)?;
+                    self.encode_callee(callee, encoder, plugin, session)?;
+                }
+
+                NodeDependency::Unordered(callees) => {
+                    encoder.emit_u8(UNORDERED_DEPENDENCIES)?;
+                    encoder.emit_usize(callees.len())?;
+
+                    for callee in callees {
+                        self.encode_callee(callee, encoder, plugin, session)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
-impl<C: Config> Decode for ForwardEdgeObservation<C> {
+impl<C: Config> Decode for ForwardEdges<C> {
     fn decode<D: qbice_serialize::Decoder + ?Sized>(
         decoder: &mut D,
         plugin: &qbice_serialize::Plugin,
         session: &mut qbice_serialize::session::Session,
     ) -> std::io::Result<Self> {
-        let map = HashMap::decode(decoder, plugin, session)?;
-        Ok(Self(Arc::new(map)))
+        let len = usize::decode(decoder, plugin, session)?;
+
+        let mut order = Vec::with_capacity(len);
+        let mut observation = HashMap::with_hasher(C::BuildHasher::default());
+
+        for _ in 0..len {
+            match u8::decode(decoder, plugin, session)? {
+                SINGLE_DEPENDENCY => {
+                    order.push(NodeDependency::Single(Self::decode_callee(
+                        &mut observation,
+                        decoder,
+                        plugin,
+                        session,
+                    )?));
+                }
+
+                UNORDERED_DEPENDENCIES => {
+                    let count = usize::decode(decoder, plugin, session)?;
+                    let mut callees = Vec::with_capacity(count);
+
+                    for _ in 0..count {
+                        callees.push(Self::decode_callee(
+                            &mut observation,
+                            decoder,
+                            plugin,
+                            session,
+                        )?);
+                    }
+
+                    order.push(NodeDependency::Unordered(callees));
+                }
+
+                tag => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unknown kind of dependency: {tag}"),
+                    ));
+                }
+            }
+        }
+
+        Ok(Self {
+            order: ForwardEdgeOrder(order.into()),
+            observation: ForwardEdgeObservation(Arc::new(observation)),
+        })
     }
 }
-
-implements_wide_column_value!(QueryKind, QueryNodeDiscriminant::QueryKind);
 
 implements_wide_column_value!(NodeInfo, QueryNodeDiscriminant::NodeInfo);
 
@@ -546,12 +674,8 @@ pub struct Database<C: Config> {
     sync: ManuallyDrop<sync::Sync<C>>,
 
     last_verified: ManuallyDrop<SingleMap<C, QueryNodeColumn, LastVerified>>,
-    forward_edge_order:
-        ManuallyDrop<SingleMap<C, QueryNodeColumn, ForwardEdgeOrder>>,
-    forward_edge_observation:
-        ManuallyDrop<SingleMap<C, QueryNodeColumn, ForwardEdgeObservation<C>>>,
+    forward_edges: ManuallyDrop<SingleMap<C, QueryNodeColumn, ForwardEdges<C>>>,
 
-    query_kind: ManuallyDrop<SingleMap<C, QueryNodeColumn, QueryKind>>,
     node_info: ManuallyDrop<SingleMap<C, QueryNodeColumn, NodeInfo>>,
     pending_backward_projection:
         ManuallyDrop<SingleMap<C, QueryNodeColumn, PendingBackwardProjection>>,
@@ -585,11 +709,8 @@ impl<C: Config> Database<C> {
 
         Self {
             last_verified: ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, LastVerified>()),
-            forward_edge_order:
-                ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, ForwardEdgeOrder>()),
-            forward_edge_observation: ManuallyDrop::new(write_manager
-                .new_single_map::<QueryNodeColumn, ForwardEdgeObservation<C>>()),
-            query_kind: ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, QueryKind>()),
+            forward_edges:
+                ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, ForwardEdges<C>>()),
             node_info: ManuallyDrop::new(write_manager.new_single_map::<QueryNodeColumn, NodeInfo>()),
             pending_backward_projection: ManuallyDrop::new(write_manager
                 .new_single_map::<QueryNodeColumn, PendingBackwardProjection>()),
@@ -631,11 +752,7 @@ impl<C: Config> Drop for Database<C> {
             // These are the heavy data structures that take time to drop.
             let sync = ManuallyDrop::take(&mut self.sync);
             let last_verified = ManuallyDrop::take(&mut self.last_verified);
-            let forward_edge_order =
-                ManuallyDrop::take(&mut self.forward_edge_order);
-            let forward_edge_observation =
-                ManuallyDrop::take(&mut self.forward_edge_observation);
-            let query_kind = ManuallyDrop::take(&mut self.query_kind);
+            let forward_edges = ManuallyDrop::take(&mut self.forward_edges);
             let node_info = ManuallyDrop::take(&mut self.node_info);
             let pending_backward_projection =
                 ManuallyDrop::take(&mut self.pending_backward_projection);
@@ -647,9 +764,7 @@ impl<C: Config> Drop for Database<C> {
 
             drop_async!(wait_group, sync);
             drop_async!(wait_group, last_verified);
-            drop_async!(wait_group, forward_edge_order);
-            drop_async!(wait_group, forward_edge_observation);
-            drop_async!(wait_group, query_kind);
+            drop_async!(wait_group, forward_edges);
             drop_async!(wait_group, node_info);
             drop_async!(wait_group, pending_backward_projection);
             drop_async!(wait_group, dirty_edge_set);
@@ -687,7 +802,7 @@ impl<C: Config> Engine<C> {
     /// Retrieving the query kind from a global database is safe since the
     /// query kind is immutable once created.
     pub(super) async fn get_query_kind(&self, query_id: &QueryID) -> QueryKind {
-        self.computation_graph.database.query_kind.get(query_id).await.unwrap()
+        self.computation_graph.database.get_query_kind(query_id).await
     }
 
     /// Retrieving the query input from a global database is safe since the
@@ -737,29 +852,27 @@ impl<C: Config> Engine<C> {
         Option<Interned<TransitiveFirewallCallees>>,
     ) {
         let node_info =
-            self.computation_graph.database.query_kind.get(query_id).await;
+            self.computation_graph.database.node_info.get(query_id).await;
         let forward_edge_order = self
             .computation_graph
             .database
-            .forward_edge_order
+            .forward_edges
             .get(query_id)
-            .await;
+            .await
+            .map(|x| x.order);
+
+        let query_kind = node_info.as_ref().map(NodeInfo::kind);
 
         let transitive_firewall_callees = if include_tfc
-            || node_info.is_some_and(|x| {
+            || query_kind.is_some_and(|x| {
                 x == QueryKind::Executable(ExecutionStyle::Firewall)
             }) {
-            self.computation_graph
-                .database
-                .node_info
-                .get(query_id)
-                .await
-                .map(|x| x.transitive_firewall_callees)
+            node_info.map(|x| x.transitive_firewall_callees)
         } else {
             None
         };
 
-        (node_info, forward_edge_order, transitive_firewall_callees)
+        (query_kind, forward_edge_order, transitive_firewall_callees)
     }
 }
 
@@ -827,7 +940,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         let mut tx = self.engine().new_write_transaction();
 
         let new_node_info = if let Some(x) = new_tfc {
-            let mut current_node_info = self.node_info().await.unwrap();
+            let mut current_node_info = self.node_info().await.unwrap().clone();
 
             current_node_info.transitive_firewall_callees = x;
             current_node_info.transitive_firewall_callees_fingerprint = self
@@ -901,11 +1014,15 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         let transitive_firewall_callees_fingerprint =
             self.engine().hash(&tfc_achetype);
 
-        let forward_edge_order = ForwardEdgeOrder(forward_edge_order);
-        let forward_edge_observations =
-            ForwardEdgeObservation::<C>(Arc::new(forward_edge_observations));
+        let new_forward_edges = ForwardEdges::<C> {
+            order: ForwardEdgeOrder(forward_edge_order),
+            observation: ForwardEdgeObservation(Arc::new(
+                forward_edge_observations,
+            )),
+        };
 
         let node_info = NodeInfo::new(
+            query_kind,
             query_value_fingerprint,
             transitive_firewall_callees_fingerprint,
             tfc_achetype,
@@ -935,7 +1052,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                     if previous_callees.is_empty() {
                         HashSet::default()
                     } else {
-                        callees(&forward_edge_order.0).copied().collect()
+                        callees(&new_forward_edges.order.0).copied().collect()
                     };
 
                 for callee in callees(forward_edges) {
@@ -985,13 +1102,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             self.engine()
                 .computation_graph
                 .database
-                .query_kind
-                .insert(*self.query_id(), query_kind, &mut tx)
-                .await;
-
-            self.engine()
-                .computation_graph
-                .database
                 .last_verified
                 .insert(
                     *self.query_id(),
@@ -1000,7 +1110,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 )
                 .await;
 
-            for callee in callees(&forward_edge_order.0) {
+            for callee in callees(&new_forward_edges.order.0) {
                 if !previous_callees.contains(callee) {
                     self.engine()
                         .computation_graph
@@ -1014,15 +1124,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             self.engine()
                 .computation_graph
                 .database
-                .forward_edge_order
-                .insert(*self.query_id(), forward_edge_order, &mut tx)
-                .await;
-
-            self.engine()
-                .computation_graph
-                .database
-                .forward_edge_observation
-                .insert(*self.query_id(), forward_edge_observations, &mut tx)
+                .forward_edges
+                .insert(*self.query_id(), new_forward_edges, &mut tx)
                 .await;
 
             self.engine()
@@ -1079,12 +1182,24 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         let query_id = QueryID::new::<Q>(query_hash_128);
 
         // if have an existing forward edges, unwire the backward edges
-        let existing_forward_edges = self.forward_edge_order().await;
+        let existing_forward_edges = self.forward_edge_order().await.cloned();
 
-        let empty_forward_edges = ForwardEdgeOrder(Arc::from([]));
-        let empty_forward_edge_observations = ForwardEdgeObservation::<C>(
-            Arc::new(HashMap::with_hasher(C::BuildHasher::default())),
-        );
+        let empty_forward_edges = ForwardEdges::<C> {
+            order: ForwardEdgeOrder(Arc::from([])),
+            observation: ForwardEdgeObservation(Arc::new(
+                HashMap::with_hasher(C::BuildHasher::default()),
+            )),
+        };
+
+        // An input that is set is an input from then on. A query that is
+        // refreshed keeps the kind it was computed with.
+        let query_kind = if set_input {
+            QueryKind::Input
+        } else {
+            self.query_kind()
+                .await
+                .expect("a query that is refreshed has been computed before")
+        };
 
         let transitive_firewall_callees =
             self.engine().create_tfc(HashSet::default());
@@ -1092,6 +1207,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             self.engine().hash(&transitive_firewall_callees);
 
         let node_info = NodeInfo::new(
+            query_kind,
             query_value_fingerprint,
             transitive_firewall_callees_fingerprint,
             transitive_firewall_callees,
@@ -1126,15 +1242,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 }
             }
 
-            if set_input {
-                self.engine()
-                    .computation_graph
-                    .database
-                    .query_kind
-                    .insert(query_id, QueryKind::Input, tx)
-                    .await;
-            }
-
             self.engine()
                 .computation_graph
                 .database
@@ -1145,15 +1252,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             self.engine()
                 .computation_graph
                 .database
-                .forward_edge_order
+                .forward_edges
                 .insert(query_id, empty_forward_edges, tx)
-                .await;
-
-            self.engine()
-                .computation_graph
-                .database
-                .forward_edge_observation
-                .insert(query_id, empty_forward_edge_observations, tx)
                 .await;
 
             self.engine()
@@ -1237,7 +1337,7 @@ impl<C: Config> Database<C> {
     /// Retrieving the query kind from a global database is safe since the
     /// query kind is immutable once created.
     pub(super) async fn get_query_kind(&self, query_id: &QueryID) -> QueryKind {
-        self.query_kind.get(query_id).await.unwrap()
+        self.node_info.get(query_id).await.unwrap().kind
     }
 }
 

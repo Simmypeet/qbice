@@ -337,7 +337,7 @@ impl<C: Config> InputSession<C> {
 
         let mut snapshot = self.engine.get_exclusive_snapshot(query_hash).await;
 
-        let current_value = snapshot.query_result().await;
+        let current_value = snapshot.query_result().await.cloned();
         let new_value = update_fn(current_value);
 
         let query_value_fingerprint = self.engine.hash(&new_value);
