@@ -304,7 +304,7 @@ async fn double_square_summing() {
 
     // there shouldd be only two dirtied edges:
     // CollectDoubledSquareVariables -> SlowSquare -> Variable(0)
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 2);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 2);
 
     drop(tracked_engine);
 
@@ -326,7 +326,7 @@ async fn double_square_summing() {
     // 2 from the previous assertion +
     // each of the 8 DoubleSquare -> CollectDoubledSquareVariables +
     // DoubleSquare(Variable(0)) -> SumAllDoubleSquares
-    assert_eq!(engine.tracked().await.get_dirtied_edges_count(), 11);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 11);
 }
 
 // ============================================================================
@@ -403,7 +403,7 @@ async fn multiple_projections_single_firewall() {
     // Check dirtied edges - should only be 2:
     // CollectDoubledSquareVariables -> SlowSquare(0) -> Variable(0)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 2);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 2);
     drop(tracked);
 
     // Re-query projection for Variable(1) - this triggers firewall repair
@@ -429,7 +429,7 @@ async fn multiple_projections_single_firewall() {
     // - Original 2 from previous assertion
     // - Each of the 3 DoubleSquare -> CollectDoubledSquareVariables edges
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 5);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 5);
     drop(tracked);
 
     // Query the changed projection
@@ -651,7 +651,7 @@ async fn diamond_projection_pattern() {
 
     // Only 1 dirtied edge: Firewall -> Variable(2)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     // Re-query combiner
@@ -676,7 +676,7 @@ async fn diamond_projection_pattern() {
     // - ProjectionLevel1(0) -> SimpleFirewall
     // - ProjectionLevel1(1) -> SimpleFirewall
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 3);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 3);
     drop(tracked);
 
     // Now change Variable(0) which DOES affect proj1(0)
@@ -687,7 +687,7 @@ async fn diamond_projection_pattern() {
 
     // Only 1 dirtied edge: Firewall -> Variable(0)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     // Re-query combiner
@@ -708,7 +708,7 @@ async fn diamond_projection_pattern() {
     // - ProjectionLevel1(1) -> SimpleFirewall
     // - DiamondCombiner -> ProjectionLevel1(0)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 4);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 4);
     drop(tracked);
 }
 
@@ -871,7 +871,7 @@ async fn diamond_all_projections_pattern() {
 
     // Only 1 dirtied edge: Firewall -> Variable(2)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     {
@@ -1543,7 +1543,7 @@ async fn firewall_same_output_no_propagation() {
 
     // 2 dirtied edges: Firewall -> Variable(0), Firewall -> Variable(1)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 2);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 2);
     drop(tracked);
 
     // Re-query
@@ -1566,8 +1566,7 @@ async fn firewall_same_output_no_propagation() {
 
     // After query, check dirtied edges - should include backward prop edges
     // but be minimal
-    let tracked = engine.clone().tracked().await;
-    let dirtied = tracked.get_dirtied_edges_count();
+    let dirtied = engine.statistics().total().dirtied_edges();
     // Should be: 2 original + Projection -> Firewall from backward prop
     assert!(
         dirtied <= 4,
@@ -1847,7 +1846,7 @@ async fn nested_firewall_with_projection() {
     // Only 1 dirtied edge: OuterFirewall -> Variable(0)
     // InnerFirewall and beyond are NOT dirtied due to firewall boundary
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     // Re-query
@@ -1865,8 +1864,7 @@ async fn nested_firewall_with_projection() {
     assert_eq!(consumer_ex.0.load(Ordering::SeqCst), 2);
 
     // Final dirtied edge count check
-    let tracked = engine.clone().tracked().await;
-    let dirtied = tracked.get_dirtied_edges_count();
+    let dirtied = engine.statistics().total().dirtied_edges();
     // Should include edges from backward propagation through firewalls
     // but be controlled by projection boundaries
     assert!(
@@ -2110,7 +2108,7 @@ async fn projection_with_two_firewalls() {
 
     // Only 1 dirtied edge: FirewallA -> Variable(0)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     // Re-query
@@ -2140,7 +2138,7 @@ async fn projection_with_two_firewalls() {
 
     // Only 1 dirtied edge: FirewallB -> Variable(1)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     // Re-query
@@ -2172,7 +2170,7 @@ async fn projection_with_two_firewalls() {
 
     // 2 dirtied edges: FirewallA -> Variable(0), FirewallB -> Variable(1)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 2);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 2);
     drop(tracked);
 
     // Re-query
@@ -2209,7 +2207,7 @@ async fn projection_with_two_firewalls() {
 
     // 0 dirtied edges since value didn't change
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 0);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 0);
     drop(tracked);
 
     // Re-query - everything should be cached
@@ -2464,7 +2462,7 @@ async fn chained_projections() {
 
     // Should have 1 dirtied edge: FirewallA -> Variable(0)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     {
@@ -2486,7 +2484,7 @@ async fn chained_projections() {
     // - ProjectionOuter -> ProjectionInner
     // - Consumer -> ProjectionOuter
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 4);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 4);
     drop(tracked);
 
     // =========================================================================
@@ -2500,7 +2498,7 @@ async fn chained_projections() {
 
     // 0 dirtied edges since value didn't change
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 0);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 0);
     drop(tracked);
 
     // Re-query - everything should be cached
@@ -2771,7 +2769,7 @@ async fn chained_projections_unchanged_intermediate() {
 
     // Should have 1 dirtied edge: IdentityFirewall -> Variable(0)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     {
@@ -2783,7 +2781,7 @@ async fn chained_projections_unchanged_intermediate() {
         // Should have 2 dirtied edges now:
         // - Original 1 from previous assertion
         // - AbsoluteValueProjection -> IdentityFirewall
-        assert_eq!(tracked.get_dirtied_edges_count(), 2);
+        assert_eq!(engine.statistics().total().dirtied_edges(), 2);
     }
 
     // Firewall should recompute (input changed)
@@ -3191,7 +3189,7 @@ async fn diamond_mixed_projection_firewall() {
 
     // Should have 1 dirtied edge: TopFirewall -> Variable(0)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     {
@@ -3227,7 +3225,7 @@ async fn diamond_mixed_projection_firewall() {
 
     // 0 dirtied edges since value didn't change
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 0);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 0);
     drop(tracked);
 
     {
@@ -3608,7 +3606,7 @@ async fn diamond_firewall_projection_firewall_sandwich() {
 
     // Should have 1 dirtied edge: TopFirewall -> Variable(0)
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
     drop(tracked);
 
     {
@@ -3644,7 +3642,7 @@ async fn diamond_firewall_projection_firewall_sandwich() {
 
     // 0 dirtied edges since value didn't change
     let tracked = engine.clone().tracked().await;
-    assert_eq!(tracked.get_dirtied_edges_count(), 0);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 0);
     drop(tracked);
 
     {

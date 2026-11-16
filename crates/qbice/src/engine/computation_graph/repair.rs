@@ -18,6 +18,7 @@ use crate::{
         caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
         computing::{ComputingLockGuard, QueryComputing},
         database::{Snapshot, Timestamp},
+        statistics::Event,
     },
     executor::CyclicError,
     query::QueryID,
@@ -249,6 +250,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         // skip if not dirty
         // however, we can't skip if pedantic_repair is true
         let edge_is_dirty = engine.is_edge_dirty(*query_id, *callee).await;
+        engine
+            .computation_graph
+            .statistics_recorder
+            .record(query_id.stable_type_id(), Event::EdgeChecked);
 
         if !edge_is_dirty
             && !pedantic_repair

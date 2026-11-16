@@ -40,6 +40,13 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             }
         }
 
+        tracing::debug!(
+            target: "qbice::dirty",
+            query = std::any::type_name::<Q>(),
+            projections = backward_projections.len(),
+            "rerunning the projections of a changed query"
+        );
+
         let expected_parallelism = available_parallelism()
             .map_or_else(|_| 1, std::num::NonZero::get)
             * 4;

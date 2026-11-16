@@ -14,8 +14,10 @@ use std::{
 
 use fxhash::FxHasher;
 use qbice::{
-    Decode, Encode, Engine, Identifiable, StableHash, TrackedEngine,
+    Decode, Encode, Engine, Identifiable, Observability, StableHash,
+    StatisticsLevel, TrackedEngine,
     config::Config,
+    engine::EngineOptions,
     executor::Executor,
     query::Query,
     serialize::Plugin,
@@ -330,15 +332,35 @@ impl Config for TestingConfig {
     type BuildHasher = BuildHasherDefault<FxHasher>;
 }
 
+/// An engine storing its values in `tempdir`, which counts its work by query
+/// type and by edge, for the tests to assert.
 pub async fn create_test_engine(tempdir: &TempDir) -> Engine<TestingConfig> {
-    Engine::<TestingConfig>::new_with(
-        Plugin::default(),
-        DbBackedFactory::builder()
-            .configuration(Configuration::builder().cache_capacity(8).build())
-            .db_factory(RocksDB::factory(tempdir.path()))
-            .build(),
-        SeededStableHasherBuilder::<Sip128Hasher>::new(0),
+    create_test_engine_with(
+        tempdir,
+        Observability::builder().statistics(StatisticsLevel::ByEdge).build(),
     )
     .await
-    .unwrap()
+}
+
+/// An engine storing its values in `tempdir`, which records its work as
+/// `observability` chooses.
+pub async fn create_test_engine_with(
+    tempdir: &TempDir,
+    observability: Observability,
+) -> Engine<TestingConfig> {
+    Engine::<TestingConfig>::new_with_options()
+        .serialization_plugin(Plugin::default())
+        .storage_engine_factory(
+            DbBackedFactory::builder()
+                .configuration(
+                    Configuration::builder().cache_capacity(8).build(),
+                )
+                .db_factory(RocksDB::factory(tempdir.path()))
+                .build(),
+        )
+        .stable_hasher(SeededStableHasherBuilder::<Sip128Hasher>::new(0))
+        .options(EngineOptions::builder().observability(observability).build())
+        .build()
+        .await
+        .unwrap()
 }

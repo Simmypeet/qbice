@@ -34,7 +34,8 @@ use crate::{
 /// 3. **Commit**: Automatically triggered on drop
 ///    - Dirty propagation executes in parallel via the Rayon thread pool
 ///    - Write buffer is submitted to persistent storage
-///    - Statistics are reset and internal state is cleaned up
+///    - Statistics are reset, unless they count the engine's lifetime, and
+///      internal state is cleaned up
 ///
 /// # Dirty Propagation
 ///
@@ -117,7 +118,7 @@ impl<C: Config> InputSession<C> {
         dirty_batch: VecDeque<QueryID>,
         mut transaction: WriteTransaction<C>,
     ) {
-        engine.computation_graph.reset_statistic();
+        engine.computation_graph.reset_statistics_on_commit();
         engine.clear_dirtied_queries();
 
         transaction =
@@ -285,6 +286,10 @@ impl<C: Config> InputSession<C> {
         let transaction = self.transaction.clone();
         let dirty_batch = self.dirty_batch.clone();
 
+        if set_input_result == SetInputResult::Updated {
+            tracing::debug!(target: "qbice::dirty", query = ?query, "input changed");
+        }
+
         async move {
             if set_input_result == SetInputResult::Updated {
                 dirty_batch.write().await.push_back(query_id);
@@ -359,6 +364,10 @@ impl<C: Config> InputSession<C> {
 
         let transaction = self.transaction.clone();
         let dirty_batch = self.dirty_batch.clone();
+
+        if set_input_result == SetInputResult::Updated {
+            tracing::debug!(target: "qbice::dirty", query = ?query, "input changed");
+        }
 
         async move {
             if set_input_result == SetInputResult::Updated {
@@ -530,6 +539,12 @@ impl<C: Config> InputSession<C> {
                                     != refresh_result.query_result_hash;
 
                             if fingerprint_diff {
+                                tracing::debug!(
+                                    target: "qbice::dirty",
+                                    query = ?refresh_result.query_input,
+                                    "external input changed"
+                                );
+
                                 let query_id = QueryID::new::<Q>(
                                     refresh_result.query_input_hash,
                                 );

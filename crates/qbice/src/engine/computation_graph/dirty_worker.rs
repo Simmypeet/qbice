@@ -16,7 +16,7 @@ use crate::{
         QueryKind,
         database::{Database, Edge},
         dirty_worker::task::{Batch, DirtyTask, StrippedBuffer},
-        statistic::Statistic,
+        statistics::{Event, StatisticsRecorder},
     },
     query::QueryID,
 };
@@ -38,7 +38,7 @@ pub struct DirtyWorker<C: Config> {
 impl<C: Config> DirtyWorker<C> {
     pub fn new(
         database: &Arc<Database<C>>,
-        stats: &Arc<Statistic>,
+        stats: &Arc<StatisticsRecorder>,
         dirtied_queries: &Arc<DashSet<QueryID, C::BuildHasher>>,
     ) -> Self {
         let parallelism =
@@ -134,7 +134,7 @@ impl<C: Config> DirtyWorker<C> {
         notify: &Notify,
         shutdown: &RwLock<bool>,
         database: &Weak<Database<C>>,
-        statistic: &Weak<Statistic>,
+        statistics_recorder: &Weak<StatisticsRecorder>,
         dirtied_queries: &Weak<DashSet<QueryID, C::BuildHasher>>,
     ) {
         loop {
@@ -146,7 +146,7 @@ impl<C: Config> DirtyWorker<C> {
                     injector,
                     notify,
                     database,
-                    statistic,
+                    statistics_recorder,
                     dirtied_queries,
                 )
                 .await;
@@ -180,7 +180,7 @@ impl<C: Config> DirtyWorker<C> {
                     injector,
                     notify,
                     database,
-                    statistic,
+                    statistics_recorder,
                     dirtied_queries,
                 )
                 .await;
@@ -198,11 +198,11 @@ impl<C: Config> DirtyWorker<C> {
         injector: &Injector<DirtyTask<C>>,
         notify: &Notify,
         database: &Weak<Database<C>>,
-        statistic: &Weak<Statistic>,
+        statistics_recorder: &Weak<StatisticsRecorder>,
         dirtied_queries: &Weak<DashSet<QueryID, C::BuildHasher>>,
     ) {
         let dirtied_queries = dirtied_queries.upgrade().unwrap();
-        let statistic = statistic.upgrade().unwrap();
+        let statistics_recorder = statistics_recorder.upgrade().unwrap();
         let database = database.upgrade().unwrap();
 
         if !dirtied_queries.insert(*task.query_id()) {
@@ -245,7 +245,10 @@ impl<C: Config> DirtyWorker<C> {
                     task.push_to_buffer(Edge::new(caller, *task.query_id()));
                 }
 
-                statistic.add_dirtied_edge_count();
+                statistics_recorder
+                    .record(caller.stable_type_id(), Event::DirtiedEdge {
+                        callee: query_id.stable_type_id(),
+                    });
             }
 
             let query_kind = database.get_query_kind(&caller).await;
@@ -258,6 +261,8 @@ impl<C: Config> DirtyWorker<C> {
             ) {
                 // don't continue propagation through firewall or
                 // projection nodes
+                statistics_recorder
+                    .record(caller.stable_type_id(), Event::PropagationStopped);
                 continue;
             }
 

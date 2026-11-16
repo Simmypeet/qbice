@@ -7,7 +7,11 @@ pub(crate) use database::{ActiveInputSessionGuard, QueryDebug};
 pub use input_session::{InputSession, SetInputResult};
 use qbice_serialize::{Decode, Encode};
 use qbice_stable_hash::{BuildStableHasher, StableHash, StableHasher};
-use qbice_stable_type_id::Identifiable;
+use qbice_stable_type_id::{Identifiable, StableTypeID};
+pub use statistics::{
+    Observability, QueryStatistics, Statistics, StatisticsLevel,
+    StatisticsReset,
+};
 use thread_local::ThreadLocal;
 
 use crate::{
@@ -21,7 +25,7 @@ use crate::{
         fast_path::FastPathResult,
         query_lock_manager::QueryLockManager,
         slow_path::SlowPath,
-        statistic::Statistic,
+        statistics::StatisticsRecorder,
     },
     executor::{CyclicError, CyclicPanicPayload},
     query::QueryID,
@@ -38,7 +42,7 @@ mod query_lock_manager;
 mod register_callee;
 mod repair;
 mod slow_path;
-mod statistic;
+mod statistics;
 mod tfc_achetype;
 mod visualization;
 
@@ -76,35 +80,39 @@ impl QueryKind {
 
 pub struct ComputationGraph<C: Config> {
     // NOTE: we drop the dirty worker first as it holds Weak references to
-    // `database`, `statistic`, and `dirtied_queries`.
+    // `database`, `statistics_recorder`, and `dirtied_queries`.
     dirty_worker: DirtyWorker<C>,
 
     dirtied_queries: Arc<DashSet<QueryID, C::BuildHasher>>,
 
     database: Arc<Database<C>>,
-    statistic: Arc<Statistic>,
+    statistics_recorder: Arc<StatisticsRecorder>,
 
     computing: Computing<C>,
     lock_manager: QueryLockManager,
 }
 
 impl<C: Config> ComputationGraph<C> {
-    pub async fn new(db: &C::StorageEngine) -> Self {
+    pub async fn new(
+        db: &C::StorageEngine,
+        observability: Observability,
+    ) -> Self {
         let database = Arc::new(Database::new(db).await);
-        let statistic = Arc::new(Statistic::default());
+        let statistics_recorder =
+            Arc::new(StatisticsRecorder::new(observability));
         let dirtied_queries =
             Arc::new(DashSet::with_hasher(C::BuildHasher::default()));
 
         Self {
             dirty_worker: DirtyWorker::new(
                 &database,
-                &statistic,
+                &statistics_recorder,
                 &dirtied_queries,
             ),
 
             database,
             dirtied_queries,
-            statistic,
+            statistics_recorder,
 
             computing: Computing::new(),
             lock_manager: QueryLockManager::new(2u64.pow(14)),
@@ -179,6 +187,27 @@ pub struct TrackedEngine<C: Config> {
 }
 
 impl<C: Config> TrackedEngine<C> {
+    /// The name of the query type `type_id`, or `None` if it has no
+    /// registered executor: see [`Engine::get_type_name_from_stable_type_id`].
+    #[must_use]
+    pub fn get_type_name_from_stable_type_id(
+        &self,
+        type_id: StableTypeID,
+    ) -> Option<&'static str> {
+        self.engine.get_type_name_from_stable_type_id(type_id)
+    }
+
+    /// The execution style of the query type `type_id`, or `None` if it has
+    /// no registered executor: see
+    /// [`Engine::get_execution_style_from_stable_type_id`].
+    #[must_use]
+    pub fn get_execution_style_from_stable_type_id(
+        &self,
+        type_id: StableTypeID,
+    ) -> Option<ExecutionStyle> {
+        self.engine.get_execution_style_from_stable_type_id(type_id)
+    }
+
     /// Executes a query and returns its value.
     ///
     /// This is the primary method for retrieving computed values from the

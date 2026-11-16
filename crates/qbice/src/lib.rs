@@ -90,7 +90,10 @@ pub use config::Config;
 pub use config::DefaultConfig;
 pub use engine::{
     Engine,
-    computation_graph::{InputSession, SetInputResult, TrackedEngine},
+    computation_graph::{
+        InputSession, Observability, QueryStatistics, SetInputResult,
+        Statistics, StatisticsLevel, StatisticsReset, TrackedEngine,
+    },
 };
 pub use executor::{CyclicError, Executor};
 // re-export companion crates
@@ -100,6 +103,6 @@ pub use qbice_serialize::{Decode, Encode};
 pub use qbice_stable_hash as stable_hash;
 pub use qbice_stable_hash::StableHash;
 pub use qbice_stable_type_id as stable_type_id;
-pub use qbice_stable_type_id::Identifiable;
+pub use qbice_stable_type_id::{Identifiable, StableTypeID};
 pub use qbice_storage as storage;
 pub use query::{ExecutionStyle, Query};

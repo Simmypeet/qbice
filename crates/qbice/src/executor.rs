@@ -330,6 +330,7 @@ fn obtain_execution_style<
 #[derive(Debug, Clone)]
 pub(crate) struct Entry<C: Config> {
     executor: Arc<dyn Any + Send + Sync>,
+    query_type_name: &'static str,
     invoke_executor: InvokeExecutorFn<C>,
     query_debug: DebugQueryFn<C>,
     repair_query: RepairQueryFn<C>,
@@ -343,12 +344,18 @@ impl<C: Config> Entry<C> {
     ) -> Self {
         Self {
             executor,
+            query_type_name: std::any::type_name::<Q>(),
             invoke_executor: invoke_executor::<C, E, Q>,
             query_debug: Engine::<C>::get_query_debug_future::<Q>,
             repair_query: Engine::<C>::repair_query_from_query_id::<Q>,
             obtain_scc_value: obtain_scc_value::<C, E, Q>,
             obtain_execution_style: obtain_execution_style::<C, E, Q>,
         }
+    }
+
+    /// Returns the Rust type name of the query, for diagnostics logs.
+    pub(crate) const fn query_type_name(&self) -> &'static str {
+        self.query_type_name
     }
 
     pub async fn invoke_executor<Q: Query>(

@@ -1,3 +1,4 @@
+use qbice_stable_hash::Compact128;
 use thread_local::ThreadLocal;
 use tracing::instrument;
 
@@ -11,6 +12,7 @@ use crate::{
             },
             computing::{ComputingLockGuard, ComputingMode, WriteGuard},
             database::Snapshot,
+            statistics::Event,
         },
         guard::GuardExt,
     },
@@ -136,6 +138,30 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 let fingerprint = self.engine().hash(&value);
                 let updated = old_node_info.value_fingerprint() != fingerprint;
 
+                self.record(if updated {
+                    Event::RecomputedChanged
+                } else {
+                    Event::RecomputedUnchanged
+                });
+
+                // a changed firewall or projection is a root of dirty
+                // propagation; an unchanged one stops it
+                if updated {
+                    tracing::debug!(
+                        target: "qbice::dirty",
+                        kind = ?old_kind,
+                        query = ?query,
+                        "recomputed to a new value, propagating dirtiness"
+                    );
+                } else {
+                    tracing::trace!(
+                        target: "qbice::dirty",
+                        kind = ?old_kind,
+                        query = ?query,
+                        "recomputed to the same value, stopping dirtiness"
+                    );
+                }
+
                 let mut write_buffer = self.engine().new_write_transaction();
 
                 // if fingerprint has changed, we do dirty propagation
@@ -160,7 +186,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                         && updated,
                 )
             } else {
-                (self.engine().new_write_transaction(), None, false)
+                let fingerprint =
+                    self.record_execution(&value, execute_query_for).await;
+
+                (self.engine().new_write_transaction(), fingerprint, false)
             };
 
             self.computing_lock_to_computed(
@@ -185,6 +214,52 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 }
 
 impl<C: Config, Q: Query> Snapshot<C, Q> {
+    /// Records `event` for the type of this query in the statistics.
+    pub(super) fn record(&self, event: Event) {
+        self.engine()
+            .computation_graph
+            .statistics_recorder
+            .record(self.query_id().stable_type_id(), event);
+    }
+
+    /// Records the execution of this query, which gave `value`, in the
+    /// statistics, unless it is a firewall or a projection executed again,
+    /// whose change is recorded where it is decided.
+    ///
+    /// Returns the fingerprint of `value` if it had to compute it, to tell
+    /// whether a query executed again changed, so that storing the value
+    /// does not compute it again.
+    async fn record_execution(
+        &mut self,
+        value: &Q::Value,
+        execute_query_for: ExecuteQueryFor,
+    ) -> Option<Compact128> {
+        if !self.engine().computation_graph.statistics_recorder.is_enabled() {
+            return None;
+        }
+
+        match execute_query_for {
+            ExecuteQueryFor::FreshQuery => {
+                self.record(Event::Fresh);
+                None
+            }
+
+            ExecuteQueryFor::RecomputeQuery => {
+                let fingerprint = self.engine().hash(value);
+                let old_fingerprint =
+                    self.node_info().await.map(|info| info.value_fingerprint());
+
+                self.record(if old_fingerprint == Some(fingerprint) {
+                    Event::RecomputedUnchanged
+                } else {
+                    Event::RecomputedChanged
+                });
+
+                Some(fingerprint)
+            }
+        }
+    }
+
     #[instrument(
         skip(self, caller_information, lock_guard),
         level = "debug",

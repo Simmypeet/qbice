@@ -173,7 +173,7 @@ async fn firewall() {
     let tracked_engine = engine.clone().tracked().await;
 
     // only Square -> Variable is dirtied
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(
         tracked_engine.query(&NegativeSquareToString(Variable(0))).await,
@@ -186,7 +186,7 @@ async fn firewall() {
     assert_eq!(negative_square_to_string_ex.0.load(Ordering::Relaxed), 1);
 
     // only 1 edge should be dirtied in total since firewall hasn't changed
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     // Step 3: change to 4, now the whole query chain should be re-executed
     drop(tracked_engine);
@@ -197,11 +197,11 @@ async fn firewall() {
         input_session.set_input(Variable(0), 4).await;
     }
 
-    let tracked_engine = engine.tracked().await;
+    let tracked_engine = engine.clone().tracked().await;
 
     // for now dirty edge only reach to firewall, but will pass through all
     // the rest queries later
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(
         tracked_engine.query(&NegativeSquareToString(Variable(0))).await,
@@ -214,7 +214,7 @@ async fn firewall() {
     assert_eq!(negative_square_to_string_ex.0.load(Ordering::Relaxed), 2);
 
     // all edges should be dirtied now
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 3);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 3);
 }
 
 // ============================================================================
@@ -386,7 +386,7 @@ async fn chained_firewalls() {
     let tracked_engine = engine.clone().tracked().await;
 
     // Only edge to first firewall should be dirty
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
@@ -399,7 +399,7 @@ async fn chained_firewalls() {
     assert_eq!(double_ex.0.load(Ordering::Relaxed), 1);
 
     // Step 2 dirtied edges should still be 1
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     // Step 3: change to 80, first firewall changes, second blocks
     // (min(80,100)=80 vs min(50,100)=50)
@@ -413,7 +413,7 @@ async fn chained_firewalls() {
     let tracked_engine = engine.clone().tracked().await;
 
     // Only edge to first firewall should be dirty
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
@@ -426,7 +426,7 @@ async fn chained_firewalls() {
     assert_eq!(double_ex.0.load(Ordering::Relaxed), 2);
 
     // All of the edges should be dirtied now
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 3);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 3);
 
     // Step 4: change to 150, first firewall changes, second blocks
     // (min(150,100)=100 = previous 80? No, previous was 80)
@@ -442,7 +442,7 @@ async fn chained_firewalls() {
     let tracked_engine = engine.clone().tracked().await;
 
     // Only edge to first firewall should be dirty
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
@@ -454,7 +454,7 @@ async fn chained_firewalls() {
     assert_eq!(double_ex.0.load(Ordering::Relaxed), 3);
 
     // All edges should be dirtied now
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 3);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 3);
 
     // Step 5: change to 200, first firewall changes (150->200), second blocks
     // (min(200,100)=100 = min(150,100)=100)
@@ -465,10 +465,10 @@ async fn chained_firewalls() {
         input_session.set_input(Variable(0), 200).await;
     }
 
-    let tracked_engine = engine.tracked().await;
+    let tracked_engine = engine.clone().tracked().await;
 
     // Only edge to first firewall should be dirty
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(
         tracked_engine.query(&DoubleClampedValue(Variable(0))).await,
@@ -481,7 +481,7 @@ async fn chained_firewalls() {
     assert_eq!(double_ex.0.load(Ordering::Relaxed), 3); // NOT called again!
 
     // This time only 2 edges dirtied since final firewall blocked propagation
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 2);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 2);
 }
 
 // ============================================================================
@@ -930,7 +930,7 @@ async fn firewall_conditional_dependency() {
     let tracked_engine = engine.clone().tracked().await;
 
     // total of 2 edges are dirtied: condition and value
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 2);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 2);
 
     assert_eq!(
         tracked_engine
@@ -949,7 +949,7 @@ async fn firewall_conditional_dependency() {
     assert_eq!(conditional_ex.0.load(Ordering::Relaxed), 2);
 
     // all of the edges should be dirtied now
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 3);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 3);
 
     // Change value while condition is false
     drop(tracked_engine);
@@ -959,10 +959,10 @@ async fn firewall_conditional_dependency() {
         input_session.set_input(Variable(1), 100).await;
     }
 
-    let tracked_engine = engine.tracked().await;
+    let tracked_engine = engine.clone().tracked().await;
 
     // only edge Square -> Variable(1) is dirtied
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(
         tracked_engine
@@ -975,7 +975,7 @@ async fn firewall_conditional_dependency() {
     );
 
     // no new edges dirtied
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     // Square not called,
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 3);
@@ -1016,7 +1016,7 @@ async fn firewall_dirty_propagation_on_change() {
     assert_eq!(negative_square_ex.0.load(Ordering::Relaxed), 1);
 
     // Initially only 0 edges dirtied
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 0);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 0);
 
     drop(tracked_engine);
 
@@ -1029,7 +1029,7 @@ async fn firewall_dirty_propagation_on_change() {
     let tracked_engine = engine.clone().tracked().await;
 
     // Before querying, only edge to firewall is dirty
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(
         tracked_engine.query(&NegativeSquare(Variable(0))).await,
@@ -1037,7 +1037,7 @@ async fn firewall_dirty_propagation_on_change() {
     );
 
     // After querying, firewall changed so propagation happened
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 2);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 2);
 
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 2);
     assert_eq!(negative_square_ex.0.load(Ordering::Relaxed), 2);
@@ -1050,7 +1050,7 @@ async fn firewall_dirty_propagation_on_change() {
         input_session.set_input(Variable(0), -3).await;
     }
 
-    let tracked_engine = engine.tracked().await;
+    let tracked_engine = engine.clone().tracked().await;
 
     assert_eq!(
         tracked_engine.query(&NegativeSquare(Variable(0))).await,
@@ -1058,7 +1058,7 @@ async fn firewall_dirty_propagation_on_change() {
     );
 
     // Only 1 edge dirtied because firewall blocked propagation
-    assert_eq!(tracked_engine.get_dirtied_edges_count(), 1);
+    assert_eq!(engine.statistics().total().dirtied_edges(), 1);
 
     assert_eq!(square_ex.0.load(Ordering::Relaxed), 3);
     assert_eq!(negative_square_ex.0.load(Ordering::Relaxed), 2);

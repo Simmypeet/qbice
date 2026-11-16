@@ -21,6 +21,7 @@ use crate::{
                 NodeDependency, NodeInfo, Observation, Snapshot, Timestamp,
             },
             slow_path::SlowPath,
+            statistics::Event,
             tfc_achetype::TransitiveFirewallCallees,
         },
         guard::GuardExt,
@@ -615,6 +616,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     ) {
         self.upgrade_to_exclusive().await;
         let timsestamp = caller_information.timestamp();
+        self.record(Event::VerifiedClean);
 
         async move {
             self.clean_query(clean_edges, new_tfc, timsestamp).await;

@@ -45,14 +45,17 @@ use qbice_serialize::Plugin;
 use qbice_stable_hash::{
     BuildStableHasher, Compact128, StableHash, StableHasher,
 };
-use qbice_stable_type_id::Identifiable;
+use qbice_stable_type_id::{Identifiable, StableTypeID};
 use qbice_storage::{intern::Interner, storage_engine::StorageEngineFactory};
 
 use crate::{
     config::Config,
-    engine::{computation_graph::ComputationGraph, yielder::Yielder},
+    engine::{
+        computation_graph::{ComputationGraph, Observability},
+        yielder::Yielder,
+    },
     executor::{Executor, Registry},
-    query::Query,
+    query::{ExecutionStyle, Query},
 };
 
 pub(super) mod computation_graph;
@@ -88,6 +91,11 @@ pub struct EngineOptions {
     /// long-running query executions.
     #[builder(default = YieldFrequency::Never)]
     pub yield_frequency: YieldFrequency,
+
+    /// What the engine records about its own work, such as the counters of
+    /// [`Engine::statistics`].
+    #[builder(default)]
+    pub observability: Observability,
 }
 
 /// The central query database engine.
@@ -296,7 +304,11 @@ impl<C: Config> Engine<C> {
             storage_engine_factory.open(serialization_plugin)?;
 
         Ok(Self {
-            computation_graph: ComputationGraph::new(&storage_engine).await,
+            computation_graph: ComputationGraph::new(
+                &storage_engine,
+                options.observability,
+            )
+            .await,
             interner: shared_interner,
             executor_registry: Registry::default(),
             build_stable_hasher: stable_hasher,
@@ -306,6 +318,31 @@ impl<C: Config> Engine<C> {
             },
             options,
         })
+    }
+
+    /// The name of the query type `type_id`, as [`std::any::type_name`]
+    /// names it, or `None` if it has no registered executor, such as an
+    /// input.
+    #[must_use]
+    pub fn get_type_name_from_stable_type_id(
+        &self,
+        type_id: StableTypeID,
+    ) -> Option<&'static str> {
+        self.executor_registry
+            .try_get_executor_entry_by_type_id(&type_id)
+            .map(crate::executor::Entry::query_type_name)
+    }
+
+    /// The execution style of the query type `type_id`, or `None` if it has
+    /// no registered executor, such as an input.
+    #[must_use]
+    pub fn get_execution_style_from_stable_type_id(
+        &self,
+        type_id: StableTypeID,
+    ) -> Option<ExecutionStyle> {
+        self.executor_registry
+            .try_get_executor_entry_by_type_id(&type_id)
+            .map(crate::executor::Entry::obtain_execution_style)
     }
 
     fn hash<V: StableHash>(&self, value: &V) -> Compact128 {
