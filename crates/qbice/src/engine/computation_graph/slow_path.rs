@@ -11,7 +11,7 @@ use crate::{
                 CallerInformation, CallerKind, CallerReason, QueryCaller,
             },
             computing::{ComputingLockGuard, ComputingMode, WriteGuard},
-            database::Snapshot,
+            database::{NodeInfo, Snapshot},
             statistics::Event,
         },
         guard::GuardExt,
@@ -251,7 +251,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             ExecuteQueryFor::RecomputeQuery => {
                 let fingerprint = self.engine().hash(value);
                 let old_fingerprint =
-                    self.node_info().await.map(|info| info.value_fingerprint());
+                    self.node_info().await.map(NodeInfo::value_fingerprint);
 
                 self.record(if old_fingerprint == Some(fingerprint) {
                     Event::RecomputedUnchanged
