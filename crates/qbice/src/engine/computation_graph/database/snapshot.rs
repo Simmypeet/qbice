@@ -43,7 +43,6 @@ pub struct Snapshot<C: Config, Q: Query> {
     node_info: Option<Option<NodeInfo>>,
     pending_backward_projection: Option<Option<PendingBackwardProjection>>,
     forward_edges: Option<Option<ForwardEdges<C>>>,
-    query_input: Option<Option<Q>>,
     query_result: Option<Option<Q::Value>>,
 }
 
@@ -69,7 +68,6 @@ impl<C: Config> Engine<C> {
             node_info: None,
             pending_backward_projection: None,
             forward_edges: None,
-            query_input: None,
             query_result: None,
         }
     }
@@ -95,7 +93,6 @@ impl<C: Config> Engine<C> {
             node_info: None,
             pending_backward_projection: None,
             forward_edges: None,
-            query_input: None,
             query_result: None,
         }
     }
@@ -249,7 +246,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         self.node_info = None;
         self.pending_backward_projection = None;
         self.forward_edges = None;
-        self.query_input = None;
         self.query_result = None;
     }
 }

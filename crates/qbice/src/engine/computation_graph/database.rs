@@ -805,6 +805,19 @@ impl<C: Config> Engine<C> {
         self.computation_graph.database.get_query_kind(query_id).await
     }
 
+    /// The stored transitive firewall callees of `query_id`, if computed.
+    pub(super) async fn get_transitive_firewall_callees(
+        &self,
+        query_id: &QueryID,
+    ) -> Option<Interned<TransitiveFirewallCallees>> {
+        self.computation_graph
+            .database
+            .node_info
+            .get(query_id)
+            .await
+            .map(|x| x.transitive_firewall_callees)
+    }
+
     /// Retrieving the query input from a global database is safe since the
     /// query input is immutable once created.
     pub(super) async fn get_query_input<Q: Query>(

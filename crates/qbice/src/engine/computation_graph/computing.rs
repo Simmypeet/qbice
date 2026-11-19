@@ -362,7 +362,7 @@ impl<C: Config> Engine<C> {
     pub(crate) async fn exit_scc(
         &self,
         callee: &QueryID,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
     ) -> Result<bool, CyclicError> {
         let Some((notified, running_state)) = self
             .computation_graph
@@ -443,7 +443,7 @@ impl<C: Config> Engine<C> {
     }
 
     pub(super) fn is_query_running_in_scc(
-        caller: &CallerInformation,
+        caller: &CallerInformation<C>,
     ) -> Result<(), CyclicError> {
         let Some(query_caller) =
             caller.get_query_caller().and_then(|x| x.try_computing())
@@ -462,7 +462,7 @@ impl<C: Config> Engine<C> {
 impl<C: Config, Q: Query> Snapshot<C, Q> {
     async fn computing_lock_guard(
         mut self,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
     ) -> Option<(Self, ComputingLockGuard<C>)> {
         // we have to double check if we still really need to compute
 
@@ -538,7 +538,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
     pub(super) async fn get_backward_projection_lock_guard(
         mut self,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
     ) -> Option<(Self, BackwardProjectionLockGuard<C>)> {
         let pending_backward_projection =
             PendingBackwardProjection { notify: Arc::new(Notify::new()) };
@@ -589,7 +589,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     pub(super) async fn get_write_guard(
         self,
         slow_path: SlowPath,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
     ) -> Option<(Self, WriteGuard<C>)> {
         match slow_path {
             SlowPath::Compute | SlowPath::Repair => self
@@ -611,7 +611,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         mut self,
         clean_edges: Vec<QueryID>,
         new_tfc: Option<Interned<TransitiveFirewallCallees>>,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
         mut lock_guard: ComputingLockGuard<C>,
     ) {
         self.upgrade_to_exclusive().await;

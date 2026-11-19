@@ -288,7 +288,7 @@ type InvokeExecutorFn<C> =
 type RepairQueryFn<C> = for<'a> fn(
     engine: &'a Arc<Engine<C>>,
     query_id: &'a Compact128,
-    called_from: &'a CallerInformation,
+    called_from: &'a CallerInformation<C>,
 ) -> Pin<
     Box<dyn Future<Output = Result<QueryStatus, CyclicError>> + Send + 'a>,
 >;
@@ -382,7 +382,7 @@ impl<C: Config> Entry<C> {
         &self,
         engine: &Arc<Engine<C>>,
         query_id: &Compact128,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
     ) -> Result<QueryStatus, CyclicError> {
         (self.repair_query)(engine, query_id, caller_information).await
     }

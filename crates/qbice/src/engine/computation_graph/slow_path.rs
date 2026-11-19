@@ -11,7 +11,7 @@ use crate::{
                 CallerInformation, CallerKind, CallerReason, QueryCaller,
             },
             computing::{ComputingLockGuard, ComputingMode, WriteGuard},
-            database::{NodeInfo, Snapshot},
+            database::{ForwardEdgeObservation, NodeInfo, Snapshot},
             statistics::Event,
         },
         guard::GuardExt,
@@ -50,7 +50,8 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         mut self,
         query: &Q,
         execute_query_for: ExecuteQueryFor,
-        caller_information: &CallerInformation,
+        previous_caller_forward_edges: Option<ForwardEdgeObservation<C>>,
+        caller_information: &CallerInformation<C>,
         lock_guard: ComputingLockGuard<C>,
     ) {
         let wait_group = waitgroup::WaitGroup::new();
@@ -68,7 +69,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             caller: CallerInformation::new(
                 CallerKind::Query(QueryCaller::new_with_pedantic_repair(
                     *self.query_id(),
-                    CallerReason::RequireValue(Some(wait_group.worker())),
+                    CallerReason::RequireValue {
+                        _wait_guard: Some(wait_group.worker()),
+                        previous_caller_forward_edges,
+                    },
                     lock_guard.query_computing().clone(),
                     pedantic_repair,
                 )),
@@ -131,7 +135,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 need_backward_projection_propagation,
             ) = if let Some(old_kind) = old_kind
                 && (old_kind.is_firewall() || old_kind.is_projection())
-                && execute_query_for == ExecuteQueryFor::RecomputeQuery
+                && matches!(execute_query_for, ExecuteQueryFor::RecomputeQuery)
             {
                 let fingerprint = self.engine().hash(&value);
 
@@ -207,7 +211,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 // recompute query means, there were dirty edges from the old
                 // value, so we need to clean them up. But for fresh query,
                 // there is no dirty edge, so we can skip cleaning up.
-                execute_query_for == ExecuteQueryFor::RecomputeQuery,
+                matches!(execute_query_for, ExecuteQueryFor::RecomputeQuery),
                 continuing_tx,
             )
             .await;
@@ -272,7 +276,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     pub async fn process_query(
         self,
         query: &Q,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
         lock_guard: WriteGuard<C>,
     ) {
         match lock_guard {
@@ -281,6 +285,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                     self.execute_query(
                         query,
                         ExecuteQueryFor::FreshQuery,
+                        None,
                         caller_information,
                         lock_guard,
                     )

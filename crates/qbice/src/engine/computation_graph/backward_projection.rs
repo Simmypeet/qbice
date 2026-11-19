@@ -22,7 +22,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     )]
     pub(super) async fn invoke_backward_projections(
         self,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
         backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
     ) {
         // SAFETY: We are reading our own backward edges, which we've already

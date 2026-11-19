@@ -183,7 +183,7 @@ impl<C: Config> ComputationGraph<C> {
 pub struct TrackedEngine<C: Config> {
     engine: Arc<Engine<C>>,
     cache: ThreadLocal<RefCell<HashMap<QueryID, Box<dyn Any + Send + Sync>>>>,
-    caller: CallerInformation,
+    caller: CallerInformation<C>,
 }
 
 impl<C: Config> TrackedEngine<C> {
@@ -323,7 +323,7 @@ impl<C: Config> TrackedEngine<C> {
     /// input queries.
     pub(crate) const fn new(
         engine: Arc<Engine<C>>,
-        caller: CallerInformation,
+        caller: CallerInformation<C>,
     ) -> Self {
         Self { engine, cache: ThreadLocal::new(), caller }
     }
@@ -428,7 +428,7 @@ impl<C: Config> Engine<C> {
     async fn repair_transitive_firewall_callees_for<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
-        caller: &CallerInformation,
+        caller: &CallerInformation<C>,
     ) {
         let mut snapshot =
             self.get_read_snapshot::<Q>(query.id.compact_hash_128()).await;
@@ -444,7 +444,7 @@ impl<C: Config> Engine<C> {
     async fn query_for<Q: Query>(
         self: &Arc<Self>,
         query: &QueryWithID<'_, Q>,
-        caller: &CallerInformation,
+        caller: &CallerInformation<C>,
     ) -> Result<QueryResult<Q::Value>, CyclicError> {
         // this is a good yield point for possible cancellation
         self.yielder.tick().await;
@@ -511,6 +511,27 @@ impl<C: Config> Engine<C> {
                 snapshot = self
                     .get_read_snapshot::<Q>(query.id.compact_hash_128())
                     .await;
+            } else if let Some(query_caller) = caller.get_query_caller()
+                && !query_caller.is_in_the_previous_forward_edges(query.id)
+                && query_caller.require_value()
+                && slow_path == SlowPath::Repair
+            {
+                // See the test case in
+                // `crates/integration_test/tests/firewall_with_dynamic_edge`
+                // to see the edge case that this branch is needed.
+                snapshot = match snapshot
+                    .repair_uncovered_transitive_firewall_callees(
+                        query_caller,
+                        caller,
+                    )
+                    .await
+                {
+                    Some(snapshot) => snapshot,
+                    None => {
+                        self.get_read_snapshot::<Q>(query.id.compact_hash_128())
+                            .await
+                    }
+                };
             }
 
             // now the `query` state is held in computing state.
@@ -538,7 +559,7 @@ impl<C: Config> Engine<C> {
 
     /// Create a new query with its associated unique identifier.
     pub(super) fn new_query_with_id<'c, Q: Query>(
-        &'c self,
+        &self,
         query: &'c Q,
     ) -> QueryWithID<'c, Q> {
         let mut hash = self.build_stable_hasher.build_stable_hasher();

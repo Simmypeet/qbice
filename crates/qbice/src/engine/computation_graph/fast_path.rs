@@ -20,7 +20,7 @@ impl<C: Config> Engine<C> {}
 impl<C: Config, Q: Query> Snapshot<C, Q> {
     pub async fn fast_path(
         &mut self,
-        caller: &CallerInformation,
+        caller: &CallerInformation<C>,
     ) -> FastPathResult<Q::Value> {
         // check if we have the existing query info
         let Some(last_verified) = self.last_verified().await.map(|x| x.0)
@@ -83,7 +83,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
     /// Add both forward and backward dependencies for both caller and callee.
     fn observe_callee_fingerprint(
-        query_caller: &QueryCaller,
+        query_caller: &QueryCaller<C>,
         query_info: &NodeInfo,
         query_id: &QueryID,
     ) {

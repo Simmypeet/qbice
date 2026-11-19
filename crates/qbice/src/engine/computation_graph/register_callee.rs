@@ -42,7 +42,7 @@ impl Drop for UndoRegisterCallee {
 impl<C: Config> Engine<C> {
     pub(super) fn register_callee(
         &self,
-        caller: &CallerInformation,
+        caller: &CallerInformation<C>,
         calee_target: &QueryID,
     ) -> Option<UndoRegisterCallee> {
         // record the dependency first, don't necessary need to figure out

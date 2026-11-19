@@ -113,7 +113,7 @@ impl<C: Config> Engine<C> {
         let (active_computation_guard, timestamp) =
             self.acquire_active_computation_guard().await;
 
-        let _caller = CallerInformation::new(
+        let _caller = CallerInformation::<C>::new(
             CallerKind::Tracing,
             timestamp,
             Some(active_computation_guard),

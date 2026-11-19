@@ -45,3 +45,7 @@ path = "tests/firewall.rs"
 [[test]]
 name = "timestamp_cancellation"
 path = "tests/timestamp_cancellation.rs"
+
+[[test]]
+name = "firewall_with_dynamic_edge"
+path = "tests/firewall_with_dynamic_edge.rs"

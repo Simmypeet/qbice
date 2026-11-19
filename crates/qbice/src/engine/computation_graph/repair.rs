@@ -9,7 +9,10 @@ use qbice_stable_hash::Compact128;
 use tokio::task::JoinSet;
 use tracing::instrument;
 
-use super::database::{ForwardEdgeObservation, NodeDependency};
+use super::{
+    database::{ForwardEdgeObservation, NodeDependency},
+    slow_path::ExecuteQueryFor,
+};
 use crate::{
     Engine, Query,
     config::Config,
@@ -67,10 +70,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     pub(super) async fn repair_query(
         self,
         query: &Q,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
         lock_guard: ComputingLockGuard<C>,
     ) {
-        let Some((lock_guard, snapshot)) =
+        let Some((lock_guard, mut snapshot)) =
             self.should_recompute_query(caller_information, lock_guard).await
         else {
             return;
@@ -84,10 +87,16 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         lock_guard.query_computing().clear_dependencies();
 
         // recompute the query
+        let previous_forward_edges =
+            snapshot.forward_edge_observation().await.cloned().expect(
+                "should have the forward edges from the previous computation",
+            );
+
         snapshot
             .execute_query(
                 query,
-                super::slow_path::ExecuteQueryFor::RecomputeQuery,
+                ExecuteQueryFor::RecomputeQuery,
+                Some(previous_forward_edges),
                 caller_information,
                 lock_guard,
             )
@@ -97,7 +106,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[allow(clippy::too_many_lines)]
     async fn should_recompute_query(
         mut self,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
         lock_guard: ComputingLockGuard<C>,
     ) -> Option<(ComputingLockGuard<C>, Self)> {
         // if the caller is backward projection propagation, we always
@@ -181,7 +190,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
     pub(super) async fn repair_transitive_firewall_callees(
         mut self,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
     ) {
         let tfcs = self
             .node_info()
@@ -192,18 +201,81 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             .copied()
             .collect::<Vec<_>>();
 
+        self.repair_firewalls(tfcs, caller_information).await;
+    }
+
+    /// Repairs the transitive firewall callees of this query that are not in
+    /// the previous-revision TFC set of `caller`.
+    ///
+    /// If the caller already read this query in its previous revision, this
+    /// query's TFCs are part of the caller's old TFC set and nothing is done.
+    ///
+    /// Returns the snapshot back if nothing needed repairing. Otherwise the
+    /// snapshot is dropped (releasing its lock) before repairing and `None` is
+    /// returned, so the caller has to take a new one.
+    pub(super) async fn repair_uncovered_transitive_firewall_callees(
+        mut self,
+        caller: &QueryCaller<C>,
+        caller_information: &CallerInformation<C>,
+    ) -> Option<Self> {
+        let Some(this_tfc) = self
+            .node_info()
+            .await
+            .map(|x| x.transitive_firewall_callees().clone())
+        else {
+            return Some(self);
+        };
+
+        if this_tfc.is_empty() {
+            return Some(self);
+        }
+
+        let covered = self
+            .engine()
+            .get_transitive_firewall_callees(&caller.query_id())
+            .await;
+
+        let uncovered = this_tfc
+            .iter()
+            .filter(|x| covered.as_ref().is_none_or(|c| !c.contains(*x)))
+            .copied()
+            .collect::<Vec<_>>();
+
+        if uncovered.is_empty() {
+            return Some(self);
+        }
+
+        self.repair_firewalls(uncovered, caller_information).await;
+
+        None
+    }
+
+    async fn repair_firewalls(
+        self,
+        tfcs: Vec<QueryID>,
+        caller_information: &CallerInformation<C>,
+    ) {
+        let engine = self.engine().clone();
+
+        // release the lock before spawning tasks that could potentially
+        // try to acquire the same lock again
+        drop(self);
+
+        Self::repair_firewalls_with_engine(engine, tfcs, caller_information)
+            .await;
+    }
+
+    async fn repair_firewalls_with_engine(
+        engine: Arc<Engine<C>>,
+        tfcs: Vec<QueryID>,
+        caller_information: &CallerInformation<C>,
+    ) {
         let chunk_size = std::cmp::max(
             tfcs.len()
                 / std::thread::available_parallelism()
                     .map_or_else(|_| 4, |x| x.get() * 4),
             1,
         );
-
-        let engine = self.engine().clone();
-
-        // release the lock before spawning tasks that could potentially
-        // try to acquire the same lock again
-        drop(self);
 
         let mut join_set = JoinSet::new();
 
@@ -424,7 +496,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[allow(clippy::too_many_lines)]
     async fn recompute_decision_based_on_forward_edges(
         &mut self,
-        caller_information: &CallerInformation,
+        caller_information: &CallerInformation<C>,
         computing_lock_guard: &ComputingLockGuard<C>,
     ) -> RepairDecision {
         let mut repair_transitive_firewall_callees = false;
@@ -580,7 +652,7 @@ impl<C: Config> Engine<C> {
     pub(crate) fn repair_query_from_query_id<'x, Q: Query>(
         self: &'x Arc<Self>,
         query_id: &'x Compact128,
-        called_from: &'x CallerInformation,
+        called_from: &'x CallerInformation<C>,
     ) -> Pin<
         Box<dyn Future<Output = Result<QueryStatus, CyclicError>> + Send + 'x>,
     > {
