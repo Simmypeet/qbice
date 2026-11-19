@@ -1,4 +1,4 @@
-use std::{any::Any, cell::RefCell, collections::HashMap, sync::Arc};
+use std::{any::Any, cell::RefCell, collections::HashMap, fmt, sync::Arc};
 
 // re-export
 pub(crate) use caller::CallerInformation;
@@ -20,14 +20,14 @@ use crate::{
     engine::computation_graph::{
         caller::CallerKind,
         computing::Computing,
-        database::{ActiveComputationGuard, Database},
+        database::{ActiveComputationGuard, Database, ValueSlot},
         dirty_worker::DirtyWorker,
         fast_path::FastPathResult,
         query_lock_manager::QueryLockManager,
         slow_path::SlowPath,
         statistics::StatisticsRecorder,
     },
-    executor::{CyclicError, CyclicPanicPayload},
+    executor::{BoxFuture, CyclicError, CyclicPanicPayload},
     query::QueryID,
 };
 
@@ -90,6 +90,53 @@ pub struct ComputationGraph<C: Config> {
 
     computing: Computing<C>,
     lock_manager: QueryLockManager,
+
+    entry_points: EntryPoints<C>,
+}
+
+type QueryForFn<C> =
+    for<'a> fn(
+        engine: &'a Arc<Engine<C>>,
+        query: DynQuery<'a>,
+        caller: &'a CallerInformation<C>,
+        value_slot: Option<ValueSlot<'a, C>>,
+    ) -> BoxFuture<'a, Result<QueryStatus, CyclicError>>;
+
+type RepairTransitiveFirewallCalleesFn<C> = for<'a> fn(
+    engine: &'a Arc<Engine<C>>,
+    query_id: QueryID,
+    caller: &'a CallerInformation<C>,
+) -> BoxFuture<'a, ()>;
+
+/// The engine functions that the methods generic over a query type call.
+///
+/// This primarily exists to avoid code bloat from monomorphization.
+///
+/// Each crate compiles its own copy of every generic function that it uses,
+/// so a crate that called the engine directly from [`TrackedEngine::query`]
+/// would compile all the code that runs a query, once more for that crate.
+/// Calling through these pointers instead, which are taken where the engine
+/// is created, compiles that code there only.
+struct EntryPoints<C: Config> {
+    query_for: QueryForFn<C>,
+    repair_transitive_firewall_callees: RepairTransitiveFirewallCalleesFn<C>,
+}
+
+impl<C: Config> EntryPoints<C> {
+    fn new() -> Self {
+        Self {
+            query_for: |engine, query, caller, value_slot| {
+                Box::pin(engine.query_for(query, caller, value_slot))
+            },
+            repair_transitive_firewall_callees: |engine, query_id, caller| {
+                Box::pin(
+                    engine.repair_transitive_firewall_callees_for(
+                        query_id, caller,
+                    ),
+                )
+            },
+        }
+    }
 }
 
 impl<C: Config> ComputationGraph<C> {
@@ -116,6 +163,8 @@ impl<C: Config> ComputationGraph<C> {
 
             computing: Computing::new(),
             lock_manager: QueryLockManager::new(2u64.pow(14)),
+
+            entry_points: EntryPoints::new(),
         }
     }
 }
@@ -233,12 +282,10 @@ impl<C: Config> TrackedEngine<C> {
         // this is a good yield point for possible cancellation
         self.engine.yielder.tick().await;
 
-        let query_with_id = self.engine.new_query_with_id(query);
+        let query_id = self.engine.new_query_id(query);
 
         // check local cache
-        if let Some(val) =
-            self.cache.get_or_default().borrow().get(&query_with_id.id)
-        {
+        if let Some(val) = self.cache.get_or_default().borrow().get(&query_id) {
             // directly access repository to avoid double wrapping
             return val
                 .downcast_ref::<Q::Value>()
@@ -247,22 +294,29 @@ impl<C: Config> TrackedEngine<C> {
         }
 
         // run the main process
-        let result = self
-            .engine
-            .query_for(&query_with_id, &self.caller)
-            .await
-            .map(QueryResult::unwrap_return);
-
-        // cache the result locally
-        if let Ok(value) = &result {
-            self.cache
-                .get_or_default()
-                .borrow_mut()
-                .insert(query_with_id.id, Box::new(value.clone()));
-        }
+        let mut value = None;
+        let result = (self.engine.computation_graph.entry_points.query_for)(
+            &self.engine,
+            DynQuery::new(query_id, query),
+            &self.caller,
+            Some(ValueSlot::new::<Q>(&mut value)),
+        )
+        .await;
 
         // panic! with CyclicPanicPayload if cyclic error detected
-        result.unwrap_or_else(|_| CyclicPanicPayload::unwind())
+        if result.is_err() {
+            CyclicPanicPayload::unwind();
+        }
+
+        let value = value.expect("Query did not return a value");
+
+        // cache the result locally
+        self.cache
+            .get_or_default()
+            .borrow_mut()
+            .insert(query_id, Box::new(value.clone()));
+
+        value
     }
 
     /// Repairs all transitive firewall callees of the given query.
@@ -270,14 +324,18 @@ impl<C: Config> TrackedEngine<C> {
         &self,
         query: &Q,
     ) {
-        let query_with_id = self.engine.new_query_with_id(query);
+        let query_id = self.engine.new_query_id(query);
 
-        self.engine
-            .repair_transitive_firewall_callees_for(
-                &query_with_id,
-                &self.caller,
-            )
-            .await;
+        (self
+            .engine
+            .computation_graph
+            .entry_points
+            .repair_transitive_firewall_callees)(
+            &self.engine,
+            query_id,
+            &self.caller,
+        )
+        .await;
     }
 
     /// Interns a value, returning a reference-counted handle to the shared
@@ -399,10 +457,60 @@ impl<C: Config> Engine<C> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct QueryWithID<'c, Q: Query> {
+pub(crate) type FmtQueryFn = fn(
+    query: &(dyn Any + Send + Sync),
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result;
+
+/// A query and its ID, for the code that runs the query without knowing its
+/// type.
+#[derive(Clone, Copy)]
+pub(crate) struct DynQuery<'a> {
     id: QueryID,
-    query: &'c Q,
+    query: &'a (dyn Any + Send + Sync),
+    type_name: &'static str,
+    fmt: FmtQueryFn,
+}
+
+impl<'a> DynQuery<'a> {
+    pub fn new<Q: Query>(id: QueryID, query: &'a Q) -> Self {
+        Self::from_parts(
+            id,
+            query,
+            std::any::type_name::<Q>(),
+            fmt_dyn_query::<Q>,
+        )
+    }
+
+    pub(crate) const fn from_parts(
+        id: QueryID,
+        query: &'a (dyn Any + Send + Sync),
+        type_name: &'static str,
+        fmt: FmtQueryFn,
+    ) -> Self {
+        Self { id, query, type_name, fmt }
+    }
+
+    pub const fn id(&self) -> &QueryID { &self.id }
+
+    pub const fn query(&self) -> &'a (dyn Any + Send + Sync) { self.query }
+
+    pub const fn type_name(&self) -> &'static str { self.type_name }
+}
+
+/// Formats the query the way that its own [`fmt::Debug`] does, so that spans
+/// that record the query read the same as before it lost its type.
+impl fmt::Debug for DynQuery<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (self.fmt)(self.query, f)
+    }
+}
+
+pub(crate) fn fmt_dyn_query<Q: Query>(
+    query: &(dyn Any + Send + Sync),
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    fmt::Debug::fmt(query.downcast_ref::<Q>().expect("query type mismatch"), f)
 }
 
 /// Specifies whether the query is has been repaired or is up-to-date.
@@ -412,26 +520,13 @@ pub enum QueryStatus {
     UpToDate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueryResult<V> {
-    pub return_value: Option<V>,
-    pub status: QueryStatus,
-}
-
-impl<V> QueryResult<V> {
-    pub fn unwrap_return(self) -> V {
-        self.return_value.expect("Query did not return a value")
-    }
-}
-
 impl<C: Config> Engine<C> {
-    async fn repair_transitive_firewall_callees_for<Q: Query>(
+    async fn repair_transitive_firewall_callees_for(
         self: &Arc<Self>,
-        query: &QueryWithID<'_, Q>,
+        query_id: QueryID,
         caller: &CallerInformation<C>,
     ) {
-        let mut snapshot =
-            self.get_read_snapshot::<Q>(query.id.compact_hash_128()).await;
+        let mut snapshot = self.get_read_snapshot(query_id).await;
 
         // can't repair if haven't computed before
         if snapshot.last_verified().await.is_none() {
@@ -441,23 +536,26 @@ impl<C: Config> Engine<C> {
         snapshot.repair_transitive_firewall_callees(caller).await;
     }
 
-    async fn query_for<Q: Query>(
+    /// Brings the query up to date, and reads its value into `value_slot`
+    /// if the caller requires the value.
+    async fn query_for(
         self: &Arc<Self>,
-        query: &QueryWithID<'_, Q>,
+        query: DynQuery<'_>,
         caller: &CallerInformation<C>,
-    ) -> Result<QueryResult<Q::Value>, CyclicError> {
+        mut value_slot: Option<ValueSlot<'_, C>>,
+    ) -> Result<QueryStatus, CyclicError> {
         // this is a good yield point for possible cancellation
         self.yielder.tick().await;
 
         // register the dependency for the sake of detecting cycles
-        let undo_register = self.register_callee(caller, &query.id);
+        let undo_register = self.register_callee(caller, query.id());
 
         let mut status = QueryStatus::UpToDate;
 
         // pulling the value
-        let value = loop {
+        loop {
             // exit SCC if any, otherwise deadlock may happen
-            match self.exit_scc(&query.id, caller).await {
+            match self.exit_scc(query.id(), caller).await {
                 // continue to process
                 Ok(_) => {}
 
@@ -473,24 +571,33 @@ impl<C: Config> Engine<C> {
             }
 
             // acquire read snapshot
-            let mut snapshot =
-                self.get_read_snapshot::<Q>(query.id.compact_hash_128()).await;
+            let mut snapshot = self.get_read_snapshot(*query.id()).await;
 
-            let slow_path = match snapshot.fast_path(caller).await {
-                // go to slow path
-                FastPathResult::ToSlowPath(slow_path) => slow_path,
+            let slow_path =
+                match snapshot.fast_path(caller, value_slot.as_mut()).await {
+                    // go to slow path
+                    FastPathResult::ToSlowPath(slow_path) => slow_path,
 
-                // hit
-                FastPathResult::Hit(value) => {
-                    // defuse the undo `register_callee` since we have obtained
-                    // the value, record the dependency successfully
-                    if let Some(undo_register) = undo_register {
-                        undo_register.defuse();
+                    // hit
+                    FastPathResult::Hit => {
+                        // defuse the undo `register_callee` since we have
+                        // obtained the value, record the dependency
+                        // successfully
+                        if let Some(undo_register) = undo_register {
+                            undo_register.defuse();
+                        }
+
+                        break;
                     }
+                };
 
-                    break QueryResult { return_value: value, status };
-                }
-            };
+            // The futures of the slow path below are boxed. Every call of a
+            // query allocates the future of this function, and without the
+            // boxes it would be as large as the largest of them, several
+            // kilobytes, while a call that the fast path answers needs a
+            // fraction of that. A call that gets here computes or repairs the
+            // query, next to which one more allocation is nothing.
+            // `process_query` boxes only the step that it runs, see there.
 
             // if the caller is responsible for repairing TFC queries, do it
             // but release the lock first to avoid deadlock when backward
@@ -505,32 +612,29 @@ impl<C: Config> Engine<C> {
                 CallerKind::User | CallerKind::RepairFirewall
             ) && slow_path == SlowPath::Repair
             {
-                snapshot.repair_transitive_firewall_callees(caller).await;
+                Box::pin(snapshot.repair_transitive_firewall_callees(caller))
+                    .await;
 
                 // restore the snapshot after repair
-                snapshot = self
-                    .get_read_snapshot::<Q>(query.id.compact_hash_128())
-                    .await;
+                snapshot = self.get_read_snapshot(*query.id()).await;
             } else if let Some(query_caller) = caller.get_query_caller()
-                && !query_caller.is_in_the_previous_forward_edges(query.id)
+                && !query_caller.is_in_the_previous_forward_edges(*query.id())
                 && query_caller.require_value()
                 && slow_path == SlowPath::Repair
             {
                 // See the test case in
                 // `crates/integration_test/tests/firewall_with_dynamic_edge`
                 // to see the edge case that this branch is needed.
-                snapshot = match snapshot
-                    .repair_uncovered_transitive_firewall_callees(
+                snapshot = match Box::pin(
+                    snapshot.repair_uncovered_transitive_firewall_callees(
                         query_caller,
                         caller,
-                    )
-                    .await
+                    ),
+                )
+                .await
                 {
                     Some(snapshot) => snapshot,
-                    None => {
-                        self.get_read_snapshot::<Q>(query.id.compact_hash_128())
-                            .await
-                    }
+                    None => self.get_read_snapshot(*query.id()).await,
                 };
             }
 
@@ -538,33 +642,31 @@ impl<C: Config> Engine<C> {
             // if `guard` is dropped without defusing, the state will
             // be restored to previous state (either computed or absent)
             let Some((snapshot, guard)) =
-                snapshot.get_write_guard(slow_path, caller).await
+                Box::pin(snapshot.get_write_guard(query, slow_path, caller))
+                    .await
             else {
                 // try the fast path again
                 continue;
             };
 
-            snapshot.process_query(query.query, caller, guard).await;
+            snapshot.process_query(query, caller, guard).await;
 
             status = QueryStatus::Repaired;
 
             // retry to the fast path and obtain value.
-        };
+        }
 
         // if cyclic dependency is detected, return error
         Self::is_query_running_in_scc(caller)?;
 
-        Ok(value)
+        Ok(status)
     }
 
-    /// Create a new query with its associated unique identifier.
-    pub(super) fn new_query_with_id<'c, Q: Query>(
-        &self,
-        query: &'c Q,
-    ) -> QueryWithID<'c, Q> {
+    /// Computes the unique identifier of a query.
+    pub(super) fn new_query_id<Q: Query>(&self, query: &Q) -> QueryID {
         let mut hash = self.build_stable_hasher.build_stable_hasher();
         query.stable_hash(&mut hash);
 
-        QueryWithID { id: QueryID::new::<Q>(hash.finish().into()), query }
+        QueryID::new::<Q>(hash.finish().into())
     }
 }

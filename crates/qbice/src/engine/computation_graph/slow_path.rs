@@ -1,12 +1,13 @@
 use qbice_stable_hash::Compact128;
 use thread_local::ThreadLocal;
-use tracing::instrument;
+use tracing::{Instrument as _, instrument};
 
 use crate::{
-    Query, TrackedEngine,
+    TrackedEngine,
     config::Config,
     engine::{
         computation_graph::{
+            DynQuery,
             caller::{
                 CallerInformation, CallerKind, CallerReason, QueryCaller,
             },
@@ -16,6 +17,7 @@ use crate::{
         },
         guard::GuardExt,
     },
+    executor::BoxFuture,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -38,7 +40,7 @@ pub enum ExecuteQueryFor {
     RecomputeQuery,
 }
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+impl<C: Config> Snapshot<C> {
     #[allow(clippy::too_many_lines)]
     #[instrument(
         skip(self, execute_query_for, caller_information, lock_guard),
@@ -48,7 +50,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     )]
     pub(super) async fn execute_query(
         mut self,
-        query: &Q,
+        query: DynQuery<'_>,
         execute_query_for: ExecuteQueryFor,
         previous_caller_forward_edges: Option<ForwardEdgeObservation<C>>,
         caller_information: &CallerInformation<C>,
@@ -81,9 +83,13 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             ),
         };
 
-        let entry = self.engine().executor_registry.get_executor_entry::<Q>();
+        let engine = self.engine().clone();
+        let entry = engine
+            .executor_registry
+            .get_executor_entry_by_type_id(&self.query_id().stable_type_id());
 
-        let result = entry.invoke_executor::<Q>(query, &tracked_engine).await;
+        let result =
+            entry.invoke_executor(query.query(), &tracked_engine).await;
 
         // WAIT POINT: We must wait all the potentially spawned threads that
         // might hold references to the tracked engine to finish before
@@ -101,13 +107,16 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         let value = if is_in_scc {
             // obtain the SCC value
-            entry.obtain_scc_value::<Q>()
+            entry.obtain_scc_value()
         } else {
             match result {
                 Ok(value) => value,
                 Err(panic) => panic.resume_unwind(),
             }
         };
+
+        // every path below stores the fingerprint of the value
+        let fingerprint = entry.hash_value(&engine, &*value);
 
         // TRANSACTIONAL: from now on, we are starting to modify the query's
         // internal state, so we need to make sure that this whole block is
@@ -117,7 +126,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         // async block, because it's needed to hold `ActiveComputationGuard`
 
         let timestamp = caller_information.timestamp();
-        let query = query.clone();
+        let query_input = entry.clone_query(query.query());
 
         async move {
             let old_kind = self.query_kind().await;
@@ -129,81 +138,80 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             // if the old node info is a firewall or projection node, we compare
             // the old and new value fingerprints to determine if we need to
             // do dirty propagation.
-            let (
-                continuing_tx,
-                query_value_fingerprint,
-                need_backward_projection_propagation,
-            ) = if let Some(old_kind) = old_kind
-                && (old_kind.is_firewall() || old_kind.is_projection())
-                && matches!(execute_query_for, ExecuteQueryFor::RecomputeQuery)
-            {
-                let fingerprint = self.engine().hash(&value);
-
-                let old_node_info = self.node_info().await.expect(
-                    "old node info should exist for recomputed firewall or \
-                     projection",
-                );
-
-                let updated = old_node_info.value_fingerprint() != fingerprint;
-
-                self.record(if updated {
-                    Event::RecomputedChanged
-                } else {
-                    Event::RecomputedUnchanged
-                });
-
-                // a changed firewall or projection is a root of dirty
-                // propagation; an unchanged one stops it
-                if updated {
-                    tracing::debug!(
-                        target: "qbice::dirty",
-                        kind = ?old_kind,
-                        query = ?query,
-                        "recomputed to a new value, propagating dirtiness"
+            let (continuing_tx, need_backward_projection_propagation) =
+                if let Some(old_kind) = old_kind
+                    && (old_kind.is_firewall() || old_kind.is_projection())
+                    && matches!(
+                        execute_query_for,
+                        ExecuteQueryFor::RecomputeQuery
+                    )
+                {
+                    let old_node_info = self.node_info().await.expect(
+                        "old node info should exist for recomputed firewall \
+                         or projection",
                     );
+
+                    let updated =
+                        old_node_info.value_fingerprint() != fingerprint;
+
+                    self.record(if updated {
+                        Event::RecomputedChanged
+                    } else {
+                        Event::RecomputedUnchanged
+                    });
+
+                    // a changed firewall or projection is a root of dirty
+                    // propagation; an unchanged one stops it
+                    if updated {
+                        tracing::debug!(
+                            target: "qbice::dirty",
+                            kind = ?old_kind,
+                            query = ?query_input,
+                            "recomputed to a new value, propagating dirtiness"
+                        );
+                    } else {
+                        tracing::trace!(
+                            target: "qbice::dirty",
+                            kind = ?old_kind,
+                            query = ?query_input,
+                            "recomputed to the same value, stopping dirtiness"
+                        );
+                    }
+
+                    let mut write_buffer =
+                        self.engine().new_write_transaction();
+
+                    // if fingerprint has changed, we do dirty propagation
+                    if updated {
+                        write_buffer = self
+                            .engine()
+                            .dirty_propagate_from_batch(
+                                std::iter::once(*self.query_id()),
+                                write_buffer,
+                            )
+                            .await;
+                    }
+
+                    (
+                        write_buffer,
+                        // if the query is a firewall and its value has
+                        // changed, it needs to invoke
+                        // projection queries in the backward
+                        // direction and propagate dirtiness as
+                        // needed.
+                        (old_kind.is_firewall() || old_kind.is_projection())
+                            && updated,
+                    )
                 } else {
-                    tracing::trace!(
-                        target: "qbice::dirty",
-                        kind = ?old_kind,
-                        query = ?query,
-                        "recomputed to the same value, stopping dirtiness"
-                    );
-                }
+                    self.record_execution(fingerprint, execute_query_for).await;
 
-                let mut write_buffer = self.engine().new_write_transaction();
-
-                // if fingerprint has changed, we do dirty propagation
-                if updated {
-                    write_buffer = self
-                        .engine()
-                        .dirty_propagate_from_batch(
-                            std::iter::once(*self.query_id()),
-                            write_buffer,
-                        )
-                        .await;
-                }
-
-                (
-                    write_buffer,
-                    Some(fingerprint),
-                    // if the query is a firewall and its value has changed, it
-                    // needs to invoke projection queries in the backward
-                    // direction and propagate dirtiness as
-                    // needed.
-                    (old_kind.is_firewall() || old_kind.is_projection())
-                        && updated,
-                )
-            } else {
-                let fingerprint =
-                    self.record_execution(&value, execute_query_for).await;
-
-                (self.engine().new_write_transaction(), fingerprint, false)
-            };
+                    (self.engine().new_write_transaction(), false)
+                };
 
             self.computing_lock_to_computed(
-                query.clone(),
+                query_input,
                 value,
-                query_value_fingerprint,
+                fingerprint,
                 lock_guard,
                 need_backward_projection_propagation,
                 timestamp,
@@ -221,7 +229,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     }
 }
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+impl<C: Config> Snapshot<C> {
     /// Records `event` for the type of this query in the statistics.
     pub(super) fn record(&self, event: Event) {
         self.engine()
@@ -230,30 +238,23 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             .record(self.query_id().stable_type_id(), event);
     }
 
-    /// Records the execution of this query, which gave `value`, in the
-    /// statistics, unless it is a firewall or a projection executed again,
-    /// whose change is recorded where it is decided.
-    ///
-    /// Returns the fingerprint of `value` if it had to compute it, to tell
-    /// whether a query executed again changed, so that storing the value
-    /// does not compute it again.
+    /// Records the execution of this query, which gave a value with the
+    /// given fingerprint, in the statistics, unless it is a firewall or a
+    /// projection executed again, whose change is recorded where it is
+    /// decided.
     async fn record_execution(
         &mut self,
-        value: &Q::Value,
+        fingerprint: Compact128,
         execute_query_for: ExecuteQueryFor,
-    ) -> Option<Compact128> {
+    ) {
         if !self.engine().computation_graph.statistics_recorder.is_enabled() {
-            return None;
+            return;
         }
 
         match execute_query_for {
-            ExecuteQueryFor::FreshQuery => {
-                self.record(Event::Fresh);
-                None
-            }
+            ExecuteQueryFor::FreshQuery => self.record(Event::Fresh),
 
             ExecuteQueryFor::RecomputeQuery => {
-                let fingerprint = self.engine().hash(value);
                 let old_fingerprint =
                     self.node_info().await.map(NodeInfo::value_fingerprint);
 
@@ -262,47 +263,57 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 } else {
                     Event::RecomputedChanged
                 });
-
-                Some(fingerprint)
             }
         }
     }
 
-    #[instrument(
-        skip(self, caller_information, lock_guard),
-        level = "debug",
-        target = "qbice"
-    )]
-    pub async fn process_query(
+    /// Runs the step of the slow path that `lock_guard` was taken for.
+    ///
+    /// The future of the step is boxed on its own. A future that could run
+    /// any of the steps would be as large as the largest of them, and putting
+    /// it into a box copies all of it, whichever step runs.
+    pub fn process_query<'a>(
         self,
-        query: &Q,
-        caller_information: &CallerInformation<C>,
+        query: DynQuery<'a>,
+        caller_information: &'a CallerInformation<C>,
         lock_guard: WriteGuard<C>,
-    ) {
+    ) -> BoxFuture<'a, ()> {
+        let span =
+            tracing::debug_span!(target: "qbice", "process_query", ?query);
+
         match lock_guard {
             WriteGuard::ComputingLockGuard(lock_guard) => {
                 if lock_guard.computing_mode() == ComputingMode::Execute {
-                    self.execute_query(
-                        query,
-                        ExecuteQueryFor::FreshQuery,
-                        None,
-                        caller_information,
-                        lock_guard,
+                    Box::pin(
+                        self.execute_query(
+                            query,
+                            ExecuteQueryFor::FreshQuery,
+                            None,
+                            caller_information,
+                            lock_guard,
+                        )
+                        .instrument(span),
                     )
-                    .await;
                 } else {
-                    self.repair_query(query, caller_information, lock_guard)
-                        .await;
+                    Box::pin(
+                        self.repair_query(
+                            query,
+                            caller_information,
+                            lock_guard,
+                        )
+                        .instrument(span),
+                    )
                 }
             }
 
-            WriteGuard::BackwardProjectionLockGuard(lock_guard) => {
+            WriteGuard::BackwardProjectionLockGuard(lock_guard) => Box::pin(
                 self.invoke_backward_projections(
+                    query,
                     caller_information,
                     lock_guard,
                 )
-                .await;
-            }
+                .instrument(span),
+            ),
         }
     }
 }

@@ -1,27 +1,32 @@
 use crate::{
-    Engine, Query,
+    Engine,
     config::Config,
     engine::computation_graph::{
         caller::{CallerInformation, CallerKind, QueryCaller},
-        database::{NodeInfo, Snapshot},
+        database::{NodeInfo, Snapshot, ValueSlot},
         slow_path::SlowPath,
     },
     query::QueryID,
 };
 
 /// The result of attempting a fast-path query execution.
-pub enum FastPathResult<V> {
+pub enum FastPathResult {
     ToSlowPath(SlowPath),
-    Hit(Option<V>),
+
+    /// The query is up to date. If the caller requires the value, it has been
+    /// read into the value slot.
+    Hit,
 }
 
 impl<C: Config> Engine<C> {}
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+impl<C: Config> Snapshot<C> {
+    /// `value_slot` must be given if the caller requires the value.
     pub async fn fast_path(
         &mut self,
         caller: &CallerInformation<C>,
-    ) -> FastPathResult<Q::Value> {
+        value_slot: Option<&mut ValueSlot<'_, C>>,
+    ) -> FastPathResult {
         // check if we have the existing query info
         let Some(last_verified) = self.last_verified().await.map(|x| x.0)
         else {
@@ -52,15 +57,14 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         }
 
         // gets the result
-        let query_result = if caller.require_value() {
-            let Some(query_result) = self.query_result().await.cloned() else {
-                return FastPathResult::ToSlowPath(SlowPath::Compute);
-            };
+        if caller.require_value() {
+            let value_slot = value_slot
+                .expect("a caller that requires the value gives a slot for it");
 
-            Some(query_result)
-        } else {
-            None
-        };
+            if !self.read_query_value(value_slot).await {
+                return FastPathResult::ToSlowPath(SlowPath::Compute);
+            }
+        }
 
         if let Some(query_caller) = caller.get_query_caller()
             && query_caller.require_value()
@@ -78,7 +82,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             );
         }
 
-        FastPathResult::Hit(query_result)
+        FastPathResult::Hit
     }
 
     /// Add both forward and backward dependencies for both caller and callee.

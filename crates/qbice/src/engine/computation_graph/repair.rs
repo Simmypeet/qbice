@@ -1,11 +1,9 @@
 use std::{
     ops::Not,
-    pin::Pin,
     sync::{Arc, atomic::AtomicBool},
 };
 
 use fxhash::FxHashSet;
-use qbice_stable_hash::Compact128;
 use tokio::task::JoinSet;
 use tracing::instrument;
 
@@ -14,16 +12,16 @@ use super::{
     slow_path::ExecuteQueryFor,
 };
 use crate::{
-    Engine, Query,
+    Engine,
     config::Config,
     engine::computation_graph::{
-        ActiveComputationGuard, QueryKind, QueryStatus, QueryWithID,
+        ActiveComputationGuard, DynQuery, QueryKind, QueryStatus,
         caller::{CallerInformation, CallerKind, CallerReason, QueryCaller},
         computing::{ComputingLockGuard, QueryComputing},
         database::{Snapshot, Timestamp},
         statistics::Event,
     },
-    executor::CyclicError,
+    executor::{BoxFuture, CyclicError},
     query::QueryID,
 };
 
@@ -60,7 +58,7 @@ pub enum ChunkedCalleeCheckDecision {
     },
 }
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+impl<C: Config> Snapshot<C> {
     #[instrument(
         skip(self, caller_information, lock_guard),
         level = "debug",
@@ -69,7 +67,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     )]
     pub(super) async fn repair_query(
         self,
-        query: &Q,
+        query: DynQuery<'_>,
         caller_information: &CallerInformation<C>,
         lock_guard: ComputingLockGuard<C>,
     ) {
@@ -289,14 +287,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
             join_set.spawn(async move {
                 for tfc in tfc_chunk {
-                    let executor = engine
-                        .executor_registry
-                        .get_executor_entry_by_type_id(&tfc.stable_type_id());
-
-                    let _ = executor
+                    let _ = engine
                         .repair_query_from_query_id(
-                            &engine,
-                            &tfc.compact_hash_128(),
+                            &tfc,
                             &CallerInformation::new(
                                 CallerKind::RepairFirewall,
                                 timestamp,
@@ -355,14 +348,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         // compare the fingerprint.
         if !kind.is_input() {
             // recursively repair the callee first
-            let entry = engine
-                .executor_registry
-                .get_executor_entry_by_type_id(&callee.stable_type_id());
-
-            let _ = entry
+            let _ = engine
                 .repair_query_from_query_id(
-                    engine,
-                    &callee.compact_hash_128(),
+                    callee,
                     &CallerInformation::new(
                         CallerKind::Query(
                             QueryCaller::new_with_pedantic_repair(
@@ -649,22 +637,30 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 }
 
 impl<C: Config> Engine<C> {
-    pub(crate) fn repair_query_from_query_id<'x, Q: Query>(
+    /// Repairs the query with the given ID, whose input is read from the
+    /// database.
+    ///
+    /// The future is boxed, because the repair of a query repairs its callees
+    /// with this function in turn.
+    pub(crate) fn repair_query_from_query_id<'x>(
         self: &'x Arc<Self>,
-        query_id: &'x Compact128,
+        query_id: &'x QueryID,
         called_from: &'x CallerInformation<C>,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<QueryStatus, CyclicError>> + Send + 'x>,
-    > {
+    ) -> BoxFuture<'x, Result<QueryStatus, CyclicError>> {
         Box::pin(async move {
-            let query_input = self.get_query_input::<Q>(query_id).await;
+            let entry = self
+                .executor_registry
+                .get_executor_entry_by_type_id(&query_id.stable_type_id());
 
-            let query_for = QueryWithID {
-                id: QueryID::new::<Q>(*query_id),
-                query: &query_input,
-            };
+            let query_input =
+                entry.get_query_input(self, &query_id.compact_hash_128()).await;
 
-            self.query_for(&query_for, called_from).await.map(|x| x.status)
+            self.query_for(
+                entry.dyn_query(*query_id, query_input.query()),
+                called_from,
+                None,
+            )
+            .await
         })
     }
 }

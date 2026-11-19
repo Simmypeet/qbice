@@ -259,7 +259,7 @@ impl<C: Config> InputSession<C> {
         let query_hash = self.engine.hash(&query);
         let query_id = QueryID::new::<Q>(query_hash);
 
-        let mut snapshot = self.engine.get_exclusive_snapshot(query_hash).await;
+        let mut snapshot = self.engine.get_exclusive_snapshot(query_id).await;
 
         let query_value_fingerprint = self.engine.hash(&new_value);
 
@@ -303,14 +303,16 @@ impl<C: Config> InputSession<C> {
 
             snapshot
                 .set_computed_input(
-                    query,
-                    query_hash,
-                    new_value,
                     query_value_fingerprint,
                     write_buffer,
                     true,
                     ts,
                 )
+                .await;
+
+            snapshot
+                .engine()
+                .set_query(query_hash, query, new_value, write_buffer)
                 .await;
 
             set_input_result
@@ -335,9 +337,10 @@ impl<C: Config> InputSession<C> {
         let query_hash = self.engine.hash(&query);
         let query_id = QueryID::new::<Q>(query_hash);
 
-        let mut snapshot = self.engine.get_exclusive_snapshot(query_hash).await;
+        let mut snapshot = self.engine.get_exclusive_snapshot(query_id).await;
 
-        let current_value = snapshot.query_result().await.cloned();
+        let current_value =
+            self.engine.get_query_result::<Q>(&query_hash).await;
         let new_value = update_fn(current_value);
 
         let query_value_fingerprint = self.engine.hash(&new_value);
@@ -382,14 +385,16 @@ impl<C: Config> InputSession<C> {
 
             snapshot
                 .set_computed_input(
-                    query,
-                    query_hash,
-                    new_value,
                     query_value_fingerprint,
                     write_buffer,
                     true,
                     ts,
                 )
+                .await;
+
+            snapshot
+                .engine()
+                .set_query(query_hash, query, new_value, write_buffer)
                 .await;
 
             set_input_result
@@ -485,16 +490,17 @@ impl<C: Config> InputSession<C> {
                     // Invoke the executor to get the new value
                     let entry =
                         engine.executor_registry.get_executor_entry::<Q>();
-                    let result = entry
-                        .invoke_executor::<Q>(&query, &tracked_engine)
-                        .await;
+                    let result =
+                        entry.invoke_executor(&query, &tracked_engine).await;
 
                     // Wait for any spawned tasks to complete
                     drop(tracked_engine);
                     wait_group.wait().await;
 
                     let new_value = match result {
-                        Ok(value) => value,
+                        Ok(value) => *value
+                            .downcast::<Q::Value>()
+                            .expect("value type mismatch"),
                         Err(panic) => panic.resume_unwind(),
                     };
 
@@ -529,9 +535,9 @@ impl<C: Config> InputSession<C> {
                     Ok(results) => {
                         for refresh_result in results {
                             let mut snapshot = engine
-                                .get_exclusive_snapshot::<Q>(
+                                .get_exclusive_snapshot(QueryID::new::<Q>(
                                     refresh_result.query_input_hash,
-                                )
+                                ))
                                 .await;
 
                             let fingerprint_diff =
@@ -554,15 +560,23 @@ impl<C: Config> InputSession<C> {
 
                             snapshot
                                 .set_computed_input(
-                                    refresh_result.query_input,
-                                    refresh_result.query_input_hash,
-                                    refresh_result.new_value,
                                     refresh_result.query_result_hash,
                                     transaction,
                                     false,
                                     timestamp,
                                 )
                                 .await;
+
+                            engine
+                                .set_query(
+                                    refresh_result.query_input_hash,
+                                    refresh_result.query_input,
+                                    refresh_result.new_value,
+                                    transaction,
+                                )
+                                .await;
+
+                            drop(snapshot);
                         }
                     }
 

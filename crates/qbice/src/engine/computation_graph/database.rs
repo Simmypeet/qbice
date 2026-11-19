@@ -1,9 +1,9 @@
 use std::{
+    any::Any,
     collections::{HashMap, HashSet},
     hash::{BuildHasher, Hash},
     marker::PhantomData,
     mem::ManuallyDrop,
-    pin::Pin,
     sync::Arc,
 };
 
@@ -40,6 +40,7 @@ use crate::{
         },
         guard::GuardExt,
     },
+    executor::{BoxFuture, DynQueryInput, DynValue},
     query::QueryID,
 };
 
@@ -655,6 +656,38 @@ impl<Q: Query> WideColumnValue<QueryStoreColumn> for QueryResult<Q> {
     }
 }
 
+type ReadQueryResultFn<C> = for<'a> fn(
+    engine: &'a Engine<C>,
+    query_input_hash_128: &'a Compact128,
+    slot: &'a mut (dyn Any + Send),
+) -> BoxFuture<'a, bool>;
+
+/// A place for the value of a query, owned by the caller of the query.
+///
+/// The engine runs the query without knowing its type, so the caller, which
+/// does know it, hands over both the place for the value, an
+/// `Option<Q::Value>`, and the function that reads the value into it.
+pub(crate) struct ValueSlot<'a, C: Config> {
+    slot: &'a mut (dyn Any + Send),
+    read: ReadQueryResultFn<C>,
+}
+
+impl<'a, C: Config> ValueSlot<'a, C> {
+    pub fn new<Q: Query>(slot: &'a mut Option<Q::Value>) -> Self {
+        Self { slot, read: Engine::<C>::read_dyn_query_result::<Q> }
+    }
+
+    /// Reads the stored value of the query with the given input hash into the
+    /// slot. Returns whether the value was found.
+    pub async fn read(
+        &mut self,
+        engine: &Engine<C>,
+        query_input_hash_128: &Compact128,
+    ) -> bool {
+        (self.read)(engine, query_input_hash_128, &mut *self.slot).await
+    }
+}
+
 /// The write manager of the storage engine, which creates the maps.
 type WriteManagerOf<C> =
     <<C as Config>::StorageEngine as StorageEngine>::WriteManager;
@@ -833,6 +866,32 @@ impl<C: Config> Engine<C> {
             .unwrap()
     }
 
+    pub(super) async fn get_query_result<Q: Query>(
+        &self,
+        hash128: &Compact128,
+    ) -> Option<Q::Value> {
+        self.computation_graph
+            .database
+            .query_store
+            .get::<QueryResult<Q>>(hash128)
+            .await
+            .map(|x| x.0)
+    }
+
+    /// Stores the input of a query of type `Q` and its value.
+    pub(super) async fn set_query<Q: Query>(
+        &self,
+        hash128: Compact128,
+        query: Q,
+        value: Q::Value,
+        tx: &mut WriteTransaction<C>,
+    ) {
+        let query_store = &self.computation_graph.database.query_store;
+
+        query_store.insert(hash128, QueryInput::<Q>(query), tx).await;
+        query_store.insert(hash128, QueryResult::<Q>(value), tx).await;
+    }
+
     /// Directly access the node info without any lock.
     ///
     /// This is only acceptable if you've made sure that the node has no
@@ -924,12 +983,10 @@ impl<C: Config> Engine<C> {
         })
     }
 
-    pub(crate) fn get_query_debug_future<'s, Q: Query>(
-        &'s self,
+    pub(crate) fn get_query_debug_future<Q: Query>(
+        &self,
         query_id: Compact128,
-    ) -> Pin<
-        Box<dyn std::future::Future<Output = Option<QueryDebug>> + Send + 's>,
-    > {
+    ) -> BoxFuture<'_, Option<QueryDebug>> {
         Box::pin(async move { self.get_query_debug::<Q>(query_id).await })
     }
 
@@ -942,7 +999,66 @@ impl<C: Config> Engine<C> {
     }
 }
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+/// The functions behind the operations of a query type that the engine calls
+/// without knowing the type: those of [`crate::executor::Entry`] and
+/// [`ValueSlot`].
+impl<C: Config> Engine<C> {
+    pub(crate) fn hash_dyn_value<Q: Query>(
+        &self,
+        value: &(dyn Any + Send + Sync),
+    ) -> Compact128 {
+        self.hash(
+            value.downcast_ref::<Q::Value>().expect("value type mismatch"),
+        )
+    }
+
+    pub(crate) fn clone_dyn_query<Q: Query>(
+        query: &(dyn Any + Send + Sync),
+    ) -> DynQueryInput {
+        DynQueryInput::new(
+            query.downcast_ref::<Q>().expect("query type mismatch").clone(),
+        )
+    }
+
+    pub(crate) fn get_dyn_query_input<'a, Q: Query>(
+        &'a self,
+        hash128: &'a Compact128,
+    ) -> BoxFuture<'a, DynQueryInput> {
+        Box::pin(async move {
+            DynQueryInput::new(self.get_query_input::<Q>(hash128).await)
+        })
+    }
+
+    pub(crate) fn set_dyn_query<'a, Q: Query>(
+        &'a self,
+        hash128: Compact128,
+        query: DynQueryInput,
+        value: DynValue,
+        tx: &'a mut WriteTransaction<C>,
+    ) -> BoxFuture<'a, ()> {
+        let query = query.downcast::<Q>();
+        let value = *value.downcast::<Q::Value>().expect("value type mismatch");
+
+        Box::pin(self.set_query::<Q>(hash128, query, value, tx))
+    }
+
+    fn read_dyn_query_result<'a, Q: Query>(
+        &'a self,
+        hash128: &'a Compact128,
+        slot: &'a mut (dyn Any + Send),
+    ) -> BoxFuture<'a, bool> {
+        let slot = slot
+            .downcast_mut::<Option<Q::Value>>()
+            .expect("value slot type mismatch");
+
+        Box::pin(async move {
+            *slot = self.get_query_result::<Q>(hash128).await;
+            slot.is_some()
+        })
+    }
+}
+
+impl<C: Config> Snapshot<C> {
     #[allow(clippy::option_option)]
     pub async fn clean_query(
         &mut self,
@@ -1003,9 +1119,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[inline(never)]
     pub(super) async fn set_computed(
         mut self,
-        query: Q,
-        query_value: Q::Value,
-        query_value_fingerprint: Option<Compact128>,
+        query: DynQueryInput,
+        query_value: DynValue,
+        query_value_fingerprint: Compact128,
         query_kind: QueryKind,
         forward_edge_order: Arc<[NodeDependency]>,
         forward_edge_observations: HashMap<
@@ -1022,8 +1138,11 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     ) {
         self.upgrade_to_exclusive().await;
 
-        let query_value_fingerprint = query_value_fingerprint
-            .unwrap_or_else(|| self.engine().hash(&query_value));
+        let engine = self.engine().clone();
+        let entry = engine
+            .executor_registry
+            .get_executor_entry_by_type_id(&self.query_id().stable_type_id());
+
         let transitive_firewall_callees_fingerprint =
             self.engine().hash(&tfc_achetype);
 
@@ -1040,9 +1159,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             transitive_firewall_callees_fingerprint,
             tfc_achetype,
         );
-
-        let query_input = QueryInput::<Q>(query);
-        let query_result = QueryResult::<Q>(query_value);
 
         {
             // The callees that the query read when it was last computed, and
@@ -1141,24 +1257,12 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 .insert(*self.query_id(), new_forward_edges, &mut tx)
                 .await;
 
-            self.engine()
-                .computation_graph
-                .database
-                .query_store
-                .insert(
+            entry
+                .set_query(
+                    &engine,
                     self.query_id().compact_hash_128(),
-                    query_input,
-                    &mut tx,
-                )
-                .await;
-
-            self.engine()
-                .computation_graph
-                .database
-                .query_store
-                .insert(
-                    self.query_id().compact_hash_128(),
-                    query_result,
+                    query,
+                    query_value,
                     &mut tx,
                 )
                 .await;
@@ -1181,18 +1285,17 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Records the query as an input with the given value fingerprint. The
+    /// caller stores the query input and its value afterwards, with
+    /// [`Engine::set_query`], before it lets go of the snapshot.
     pub(super) async fn set_computed_input(
-        mut self,
-        query: Q,
-        query_hash_128: Compact128,
-        query_value: Q::Value,
+        &mut self,
         query_value_fingerprint: Compact128,
         tx: &mut WriteTransaction<C>,
         set_input: bool,
         timestamp: Timestamp,
     ) {
-        let query_id = QueryID::new::<Q>(query_hash_128);
+        let query_id = *self.query_id();
 
         // if have an existing forward edges, unwire the backward edges
         let existing_forward_edges = self.forward_edge_order().await.cloned();
@@ -1225,9 +1328,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             transitive_firewall_callees_fingerprint,
             transitive_firewall_callees,
         );
-
-        let query_input = QueryInput::<Q>(query);
-        let query_result = QueryResult::<Q>(query_value);
 
         {
             if let Some(forward_edges) = existing_forward_edges {
@@ -1274,20 +1374,6 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
                 .database
                 .node_info
                 .insert(query_id, node_info, tx)
-                .await;
-
-            self.engine()
-                .computation_graph
-                .database
-                .query_store
-                .insert(query_id.compact_hash_128(), query_input, tx)
-                .await;
-
-            self.engine()
-                .computation_graph
-                .database
-                .query_store
-                .insert(query_id.compact_hash_128(), query_result, tx)
                 .await;
         }
     }

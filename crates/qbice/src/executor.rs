@@ -11,8 +11,8 @@
 //! [`TrackedEngine`].
 
 use std::{
-    any::Any, collections::HashMap, mem::MaybeUninit, panic::AssertUnwindSafe,
-    pin::Pin, sync::Arc,
+    any::Any, collections::HashMap, panic::AssertUnwindSafe, pin::Pin,
+    sync::Arc,
 };
 
 use futures::FutureExt;
@@ -21,9 +21,11 @@ use qbice_stable_type_id::StableTypeID;
 
 use crate::{
     Engine, TrackedEngine,
-    config::Config,
-    engine::computation_graph::{CallerInformation, QueryDebug, QueryStatus},
-    query::{ExecutionStyle, Query},
+    config::{Config, WriteTransaction},
+    engine::computation_graph::{
+        DynQuery, FmtQueryFn, QueryDebug, fmt_dyn_query,
+    },
+    query::{ExecutionStyle, Query, QueryID},
 };
 
 /// Error indicating that a cyclic query dependency was detected.
@@ -248,75 +250,108 @@ pub trait Executor<Q: Query, C: Config>: 'static + Send + Sync {
     fn scc_value() -> Q::Value { panic!("SCC value is not specified") }
 }
 
+/// A query value whose type is known only to the [`Entry`] of its query type.
+pub(crate) type DynValue = Box<dyn Any + Send + Sync>;
+
+/// An owned query whose type is known only to the [`Entry`] of its query
+/// type.
+///
+/// It formats the way that the query does, like [`DynQuery`], so that code
+/// that keeps a copy of the query past the borrow of the [`DynQuery`] can
+/// still log it.
+pub(crate) struct DynQueryInput {
+    query: Box<dyn Any + Send + Sync>,
+    fmt: FmtQueryFn,
+}
+
+impl DynQueryInput {
+    pub fn new<Q: Query>(query: Q) -> Self {
+        Self { query: Box::new(query), fmt: fmt_dyn_query::<Q> }
+    }
+
+    pub fn query(&self) -> &(dyn Any + Send + Sync) { &*self.query }
+
+    /// Takes the query out; `Q` must be its type.
+    pub fn downcast<Q: Query>(self) -> Q {
+        *self.query.downcast::<Q>().expect("query type mismatch")
+    }
+}
+
+impl std::fmt::Debug for DynQueryInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (self.fmt)(&*self.query, f)
+    }
+}
+
+/// A boxed future, which is what the type-erased functions of an [`Entry`]
+/// return.
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 fn invoke_executor<
     'a,
     C: Config,
     E: Executor<K, C> + 'static,
     K: Query + 'static,
 >(
-    key: &'a dyn Any,
-    executor: &'a dyn Any,
+    key: &'a (dyn Any + Send + Sync),
+    executor: &'a (dyn Any + Send + Sync),
     engine: &'a TrackedEngine<C>,
-    result: &'a mut (dyn Any + Send),
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+) -> BoxFuture<'a, Result<DynValue, Panicked>> {
     let key = key.downcast_ref::<K>().expect("Key type mismatch");
     let executor =
         executor.downcast_ref::<E>().expect("Executor type mismatch");
 
     Box::pin(async {
-        let result_buffer: &mut MaybeUninit<Result<K::Value, Panicked>> =
-            result.downcast_mut().expect("Result type mismatch");
-
-        let result = AssertUnwindSafe(executor.execute(key, engine))
+        AssertUnwindSafe(executor.execute(key, engine))
             .catch_unwind()
             .await
-            .map_err(Panicked);
-
-        // SAFETY: we're initializing the buffer here
-        result_buffer.write(result);
+            .map(|value| Box::new(value) as DynValue)
+            .map_err(Panicked)
     })
 }
 
 type InvokeExecutorFn<C> =
     for<'a> fn(
-        key: &'a dyn Any,
-        executor: &'a dyn Any,
+        key: &'a (dyn Any + Send + Sync),
+        executor: &'a (dyn Any + Send + Sync),
         engine: &'a TrackedEngine<C>,
-        result: &'a mut (dyn Any + Send),
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+    ) -> BoxFuture<'a, Result<DynValue, Panicked>>;
 
-type RepairQueryFn<C> = for<'a> fn(
-    engine: &'a Arc<Engine<C>>,
-    query_id: &'a Compact128,
-    called_from: &'a CallerInformation<C>,
-) -> Pin<
-    Box<dyn Future<Output = Result<QueryStatus, CyclicError>> + Send + 'a>,
->;
-
-type ObtainSccValueFn = for<'a> fn(buffer: &'a mut dyn Any);
+type ObtainSccValueFn = fn() -> DynValue;
 
 type ObtainExecutionStyleFn = fn() -> ExecutionStyle;
+
+type HashValueFn<C> = for<'a> fn(
+    engine: &'a Engine<C>,
+    value: &'a (dyn Any + Send + Sync),
+) -> Compact128;
+
+type CloneQueryFn = fn(query: &(dyn Any + Send + Sync)) -> DynQueryInput;
+
+type GetQueryInputFn<C> = for<'a> fn(
+    engine: &'a Engine<C>,
+    query_input_hash_128: &'a Compact128,
+) -> BoxFuture<'a, DynQueryInput>;
+
+type SetQueryFn<C> = for<'a> fn(
+    engine: &'a Engine<C>,
+    query_input_hash_128: Compact128,
+    query: DynQueryInput,
+    value: DynValue,
+    tx: &'a mut WriteTransaction<C>,
+) -> BoxFuture<'a, ()>;
 
 type DebugQueryFn<C> = for<'a> fn(
     engine: &'a Engine<C>,
     query_input_hash_128: Compact128,
-) -> Pin<
-    Box<dyn Future<Output = Option<QueryDebug>> + Send + 'a>,
->;
+) -> BoxFuture<'a, Option<QueryDebug>>;
 
 fn obtain_scc_value<
     C: Config,
     E: Executor<K, C> + 'static,
     K: Query + 'static,
->(
-    buffer: &mut dyn Any,
-) {
-    let buffer = buffer
-        .downcast_mut::<MaybeUninit<K::Value>>()
-        .expect("SCC value buffer type mismatch");
-
-    let scc_value = E::scc_value();
-    buffer.write(scc_value);
+>() -> DynValue {
+    Box::new(E::scc_value())
 }
 
 fn obtain_execution_style<
@@ -327,15 +362,26 @@ fn obtain_execution_style<
     E::execution_style()
 }
 
+/// The registration of one query type: its executor, and every operation the
+/// engine needs that depends on the query type.
+///
+/// The engine runs a query through code that does not know the query's type,
+/// and calls these function pointers for the few steps that do. They are
+/// instantiated once per query type, where the executor is registered, rather
+/// than once for every place that calls the query.
 #[derive(Debug, Clone)]
 pub(crate) struct Entry<C: Config> {
     executor: Arc<dyn Any + Send + Sync>,
     query_type_name: &'static str,
+    fmt_query: FmtQueryFn,
     invoke_executor: InvokeExecutorFn<C>,
     query_debug: DebugQueryFn<C>,
-    repair_query: RepairQueryFn<C>,
     obtain_scc_value: ObtainSccValueFn,
     obtain_execution_style: ObtainExecutionStyleFn,
+    hash_value: HashValueFn<C>,
+    clone_query: CloneQueryFn,
+    get_query_input: GetQueryInputFn<C>,
+    set_query: SetQueryFn<C>,
 }
 
 impl<C: Config> Entry<C> {
@@ -345,11 +391,15 @@ impl<C: Config> Entry<C> {
         Self {
             executor,
             query_type_name: std::any::type_name::<Q>(),
+            fmt_query: fmt_dyn_query::<Q>,
             invoke_executor: invoke_executor::<C, E, Q>,
             query_debug: Engine::<C>::get_query_debug_future::<Q>,
-            repair_query: Engine::<C>::repair_query_from_query_id::<Q>,
             obtain_scc_value: obtain_scc_value::<C, E, Q>,
             obtain_execution_style: obtain_execution_style::<C, E, Q>,
+            hash_value: Engine::<C>::hash_dyn_value::<Q>,
+            clone_query: Engine::<C>::clone_dyn_query::<Q>,
+            get_query_input: Engine::<C>::get_dyn_query_input::<Q>,
+            set_query: Engine::<C>::set_dyn_query::<Q>,
         }
     }
 
@@ -358,44 +408,70 @@ impl<C: Config> Entry<C> {
         self.query_type_name
     }
 
-    pub async fn invoke_executor<Q: Query>(
+    /// Pairs `query`, which must be of the query type of this entry, with its
+    /// ID.
+    pub fn dyn_query<'a>(
         &self,
-        query_key: &Q,
+        id: QueryID,
+        query: &'a (dyn Any + Send + Sync),
+    ) -> DynQuery<'a> {
+        DynQuery::from_parts(id, query, self.query_type_name, self.fmt_query)
+    }
+
+    /// Runs the executor on `query_key`, which must be of the query type of
+    /// this entry.
+    pub async fn invoke_executor(
+        &self,
+        query_key: &(dyn Any + Send + Sync),
         engine: &TrackedEngine<C>,
-    ) -> Result<Q::Value, Panicked> {
-        let mut result_buffer =
-            MaybeUninit::<Result<Q::Value, Panicked>>::uninit();
-
-        (self.invoke_executor)(
-            query_key,
-            self.executor.as_ref(),
-            engine,
-            &mut result_buffer,
-        )
-        .await;
-
-        // SAFETY: the previous call should've initialized the buffer
-        unsafe { result_buffer.assume_init() }
+    ) -> Result<DynValue, Panicked> {
+        (self.invoke_executor)(query_key, self.executor.as_ref(), engine).await
     }
 
-    pub async fn repair_query_from_query_id(
-        &self,
-        engine: &Arc<Engine<C>>,
-        query_id: &Compact128,
-        caller_information: &CallerInformation<C>,
-    ) -> Result<QueryStatus, CyclicError> {
-        (self.repair_query)(engine, query_id, caller_information).await
-    }
-
-    pub fn obtain_scc_value<Q: Query>(&self) -> Q::Value {
-        let mut buffer = MaybeUninit::<Q::Value>::uninit();
-        (self.obtain_scc_value)(&mut buffer);
-
-        unsafe { buffer.assume_init() }
-    }
+    pub fn obtain_scc_value(&self) -> DynValue { (self.obtain_scc_value)() }
 
     pub fn obtain_execution_style(&self) -> ExecutionStyle {
         (self.obtain_execution_style)()
+    }
+
+    /// Fingerprints `value`, which must be a value of the query type of this
+    /// entry.
+    pub fn hash_value(
+        &self,
+        engine: &Engine<C>,
+        value: &(dyn Any + Send + Sync),
+    ) -> Compact128 {
+        (self.hash_value)(engine, value)
+    }
+
+    /// Clones `query`, which must be of the query type of this entry.
+    pub fn clone_query(
+        &self,
+        query: &(dyn Any + Send + Sync),
+    ) -> DynQueryInput {
+        (self.clone_query)(query)
+    }
+
+    /// Reads the stored query input with the given hash.
+    pub async fn get_query_input(
+        &self,
+        engine: &Engine<C>,
+        query_input_hash_128: &Compact128,
+    ) -> DynQueryInput {
+        (self.get_query_input)(engine, query_input_hash_128).await
+    }
+
+    /// Stores the query input and its value; both must be of the query type of
+    /// this entry.
+    pub async fn set_query(
+        &self,
+        engine: &Engine<C>,
+        query_input_hash_128: Compact128,
+        query: DynQueryInput,
+        value: DynValue,
+        tx: &mut WriteTransaction<C>,
+    ) {
+        (self.set_query)(engine, query_input_hash_128, query, value, tx).await;
     }
 
     pub async fn get_query_debug(
@@ -461,6 +537,26 @@ impl<C: Config> Registry<C> {
         type_id: &StableTypeID,
     ) -> Option<&Entry<C>> {
         self.executors_by_key_type_id.get(type_id)
+    }
+
+    /// Retrieves the executor entry for the type of the given query.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no executor is registered for the query type.
+    #[must_use]
+    pub(crate) fn get_executor_entry_of(
+        &self,
+        query: DynQuery<'_>,
+    ) -> &Entry<C> {
+        self.executors_by_key_type_id
+            .get(&query.id().stable_type_id())
+            .unwrap_or_else(|| {
+                panic!(
+                    "Failed to find executor for query name: {}",
+                    query.type_name()
+                )
+            })
     }
 
     /// Retrieves the executor entry for the given query type.

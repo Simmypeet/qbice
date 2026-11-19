@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use qbice_stable_hash::Compact128;
-use qbice_storage::{dynamic_map::DynamicMap as _, single_map::SingleMap as _};
+use qbice_storage::single_map::SingleMap as _;
 
 use crate::{
-    Config, Engine, Query,
+    Config, Engine,
     engine::computation_graph::{
         QueryKind,
         database::{
             ForwardEdgeObservation, ForwardEdgeOrder, ForwardEdges,
-            LastVerified, NodeInfo, PendingBackwardProjection, QueryResult,
+            LastVerified, NodeInfo, PendingBackwardProjection, ValueSlot,
         },
         query_lock_manager::QueryLock,
     },
@@ -33,8 +33,16 @@ use crate::{
 /// query that is computed for the first time would otherwise ask the database
 /// once for every piece it reads, and every one of those reads comes back
 /// empty.
+///
+/// # No query type
+///
+/// The snapshot does not know the type of its query, and neither does the
+/// code that runs a query with it. The steps that need the type go through the
+/// registry entry of the query type, or through a function that the caller of
+/// the query passes along. Being generic over the query type would copy all of
+/// that code for every query type, in every crate that calls the query.
 #[allow(clippy::option_option)]
-pub struct Snapshot<C: Config, Q: Query> {
+pub struct Snapshot<C: Config> {
     engine: Arc<Engine<C>>,
     lock: Option<QueryLock>,
     query_id: QueryID,
@@ -43,16 +51,14 @@ pub struct Snapshot<C: Config, Q: Query> {
     node_info: Option<Option<NodeInfo>>,
     pending_backward_projection: Option<Option<PendingBackwardProjection>>,
     forward_edges: Option<Option<ForwardEdges<C>>>,
-    query_result: Option<Option<Q::Value>>,
 }
 
 impl<C: Config> Engine<C> {
     /// Acquires a read snapshot for the given query.
-    pub(crate) async fn get_read_snapshot<Q: Query>(
+    pub(crate) async fn get_read_snapshot(
         self: &Arc<Self>,
-        hash128: Compact128,
-    ) -> Snapshot<C, Q> {
-        let query_id = QueryID::new::<Q>(hash128);
+        query_id: QueryID,
+    ) -> Snapshot<C> {
         let lock = self
             .computation_graph
             .lock_manager
@@ -68,16 +74,14 @@ impl<C: Config> Engine<C> {
             node_info: None,
             pending_backward_projection: None,
             forward_edges: None,
-            query_result: None,
         }
     }
 
     /// Acquires a read snapshot for the given query.
-    pub(crate) async fn get_exclusive_snapshot<Q: Query>(
+    pub(crate) async fn get_exclusive_snapshot(
         self: &Arc<Self>,
-        hash128: Compact128,
-    ) -> Snapshot<C, Q> {
-        let query_id = QueryID::new::<Q>(hash128);
+        query_id: QueryID,
+    ) -> Snapshot<C> {
         let lock = self
             .computation_graph
             .lock_manager
@@ -93,12 +97,11 @@ impl<C: Config> Engine<C> {
             node_info: None,
             pending_backward_projection: None,
             forward_edges: None,
-            query_result: None,
         }
     }
 }
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+impl<C: Config> Snapshot<C> {
     /// Records that nothing has been written about the query node, so that
     /// none of it is looked up.
     fn set_never_computed(&mut self) {
@@ -199,21 +202,10 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         self.forward_edges().await.map(|x| &x.observation)
     }
 
-    pub async fn query_result(&mut self) -> Option<&Q::Value> {
-        if self.query_result.is_none() {
-            let value = self
-                .engine
-                .computation_graph
-                .database
-                .query_store
-                .get::<QueryResult<Q>>(&self.query_id.compact_hash_128())
-                .await
-                .map(|x| x.0);
-
-            self.query_result = Some(value);
-        }
-
-        self.query_result.as_ref().and_then(Option::as_ref)
+    /// Reads the value of the query into `slot`. Returns whether the value was
+    /// found.
+    pub async fn read_query_value(&self, slot: &mut ValueSlot<'_, C>) -> bool {
+        slot.read(&self.engine, &self.query_id.compact_hash_128()).await
     }
 
     pub const fn query_id(&self) -> &QueryID { &self.query_id }
@@ -246,6 +238,5 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
         self.node_info = None;
         self.pending_backward_projection = None;
         self.forward_edges = None;
-        self.query_result = None;
     }
 }

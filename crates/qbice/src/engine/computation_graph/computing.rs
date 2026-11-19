@@ -12,11 +12,11 @@ use scc::hash_map::Entry;
 use tokio::sync::{Notify, futures::OwnedNotified};
 
 use crate::{
-    Engine, ExecutionStyle, Query, TrackedEngine,
+    Engine, ExecutionStyle, TrackedEngine,
     config::{Config, WriteTransaction},
     engine::{
         computation_graph::{
-            CallerInformation, QueryKind,
+            CallerInformation, DynQuery, QueryKind,
             database::{
                 NodeDependency, NodeInfo, Observation, Snapshot, Timestamp,
             },
@@ -26,7 +26,7 @@ use crate::{
         },
         guard::GuardExt,
     },
-    executor::CyclicError,
+    executor::{CyclicError, DynQueryInput, DynValue},
     query::QueryID,
 };
 
@@ -459,9 +459,10 @@ impl<C: Config> Engine<C> {
     }
 }
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+impl<C: Config> Snapshot<C> {
     async fn computing_lock_guard(
         mut self,
+        query: DynQuery<'_>,
         caller_information: &CallerInformation<C>,
     ) -> Option<(Self, ComputingLockGuard<C>)> {
         // we have to double check if we still really need to compute
@@ -479,7 +480,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
             (ComputingMode::Repair, kind)
         } else {
             let executor =
-                self.engine().executor_registry.get_executor_entry::<Q>();
+                self.engine().executor_registry.get_executor_entry_of(query);
 
             let style = executor.obtain_execution_style();
 
@@ -588,12 +589,13 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
     pub(super) async fn get_write_guard(
         self,
+        query: DynQuery<'_>,
         slow_path: SlowPath,
         caller_information: &CallerInformation<C>,
     ) -> Option<(Self, WriteGuard<C>)> {
         match slow_path {
             SlowPath::Compute | SlowPath::Repair => self
-                .computing_lock_guard(caller_information)
+                .computing_lock_guard(query, caller_information)
                 .await
                 .map(|x| (x.0, WriteGuard::ComputingLockGuard(x.1))),
 
@@ -605,7 +607,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     }
 }
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+impl<C: Config> Snapshot<C> {
     #[allow(clippy::option_option)]
     pub(super) async fn computing_lock_to_clean_query(
         mut self,
@@ -631,9 +633,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn computing_lock_to_computed(
         self,
-        query: Q,
-        value: Q::Value,
-        query_value_fingerprint: Option<Compact128>,
+        query: DynQueryInput,
+        value: DynValue,
+        query_value_fingerprint: Compact128,
         mut lock_guard: ComputingLockGuard<C>,
         has_pending_backward_projection: bool,
         current_timestamp: Timestamp,

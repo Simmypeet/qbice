@@ -4,24 +4,22 @@ use tokio::task::JoinSet;
 use tracing::instrument;
 
 use crate::{
-    Query,
     config::Config,
     engine::computation_graph::{
-        CallerInformation, caller::CallerKind,
+        CallerInformation, DynQuery, caller::CallerKind,
         computing::BackwardProjectionLockGuard, database::Snapshot,
     },
 };
 
-impl<C: Config, Q: Query> Snapshot<C, Q> {
+impl<C: Config> Snapshot<C> {
     #[instrument(
         skip(self, caller_information, backward_projection_lock_guard),
         level = "debug",
-        fields(
-            type = std::any::type_name::<Q>(),
-        )
+        fields(type = query.type_name())
     )]
     pub(super) async fn invoke_backward_projections(
         self,
+        query: DynQuery<'_>,
         caller_information: &CallerInformation<C>,
         backward_projection_lock_guard: BackwardProjectionLockGuard<C>,
     ) {
@@ -42,7 +40,7 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
         tracing::debug!(
             target: "qbice::dirty",
-            query = std::any::type_name::<Q>(),
+            query = query.type_name(),
             projections = backward_projections.len(),
             "rerunning the projections of a changed query"
         );
@@ -67,15 +65,9 @@ impl<C: Config, Q: Query> Snapshot<C, Q> {
 
             join_set.spawn(async move {
                 for query_id in chunk {
-                    let entry =
-                        engine.executor_registry.get_executor_entry_by_type_id(
-                            &query_id.stable_type_id(),
-                        );
-
-                    let _ = entry
+                    let _ = engine
                         .repair_query_from_query_id(
-                            &engine,
-                            &query_id.compact_hash_128(),
+                            &query_id,
                             &CallerInformation::new(
                                 CallerKind::BackwardProjectionPropagation,
                                 timestamp,
